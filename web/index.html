@@ -13,7 +13,10 @@
         <div class="board-wrap" id="board-wrap">
           <canvas id="board" aria-label="Go board"></canvas>
         </div>
-        <p class="caption" id="variation-label" hidden></p>
+        <div class="caption-row" id="caption-row" hidden>
+          <p class="caption" id="variation-label"></p>
+          <button type="button" class="hide-overlay" id="hide-overlay" title="Hide the drawing (Esc)" aria-label="Hide the drawing">✕ Hide</button>
+        </div>
       </main>
 
       <aside class="panel">
@@ -22,41 +25,62 @@
           <span class="conn" id="conn" hidden>reconnecting…</span>
         </header>
 
-        <section class="card status" aria-live="polite">
-          <p class="turn" id="turn">Connecting…</p>
-          <dl class="facts">
-            <div><dt>Captures</dt><dd id="captures">–</dd></div>
-            <div><dt>Bot</dt><dd id="bot-rank">–</dd></div>
-            <div><dt>Tutor</dt><dd><span class="dot" id="tutor-dot"></span><span id="tutor-text">–</span></dd></div>
-          </dl>
+        <section class="card status collapsible" data-card="status" aria-live="polite">
+          <h2 class="card-head">
+            <button type="button" class="card-toggle" aria-expanded="true" aria-controls="status-body">
+              <span class="turn" id="turn">Connecting…</span>
+              <span class="chevron" aria-hidden="true"></span>
+            </button>
+          </h2>
+          <div class="card-body" id="status-body">
+            <dl class="facts">
+              <div><dt>Captures</dt><dd id="captures">–</dd></div>
+              <div><dt>Bot</dt><dd id="bot-rank">–</dd></div>
+              <div><dt>Tutor</dt><dd><span class="dot" id="tutor-dot"></span><span id="tutor-text">–</span></dd></div>
+            </dl>
+          </div>
         </section>
 
-        <section class="card controls">
-          <div class="row">
-            <button id="pass" title="Pass (P)">Pass</button>
-            <button id="hint" title="Hint (H)">Hint</button>
-            <button id="practice" title="Practice problems from your mistakes">Practice</button>
-            <button id="resign" class="danger">Resign</button>
+        <section class="card controls collapsible" data-card="controls">
+          <h2 class="card-head">
+            <button type="button" class="card-toggle" aria-expanded="true" aria-controls="controls-body">
+              <span class="label">Controls</span>
+              <span class="card-summary" id="level-summary"></span>
+              <span class="chevron" aria-hidden="true"></span>
+            </button>
+          </h2>
+          <div class="card-body" id="controls-body">
+            <div class="row">
+              <button id="pass" title="Pass (P)">Pass</button>
+              <button id="hint" title="Hint (H)">Hint</button>
+              <button id="practice" title="Practice problems from your mistakes">Practice</button>
+              <button id="resign" class="danger">Resign</button>
+            </div>
+            <fieldset class="levels" id="levels">
+              <legend>Tutor help during games</legend>
+              <div class="segmented" id="level-options"></div>
+              <p class="level-desc" id="level-desc"></p>
+            </fieldset>
+            <form class="new-game" id="new-game">
+              <label>Size
+                <select id="ng-size">
+                  <option value="9">9×9</option>
+                  <option value="13">13×13</option>
+                  <option value="19">19×19</option>
+                </select>
+              </label>
+              <label>Bot
+                <select id="ng-rank"></select>
+              </label>
+              <label>You
+                <select id="ng-color">
+                  <option value="B">Black</option>
+                  <option value="W">White</option>
+                </select>
+              </label>
+              <button type="submit" class="primary">New game</button>
+            </form>
           </div>
-          <form class="new-game" id="new-game">
-            <label>Size
-              <select id="ng-size">
-                <option value="9">9×9</option>
-                <option value="13">13×13</option>
-                <option value="19">19×19</option>
-              </select>
-            </label>
-            <label>Bot
-              <select id="ng-rank"></select>
-            </label>
-            <label>You
-              <select id="ng-color">
-                <option value="B">Black</option>
-                <option value="W">White</option>
-              </select>
-            </label>
-            <button type="submit" class="primary">New game</button>
-          </form>
         </section>
 
         <section class="card moment" id="moment" hidden>
@@ -84,26 +108,36 @@
           </div>
         </section>
 
-        <section class="card eval" id="eval">
-          <div class="eval-head">
-            <span class="label">Last move</span>
-            <span class="loss" id="eval-loss">–</span>
+        <section class="card eval collapsible" id="eval" data-card="eval">
+          <h2 class="card-head">
+            <button type="button" class="card-toggle" aria-expanded="true" aria-controls="eval-body">
+              <span class="label">Last move</span>
+              <span class="loss card-summary" id="eval-loss">–</span>
+              <span class="chevron" aria-hidden="true"></span>
+            </button>
+          </h2>
+          <div class="card-body" id="eval-body">
+            <p class="eval-detail" id="eval-detail">No moves yet.</p>
+            <svg class="spark" id="spark" viewBox="0 0 300 44" preserveAspectRatio="none" aria-label="Point loss per move"></svg>
           </div>
-          <p class="eval-detail" id="eval-detail">No moves yet.</p>
-          <svg class="spark" id="spark" viewBox="0 0 300 44" preserveAspectRatio="none" aria-label="Point loss per move"></svg>
         </section>
 
-        <section class="card progress" id="progress" hidden>
-          <div class="eval-head">
-            <span class="label">Progress</span>
-            <span class="rank" id="pr-rank" title="Your estimated rank">–</span>
+        <section class="card progress collapsible" id="progress" data-card="progress" hidden>
+          <h2 class="card-head">
+            <button type="button" class="card-toggle" aria-expanded="true" aria-controls="progress-body">
+              <span class="label">Progress</span>
+              <span class="rank card-summary" id="pr-rank" title="Your estimated rank">–</span>
+              <span class="chevron" aria-hidden="true"></span>
+            </button>
+          </h2>
+          <div class="card-body" id="progress-body">
+            <dl class="facts">
+              <div><dt>Next bot</dt><dd id="pr-bot">–</dd></div>
+              <div><dt>Games</dt><dd id="pr-games">–</dd></div>
+              <div><dt>Work on</dt><dd id="pr-cats">–</dd></div>
+            </dl>
+            <svg class="spark rating-spark" id="pr-spark" viewBox="0 0 300 32" preserveAspectRatio="none" aria-label="Rating over recent games"></svg>
           </div>
-          <dl class="facts">
-            <div><dt>Next bot</dt><dd id="pr-bot">–</dd></div>
-            <div><dt>Games</dt><dd id="pr-games">–</dd></div>
-            <div><dt>Work on</dt><dd id="pr-cats">–</dd></div>
-          </dl>
-          <svg class="spark rating-spark" id="pr-spark" viewBox="0 0 300 32" preserveAspectRatio="none" aria-label="Rating over recent games"></svg>
         </section>
 
         <section class="card chat">

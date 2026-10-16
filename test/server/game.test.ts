@@ -80,6 +80,7 @@ describe("GameController", () => {
     expect(v.overlay?.variation?.moves[0]!.color).toBe("B");
     expect(v.overlay?.variation?.fromMove).toBe(1);
     expect(v.overlay?.marks).toEqual([{ point: C3, kind: "x" }]);
+    expect(v.overlay?.best).toEqual(E5); // KataGo's move is highlighted as part of the drawing
     expect(v.chat.at(-1)).toMatchObject({ from: "system", momentId: v.moment!.id });
     expect(v.chat.at(-1)!.text).toMatch(/C3 cost about 6\.2 points.*E5/);
     expect(types()).toEqual(["game_start", "move", "teaching_moment", "fallback"]);
@@ -112,6 +113,28 @@ describe("GameController", () => {
       { color: "B", point: D4 },
     ]);
     expect(ctl.view().overlay?.marks).toBeUndefined(); // C3 is already numbered in the line
+  });
+
+  it("KataGo's highlighted move lives in the fallback drawing: resume keeps it, Hide removes it, a new line replaces it", async () => {
+    setup({ tutor: true });
+    await startGame();
+    engine.lossAfter(["C3"], 8);
+    ctl.play(C3);
+    await flush();
+    clock.advance(30_000); // the tutor is too slow
+    expect(ctl.view().moment?.state).toBe("fallback");
+    expect(ctl.view().overlay?.best).toEqual(E5);
+    // The tutor comes in late and resumes: the drawing, highlight included, waits for Continue.
+    await ctl.handleTutor({ type: "resume" });
+    expect(ctl.view().moment).toMatchObject({ state: "tutor", awaitingLearner: true });
+    expect(ctl.view().overlay?.best).toEqual(E5);
+    // A new line replaces KataGo's, highlight and all.
+    await ctl.handleTutor({ type: "show", moves: ["D4"], start: "W" });
+    expect(ctl.view().overlay?.best).toBeUndefined();
+    expect(ctl.view().overlay?.marks).toEqual([{ point: C3, kind: "x" }]);
+    // Hiding the drawing removes everything on it.
+    await ctl.handleAction({ type: "clear_overlay" });
+    expect(ctl.view().overlay).toBeNull();
   });
 
   it("draws a tutor's show after a rethink on the current position", async () => {
@@ -151,10 +174,76 @@ describe("GameController", () => {
     // A line for the opponent continues from the position after C3.
     await ctl.handleTutor({ type: "show", moves: ["D4"], start: "W" });
     expect(ctl.view().overlay?.variation).toEqual({ moves: [{ color: "W", point: D4 }] });
+    // The tutor is done, but the drawing stays: the pause waits for the learner's Continue.
+    await ctl.handleTutor({ type: "resume" });
+    await flush();
+    expect(ctl.view().status).toBe("paused");
+    expect(ctl.view().moment).toMatchObject({ state: "tutor", awaitingLearner: true });
+    expect(ctl.view().overlay?.variation).toEqual({ moves: [{ color: "W", point: D4 }] });
+    expect(ctl.view().moves).toHaveLength(1);
+    // More words are still welcome; the learner continues when ready.
+    await ctl.handleTutor({ type: "say", text: "Take your time." });
+    expect(ctl.view().moment?.awaitingLearner).toBe(true);
+    await ctl.handleAction({ type: "continue" });
+    await flush();
+    expect(ctl.view().status).toBe("playing");
+    expect(ctl.view().overlay).toBeNull();
+    expect(ctl.view().moment).toMatchObject({ state: "resolved" });
+    expect(ctl.view().moment?.awaitingLearner).toBeUndefined();
+    expect(ctl.view().moves).toHaveLength(2);
+  });
+
+  it("resume without a drawing ends the pause at once", async () => {
+    setup({ tutor: true });
+    await startGame();
+    engine.lossAfter(["C3"], 8);
+    ctl.play(C3);
+    await flush();
+    await ctl.handleTutor({ type: "claim", momentId: ctl.view().moment!.id });
+    await ctl.handleTutor({ type: "say", text: "C3 is slow." });
     await ctl.handleTutor({ type: "resume" });
     await flush();
     expect(ctl.view().status).toBe("playing");
     expect(ctl.view().moves).toHaveLength(2);
+  });
+
+  it("resume after the learner hid the drawing ends the pause; Try again also ends a waiting pause", async () => {
+    setup({ tutor: true });
+    await startGame();
+    engine.lossAfter(["C3"], 8);
+    ctl.play(C3);
+    await flush();
+    await ctl.handleTutor({ type: "mark", points: ["E5"] });
+    await ctl.handleTutor({ type: "resume" });
+    expect(ctl.view().moment?.awaitingLearner).toBe(true);
+    expect(ctl.view().allowed).toContain("clear_overlay");
+    // Hiding the drawing keeps the pause: the learner still decides when to go on.
+    await ctl.handleAction({ type: "clear_overlay" });
+    expect(ctl.view().overlay).toBeNull();
+    expect(ctl.view().status).toBe("paused");
+    expect(ctl.view().allowed).not.toContain("clear_overlay");
+    await ctl.handleAction({ type: "retry" });
+    expect(ctl.view().status).toBe("playing");
+    expect(ctl.view().moves).toHaveLength(0);
+    expect(ctl.view().moment?.state).toBe("resolved");
+  });
+
+  it("keeps a drawing outside a pause until the learner's next move or Hide", async () => {
+    setup({ tutor: true });
+    await startGame();
+    ctl.play(E5);
+    await flush();
+    expect(ctl.view().moves).toHaveLength(2);
+    await ctl.handleAction({ type: "ask_tutor" });
+    await ctl.handleTutor({ type: "mark", points: ["C3"] });
+    await flush();
+    expect(ctl.view().overlay?.marks).toHaveLength(1);
+    ctl.play(C3);
+    expect(ctl.view().overlay).toBeNull();
+    await flush();
+    await ctl.handleTutor({ type: "show", moves: ["D4", "G7"] });
+    await ctl.handleAction({ type: "clear_overlay" });
+    expect(ctl.view().overlay).toBeNull();
   });
 
   it("falls back when the tutor doesn't answer in time", async () => {
@@ -794,32 +883,33 @@ describe("GameController and the learner profile", () => {
 
 describe("GameController view contract", () => {
   beforeEach(() => setup());
+  const ALWAYS = ["new_game", "chat", "next_problem", "set_tutor_level"];
 
   it("lists the actions it accepts, with the same checks the actions make", async () => {
-    expect(ctl.view().allowed).toEqual(["new_game", "chat", "next_problem"]);
+    expect(ctl.view().allowed).toEqual([...ALWAYS]);
     await startGame();
-    expect(ctl.view().allowed).toEqual(["new_game", "chat", "next_problem", "resign", "play", "pass", "ask_tutor"]);
+    expect(ctl.view().allowed).toEqual([...ALWAYS, "resign", "play", "pass", "ask_tutor"]);
     engine.lossAfter(["C3"], 6);
     ctl.play(C3);
     expect(ctl.view().allowed).not.toContain("play"); // the bot is to move while the eval runs
     await flush();
     expect(ctl.view().status).toBe("paused");
-    expect(ctl.view().allowed).toEqual(["new_game", "chat", "next_problem", "resign", "continue", "retry"]);
+    expect(ctl.view().allowed).toEqual([...ALWAYS, "clear_overlay", "resign", "continue", "retry"]); // KataGo's line is drawn
     await ctl.handleAction({ type: "next_problem" });
-    expect(ctl.view().allowed).toEqual(["new_game", "chat", "next_problem", "leave_problem", "play"]);
+    expect(ctl.view().allowed).toEqual([...ALWAYS, "leave_problem", "play"]);
     await ctl.handleAction({ type: "leave_problem" });
     await ctl.handleAction({ type: "resign" });
-    expect(ctl.view().allowed).toEqual(["new_game", "chat", "next_problem"]);
+    expect(ctl.view().allowed).toEqual([...ALWAYS]);
   });
 
   it("hands out a fresh allowed list each time, so changing one can't change the next view", async () => {
     const first = ctl.view().allowed;
     first.push("resign");
-    expect(ctl.view().allowed).toEqual(["new_game", "chat", "next_problem"]);
+    expect(ctl.view().allowed).toEqual([...ALWAYS]);
     await startGame();
     await ctl.handleAction({ type: "resign" });
     ctl.view().allowed.length = 0;
-    expect(ctl.view().allowed).toEqual(["new_game", "chat", "next_problem"]);
+    expect(ctl.view().allowed).toEqual([...ALWAYS]);
   });
 
   it("stops offering Try again once a rethink took the moment's move back", async () => {
@@ -872,5 +962,202 @@ describe("GameController view contract", () => {
     await ctl.handleAction({ type: "ask_tutor" });
     expect(engine.analyzeCalls).toHaveLength(calls);
     expect((ctl as unknown as { analyses: Map<string, unknown> }).analyses.size).toBeLessThanOrEqual(16);
+  });
+});
+
+describe("GameController tutor levels", () => {
+  beforeEach(() => setup({ tutor: true }));
+
+  it("defaults to coach, persists a change in the profile and tells the tutor and the learner", async () => {
+    await startGame();
+    expect(ctl.view().tutorLevel).toBe("coach");
+    expect(events[0]).toMatchObject({ type: "game_start", tutorLevel: "coach" });
+    const version = ctl.view().profileVersion;
+    await ctl.handleAction({ type: "set_tutor_level", level: "point_out" });
+    expect(ctl.view().tutorLevel).toBe("point_out");
+    expect(ctl.view().profileVersion).toBe(version + 1);
+    expect(store.loadProfile().tutorLevel).toBe("point_out");
+    expect(events.at(-1)).toEqual({ type: "tutor_level", level: "point_out", gameId: ctl.view().gameId });
+    expect(ctl.view().chat.at(-1)?.text).toMatch(/^Tutor help: Point out\./);
+    // The same level again changes nothing.
+    const count = events.length;
+    await ctl.handleAction({ type: "set_tutor_level", level: "point_out" });
+    expect(events).toHaveLength(count);
+    // A new controller (a restart) reads it back.
+    expect(new GameController({ engine, store, clock }).view().tutorLevel).toBe("point_out");
+  });
+
+  it("silent: no pause, moment or KataGo message, but the mistake is still recorded", async () => {
+    await ctl.handleAction({ type: "set_tutor_level", level: "silent" });
+    await startGame();
+    engine.lossAfter(["C3"], 8);
+    const chatBefore = ctl.view().chat.length;
+    ctl.play(C3);
+    await flush();
+    const v = ctl.view();
+    expect(v.status).toBe("playing");
+    expect(v.moment).toBeNull();
+    expect(v.overlay).toBeNull();
+    expect(v.moves).toHaveLength(2); // the bot replied
+    expect(v.moves[0]!.eval?.pointLoss).toBe(8);
+    expect(types()).not.toContain("teaching_moment");
+    expect(types()).not.toContain("fallback");
+    expect(v.chat.slice(chatBefore)).toEqual([]);
+    clock.advance(60_000);
+    expect(ctl.view().chat.slice(chatBefore)).toEqual([]);
+    await ctl.handleAction({ type: "resign" });
+    const end = events.find((e) => e.type === "game_end");
+    expect(end?.type === "game_end" && end.summary.mistakes).toEqual([expect.objectContaining({ moveNumber: 1, pointLoss: 8, move: "C3" })]);
+    expect(store.loadProfile().recentMistakes).toEqual([expect.objectContaining({ moveNumber: 1, pointLoss: 8 })]);
+  });
+
+  it("silent without a tutor: no fallback either", async () => {
+    setup();
+    await ctl.handleAction({ type: "set_tutor_level", level: "silent" });
+    await startGame();
+    engine.lossAfter(["C3"], 8);
+    ctl.play(C3);
+    await flush();
+    expect(ctl.view().status).toBe("playing");
+    expect(ctl.view().overlay).toBeNull();
+    expect(types()).not.toContain("fallback");
+  });
+
+  it("silent: the tutor only answers the learner's question or hint during the game, and everything works after it", async () => {
+    await ctl.handleAction({ type: "set_tutor_level", level: "silent" });
+    await startGame();
+    await expect(ctl.handleTutor({ type: "say", text: "Nice move!" })).rejects.toThrow(/chose Silent.*USER or HINT/);
+    await expect(ctl.handleTutor({ type: "show", moves: ["E5"] })).rejects.toThrow(/chose Silent: no show/);
+    await expect(ctl.handleTutor({ type: "mark", points: ["E5"] })).rejects.toThrow(/chose Silent: no mark/);
+    await ctl.handleAction({ type: "chat", text: "Where should I play?" });
+    await ctl.handleTutor({ type: "say", text: "Look at the biggest open area." });
+    expect(ctl.view().chat.at(-1)).toMatchObject({ from: "tutor", text: "Look at the biggest open area." });
+    await expect(ctl.handleTutor({ type: "say", text: "And another thing" })).rejects.toThrow(/Silent/);
+    // A hint is an explicit question too, and hints still work.
+    await ctl.handleAction({ type: "ask_tutor" });
+    expect(types()).toContain("hint_request");
+    await ctl.handleTutor({ type: "say", text: "Think about the corners." });
+    // After the game the review is open.
+    await ctl.handleAction({ type: "resign" });
+    await ctl.handleTutor({ type: "say", text: "Let's review." });
+    await ctl.handleTutor({ type: "show", moves: ["E5"] });
+    expect(ctl.view().overlay?.variation).toBeDefined();
+  });
+
+  it("silent applies from the next move: a mistake played before the switch still opens its moment", async () => {
+    await startGame();
+    engine.lossAfter(["C3"], 8);
+    engine.hold = true;
+    ctl.play(C3);
+    await ctl.handleAction({ type: "set_tutor_level", level: "silent" });
+    engine.releaseAll();
+    await flush();
+    expect(ctl.view().status).toBe("paused");
+    // The moment carries the level its move was played at, not the one picked since.
+    expect(events.find((e) => e.type === "teaching_moment")).toMatchObject({ tutorLevel: "coach", moment: { level: "coach" } });
+    expect(ctl.view().moves[0]!.tutorLevel).toBe("coach");
+    // That moment can still be finished by the tutor.
+    await ctl.handleTutor({ type: "say", text: "Look at C3 again." });
+    expect(ctl.view().moment?.state).toBe("tutor");
+  });
+
+  it("point_out: the moment opens as usual, but rethink is refused; the learner's Try again still works", async () => {
+    await ctl.handleAction({ type: "set_tutor_level", level: "point_out" });
+    await startGame();
+    engine.lossAfter(["C3"], 8);
+    ctl.play(C3);
+    await flush();
+    expect(ctl.view().status).toBe("paused");
+    expect(events.find((e) => e.type === "teaching_moment")).toMatchObject({ tutorLevel: "point_out" });
+    await expect(ctl.handleTutor({ type: "rethink", text: "Try again." })).rejects.toThrow(
+      "The learner chose Point out: explain, don't take moves back.",
+    );
+    expect(ctl.view().moves).toHaveLength(1);
+    await ctl.handleTutor({ type: "show", moves: ["E5"], label: "better" });
+    await ctl.handleAction({ type: "retry" });
+    expect(ctl.view().moves).toHaveLength(0);
+    expect(ctl.view().status).toBe("playing");
+  });
+
+  it("rethink follows the level of the moment's move, not a later switch", async () => {
+    // A Point out moment stays Point out after a switch to Coach...
+    await ctl.handleAction({ type: "set_tutor_level", level: "point_out" });
+    await startGame();
+    engine.lossAfter(["C3"], 8);
+    ctl.play(C3);
+    await flush();
+    await ctl.handleAction({ type: "set_tutor_level", level: "coach" });
+    await expect(ctl.handleTutor({ type: "rethink", text: "Try again." })).rejects.toThrow(/chose Point out/);
+    // ...and a Coach moment can still be taken back after a switch to Point out.
+    setup({ tutor: true });
+    await startGame();
+    engine.lossAfter(["C3"], 8);
+    ctl.play(C3);
+    await flush();
+    await ctl.handleAction({ type: "set_tutor_level", level: "point_out" });
+    await ctl.handleTutor({ type: "rethink", text: "Which group is weak?" });
+    expect(ctl.view().moves).toHaveLength(0);
+  });
+
+  it("after a restart, a due moment follows the level its move was played at, not the current one", async () => {
+    // Played on Coach, the level is Silent by the restart: the moment still opens.
+    await startGame();
+    engine.lossAfter(["C3"], 8);
+    ctl.play(C3);
+    await flush();
+    expect(ctl.view().status).toBe("paused");
+    await ctl.handleAction({ type: "set_tutor_level", level: "silent" });
+    ctl.flush();
+    let again = new GameController({ engine, store, clock, botDelayMs: 0 });
+    again.restoreLastGame();
+    again.setEngineState("ready");
+    await flush();
+    expect(again.view().status).toBe("paused");
+    expect(again.view().moment).toMatchObject({ moveNumber: 1, level: "coach" });
+
+    // Played on Silent (the eval lands after the restart), the level is Coach by then: no moment.
+    setup({ tutor: true });
+    await ctl.handleAction({ type: "set_tutor_level", level: "silent" });
+    await startGame();
+    engine.hold = true;
+    engine.lossAfter(["C3"], 8);
+    ctl.play(C3);
+    engine.held.length = 0;
+    engine.hold = false;
+    await ctl.handleAction({ type: "set_tutor_level", level: "coach" });
+    ctl.flush();
+    again = new GameController({ engine, store, clock, botDelayMs: 0 });
+    again.restoreLastGame();
+    again.setEngineState("ready");
+    await flush();
+    expect(again.view().moves[0]).toMatchObject({ tutorLevel: "silent", eval: { pointLoss: 8 } });
+    expect(again.view().moment).toBeNull();
+    expect(again.view().status).toBe("playing");
+    expect(again.view().moves).toHaveLength(2); // the bot replied
+  });
+
+  it("silent: a question opens one say only once it reached the tutor, and only in this game", async () => {
+    // A hint KataGo answered (no tutor attached) leaves nothing for a tutor who attaches later.
+    setup();
+    await ctl.handleAction({ type: "set_tutor_level", level: "silent" });
+    await startGame();
+    await ctl.handleAction({ type: "ask_tutor" });
+    await flush();
+    ctl.setTutorAttached(true);
+    await expect(ctl.handleTutor({ type: "say", text: "Look at the corner." })).rejects.toThrow(/chose Silent/);
+    // Nor does a chat message nobody received.
+    ctl.setTutorAttached(false);
+    await ctl.handleAction({ type: "chat", text: "Anyone there?" });
+    ctl.setTutorAttached(true);
+    await expect(ctl.handleTutor({ type: "say", text: "Yes!" })).rejects.toThrow(/chose Silent/);
+    // An unanswered question doesn't carry over to a new game...
+    await ctl.handleAction({ type: "chat", text: "Where now?" });
+    await startGame();
+    await expect(ctl.handleTutor({ type: "say", text: "Here." })).rejects.toThrow(/chose Silent/);
+    // ...nor from a problem back to the game.
+    await ctl.handleAction({ type: "next_problem" });
+    await ctl.handleAction({ type: "chat", text: "Is it the eye?" });
+    await ctl.handleAction({ type: "leave_problem" });
+    await expect(ctl.handleTutor({ type: "say", text: "Yes, the eye." })).rejects.toThrow(/chose Silent/);
   });
 });

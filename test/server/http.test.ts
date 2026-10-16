@@ -22,6 +22,8 @@ describe("request validation", () => {
     });
     expect(parseTutorCommand({ type: "show", moves: ["C3", "pass"], start: "W" })).toEqual({ type: "show", moves: ["C3", "pass"], start: "W" });
     expect(parseClientAction({ type: "leave_problem", extra: 1 })).toEqual({ type: "leave_problem" });
+    expect(parseClientAction({ type: "clear_overlay" })).toEqual({ type: "clear_overlay" });
+    expect(parseClientAction({ type: "set_tutor_level", level: "point_out" })).toEqual({ type: "set_tutor_level", level: "point_out" });
     expect(parseTutorCommand({ type: "start_problem", problemId: "p3" })).toEqual({ type: "start_problem", problemId: "p3" });
     expect(parseTutorCommand({ type: "tag", gameId: "g", moveNumber: 3, category: "shape" })).toEqual({
       type: "tag",
@@ -35,6 +37,8 @@ describe("request validation", () => {
     expect(() => parseClientAction(null)).toThrow(/JSON object/);
     expect(() => parseClientAction({ type: "fly" })).toThrow(/Unknown action/);
     expect(() => parseClientAction({ type: "play", point: { x: "1", y: 2 } })).toThrow(/integers/);
+    expect(() => parseClientAction({ type: "set_tutor_level", level: "loud" })).toThrow("Tutor level must be one of silent, point_out, coach.");
+    expect(() => parseClientAction({ type: "set_tutor_level" })).toThrow(/"level" is required/);
     expect(() => parseTutorCommand({ type: "say" })).toThrow(/"text" is required/);
     expect(() => parseTutorCommand({ type: "mark", points: ["C3"], kind: "star" })).toThrow(/Mark kind/);
     expect(() => parseTutorCommand({ type: "tag", gameId: "g", moveNumber: 0, category: "shape" })).toThrow(/moveNumber/);
@@ -52,6 +56,12 @@ describe("Store", () => {
     expect(p.mistakeThreshold).toBe(4);
     expect(p.mistakeCounts.shape).toBe(2);
     expect(p.mistakeCounts.opening).toBe(0);
+    // A profile from before tutor levels coaches, as the app did then; a level it doesn't know too.
+    expect(p.tutorLevel).toBe("coach");
+    writeFileSync(join(store.dir, "profile.json"), JSON.stringify({ tutorLevel: "silent" }));
+    expect(store.loadProfile().tutorLevel).toBe("silent");
+    writeFileSync(join(store.dir, "profile.json"), JSON.stringify({ tutorLevel: "shout" }));
+    expect(store.loadProfile().tutorLevel).toBe("coach");
     writeFileSync(join(store.dir, "profile.json"), "{not json");
     expect(store.loadProfile()).toEqual(defaultProfile());
   });

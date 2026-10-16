@@ -11,7 +11,7 @@ import { GoGame, deadStonesFromOwnership, emptyBoard, opponent, scoreArea, toAsc
 import { allowedActions, retryBlocked, type ActionState } from "../shared/allowed.ts";
 import { moveGtp, movePoint, samePoint, toGtp, tryFromGtp } from "../shared/coords.ts";
 import { normalizeBotRank } from "../shared/rank.ts";
-import { colorName, formatScore, round1 } from "../shared/text.ts";
+import { colorName, formatScore, round1, tutorLevelChangedText } from "../shared/text.ts";
 import type {
   ChatMessage,
   ClientAction,
@@ -31,6 +31,7 @@ import type {
   SavedGame,
   TeachingMoment,
   TutorCommand,
+  TutorLevel,
 } from "../shared/types.ts";
 import {
   ILLEGAL_TEXT,
@@ -122,6 +123,11 @@ export class GameController {
   /** Heuristic mistake categories by move number, from the eval of each mistake. */
   private heuristics: Record<number, MistakeCategory> = {};
   private tutorAttached = false;
+  /**
+   * The learner's latest chat message or hint request in this game (or problem) reached an attached
+   * tutor who hasn't answered yet: what Silent lets the tutor answer with one say.
+   */
+  private questionOpen = false;
   private engineState: EngineState = "starting";
   /** Problem mode: the problem on the board. */
   private practice: PracticeSession | null = null;
@@ -187,6 +193,7 @@ export class GameController {
     const common = {
       chat: this.chat.slice(-VIEW_CHAT_LIMIT),
       tutorAttached: this.tutorAttached,
+      tutorLevel: this.level,
       engineBusy: this.engineState !== "ready" || this.busy > 0,
       profileVersion: this.profileVersion,
       allowed: this.allowed(),
@@ -219,6 +226,11 @@ export class GameController {
     return this.profile;
   }
 
+  /** How much the tutor steps in during games (the profile's setting). */
+  private get level(): TutorLevel {
+    return this.profile.tutorLevel ?? "coach";
+  }
+
   /** The browser actions handleAction accepts right now: the same checks it makes (src/shared/allowed.ts). */
   private allowed(): ClientAction["type"][] {
     return allowedActions(this.actionState());
@@ -238,6 +250,7 @@ export class GameController {
       engineReady: this.engineState === "ready",
       tutorAttached: this.tutorAttached,
       problem: this.practice ? this.practice.actionState : null,
+      overlay: this.activeOverlay !== null,
     };
   }
 
@@ -279,7 +292,9 @@ export class GameController {
     const last = game.lastMove;
     const human = last && last.move.color === settings.humanColor ? last : null;
     const loss = human?.eval?.pointLoss;
-    if (human && loss !== undefined && loss >= this.profile.mistakeThreshold && !game.isOver && !this.momentShown.has(human)) {
+    // A move played on Silent gets no moment, whatever it cost (it is still evaluated and recorded).
+    const quiet = human?.tutorLevel === "silent";
+    if (human && loss !== undefined && loss >= this.profile.mistakeThreshold && !quiet && !game.isOver && !this.momentShown.has(human)) {
       this.startMoment(human);
       return;
     }
@@ -311,6 +326,8 @@ export class GameController {
     game.moves.forEach((record, i) => {
       const evaluation = saved.moves[i]?.eval;
       if (evaluation) record.eval = evaluation;
+      const level = saved.moves[i]?.tutorLevel;
+      if (level) record.tutorLevel = level;
     });
     this.resetGameState();
     this.game = game;
@@ -323,7 +340,8 @@ export class GameController {
     const maxChatId = Math.max(0, ...this.chat.map((m) => Number(/^c(\d+)$/.exec(m.id)?.[1] ?? 0)));
     this.nextChatId = Math.max(this.nextChatId, maxChatId + 1);
     this.system(`Picked up where you left off: game ${saved.id}, move ${game.moves.length}.`);
-    // A mistake the learner dismissed stays dismissed; one they hadn't dealt with opens again.
+    // A mistake the learner dismissed stays dismissed; one they hadn't dealt with opens again
+    // (unless it was played on Silent: resumeTurn reads the level each move was played at).
     const last = game.lastMove;
     if (last && saved.moment?.moveNumber === last.number && saved.moment.state === "resolved") this.momentShown.add(last);
     this.resumeTurn();
@@ -343,6 +361,12 @@ export class GameController {
         return this.startProblem();
       case "leave_problem":
         return this.leaveProblem();
+      case "set_tutor_level":
+        return this.setTutorLevel(action.level);
+      case "clear_overlay":
+        // The learner hides the drawing (the game's, or the problem's). A pause stays: Continue ends it.
+        this.activeOverlay = null;
+        return this.changed();
     }
     // In problem mode the game waits underneath: the problem answers the game's actions.
     if (this.practice) return this.practice.handleAction(action);
@@ -365,6 +389,13 @@ export class GameController {
   // --- tutor commands -----------------------------------------------------------
 
   async handleTutor(cmd: TutorCommand): Promise<void> {
+    this.checkSilent(cmd);
+    await this.tutorCommand(cmd);
+    // The tutor answered: on Silent, the learner's question has had its one reply.
+    if (cmd.type === "say" || cmd.type === "show" || cmd.type === "mark") this.questionOpen = false;
+  }
+
+  private async tutorCommand(cmd: TutorCommand): Promise<void> {
     switch (cmd.type) {
       case "claim":
         return this.claim(cmd.momentId);
@@ -379,7 +410,9 @@ export class GameController {
       case "show": {
         const variation = this.practice ? this.practice.variation(cmd.moves, cmd.start, cmd.label) : this.variationFrom(cmd.moves, cmd.start, cmd.label);
         if (!this.practice) this.engage();
-        this.activeOverlay = { ...this.activeOverlay, variation };
+        // The new line replaces the old one, and KataGo's highlighted move with it.
+        const { best: _best, ...rest } = this.activeOverlay ?? {};
+        this.activeOverlay = { ...rest, variation };
         return this.changed();
       }
       case "mark": {
@@ -401,13 +434,45 @@ export class GameController {
         return this.changed();
       case "rethink": {
         const moment = this.rethinkMoment(cmd.momentId);
+        // The level the moment's move was played at counts, not a later switch.
+        if (moment.level === "point_out") {
+          throw new UserError("The learner chose Point out: explain, don't take moves back. Use say, show or mark, then resume.");
+        }
         this.engage(moment.id);
         this.retry(cmd.text, moment.id);
         return;
       }
       case "resume":
-        return this.continueGame();
+        return this.tutorResume();
     }
+  }
+
+  /**
+   * On Silent the tutor stays out of a game in progress: no drawings, no take-backs, and `say` only
+   * to answer the learner's latest question or hint request. A moment that opened before the switch
+   * to Silent can still be finished; problems and the post-game review are open as usual.
+   */
+  private checkSilent(cmd: TutorCommand): void {
+    if (cmd.type !== "say" && cmd.type !== "show" && cmd.type !== "mark" && cmd.type !== "rethink") return;
+    const inGame = !this.practice && this.game !== null && this.result === null && this.activeMoment() === null;
+    if (this.level !== "silent" || !inGame) return;
+    if (cmd.type === "say") {
+      if (this.questionOpen) return;
+      throw new UserError(
+        "The learner chose Silent: don't comment during the game. Only answer a USER or HINT line, with one say; save the teaching for the review after GAME_END.",
+      );
+    }
+    throw new UserError(`The learner chose Silent: no ${cmd.type} during the game. Answer their questions with say; draw in the review after GAME_END.`);
+  }
+
+  /** The learner picked how much the tutor steps in. It applies from their next move. */
+  private setTutorLevel(level: TutorLevel): void {
+    if (level === this.level) return;
+    this.updateProfile((profile) => {
+      profile.tutorLevel = level;
+    });
+    this.emit({ type: "tutor_level", level, gameId: this.gameId });
+    this.system(tutorLevelChangedText(level));
   }
 
   /** The overlay on the board: the problem's in problem mode, else the game's. */
@@ -437,7 +502,7 @@ export class GameController {
     this.settings = settings;
     this.createdAt = now;
     this.game = new GoGame(settings.size, settings.komi, settings.handicap);
-    this.emit({ type: "game_start", gameId: this.gameId, settings });
+    this.emit({ type: "game_start", gameId: this.gameId, settings, tutorLevel: this.level });
     const handicap = settings.handicap >= 2 ? `, ${settings.handicap} handicap stones` : "";
     const why =
       settings.handicap >= 2 && fromProfile
@@ -464,6 +529,7 @@ export class GameController {
     this.heuristics = {};
     this.status = "playing";
     this.botFailures = 0;
+    this.questionOpen = false;
   }
 
   /** Drop what is in flight for the current position: stale engine replies, the eval the bot waits for, the moment's wait. */
@@ -525,6 +591,8 @@ export class GameController {
     const result = point ? game.playAt(point) : game.pass();
     if (!result.ok) throw new UserError(ILLEGAL_TEXT[result.reason]);
     const record = result.record;
+    // A level change applies from the learner's next move: each move keeps the level it was played at.
+    record.tutorLevel = this.level;
 
     // Playing again after a rethink ends that moment; any leftover overlay is about the old position.
     if (this.moment) this.setMomentState("resolved");
@@ -595,6 +663,7 @@ export class GameController {
       pointLoss: round1(record.eval!.pointLoss),
       state: "waiting",
       ...(this.tutorAttached && { deadline: this.clock.now() + this.tutorTimeoutMs }),
+      level: record.tutorLevel ?? "coach",
     };
     this.status = "paused";
     this.emit({
@@ -605,6 +674,7 @@ export class GameController {
       record,
       boardBefore: toAscii(before.board, movePoint(before.lastMove?.move)),
       boardAfter: toAscii(game.board, this.lastPoint()),
+      tutorLevel: this.moment.level,
     });
     this.save();
     this.settleWaitingMoment();
@@ -657,8 +727,10 @@ export class GameController {
       const moves = lineStones(game.before(record.number), evaluation.bestPv, PV_STONES);
       const playedPoint = movePoint(record.move);
       const marks: NonNullable<Overlay["marks"]> = playedPoint && !moves.some((m) => samePoint(m.point, playedPoint)) ? [{ point: playedPoint, kind: "x" }] : [];
+      // KataGo's move is highlighted as part of the drawing, so hiding the drawing hides it too.
+      const bestPoint = evaluation.bestMove === "pass" ? undefined : tryFromGtp(evaluation.bestMove, game.size);
       this.overlay = moves.length
-        ? { variation: { label: `KataGo's line instead of ${played}`, moves, fromMove: record.number }, ...(marks.length && { marks }) }
+        ? { variation: { label: `KataGo's line instead of ${played}`, moves, fromMove: record.number }, ...(marks.length && { marks }), ...(bestPoint && { best: bestPoint }) }
         : null;
       const playedText = played === "pass" ? "Passing" : `Your move at ${played}`;
       const best = evaluation.bestMove === "pass" ? "passing" : evaluation.bestMove;
@@ -673,10 +745,13 @@ export class GameController {
     this.emit({ type: "fallback", momentId: moment.id });
   }
 
-  /** The moment's new state. Only a waiting moment has a deadline, and only when one is given. */
+  /**
+   * The moment's new state. Only a waiting moment has a deadline, and only when one is given; a
+   * state change ends any wait for the learner's Continue (tutorResume sets it again).
+   */
   private setMomentState(state: TeachingMoment["state"], deadline?: number): void {
     if (!this.moment) return;
-    const { deadline: _old, ...rest } = this.moment;
+    const { deadline: _old, awaitingLearner: _awaiting, ...rest } = this.moment;
     this.moment = { ...rest, state, ...(state === "waiting" && deadline !== undefined && { deadline }) };
   }
 
@@ -707,8 +782,9 @@ export class GameController {
   }
 
   /**
-   * Continue (browser) or resume (tutor): end the pause and let the bot reply. Without a pause it
-   * does nothing, so a late resume can't start the bot before the human move's eval is in.
+   * Continue (browser) or resume (tutor, with no drawing up): end the pause, clear the drawing and
+   * let the bot reply. Without a pause it does nothing, so a late resume can't start the bot before
+   * the human move's eval is in.
    */
   private continueGame(): void {
     if (this.status !== "paused") return;
@@ -719,6 +795,24 @@ export class GameController {
     this.save();
     this.maybeBotMove();
     this.changed();
+  }
+
+  /**
+   * The tutor's `resume`. With a drawing on the board (the tutor's, or KataGo's fallback line) the
+   * pause stays so the learner can study it: the moment waits for their Continue (or Try again),
+   * which clears the drawing. Without one it ends the pause like Continue.
+   */
+  private tutorResume(): void {
+    if (this.status !== "paused") return;
+    if (this.overlay && this.activeMoment()) {
+      this.cancelMomentTimer();
+      this.setMomentState("tutor");
+      this.moment = { ...this.moment!, awaitingLearner: true };
+      this.save();
+      this.changed();
+      return;
+    }
+    this.continueGame();
   }
 
   /** The open moment a rethink may take back: its move must still be the last one played. */
@@ -880,6 +974,7 @@ export class GameController {
       ...(text?.trim() && { text: text.trim() }),
     });
     if (this.tutorAttached) {
+      this.questionOpen = true; // the tutor got it: on Silent it may answer with one say
       this.system("Asked your tutor for a hint.");
       this.changed();
       return;
@@ -911,7 +1006,9 @@ export class GameController {
     const momentId = problemId ? undefined : this.activeMoment()?.id;
     this.addChat("user", trimmed, momentId);
     this.emit({ type: "user_message", text: trimmed, gameId: this.gameId, ...(momentId && { momentId }), ...(problemId && { problemId }) });
-    if (!this.tutorAttached) {
+    if (this.tutorAttached) {
+      this.questionOpen = true; // the tutor got it: on Silent it may answer with one say
+    } else {
       this.system("Your tutor isn't connected right now, so nobody can answer chat. KataGo's feedback still works.");
     }
     this.changed();
@@ -968,6 +1065,7 @@ export class GameController {
     this.status = "finished";
     this.moment = null;
     this.overlay = null;
+    this.questionOpen = false;
     const summary = this.buildSummary();
     this.summary = summary;
     // The game must still be saved and announced if the profile can't be updated.
@@ -1183,6 +1281,8 @@ export class GameController {
   private closePractice(): StoredProblem | undefined {
     const session = this.practice;
     this.practice = null;
+    // Entering or leaving a problem: a question about the game isn't one about the problem, nor the other way round.
+    this.questionOpen = false;
     return session?.close();
   }
 

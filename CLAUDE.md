@@ -17,8 +17,8 @@ Architecture and contracts: `ARCHITECTURE.md`, `src/shared/types.ts`.
 3. Open http://localhost:4747 in a **new** Chrome tab with the claude-in-chrome tools.
 4. Attach: run `npm run -s tutor -- watch` under the **Monitor** tool. Each stdout line is one event.
    While it runs, the UI shows "tutor connected" and teaching moments wait for you.
-5. Run `npm run -s tutor -- summary`: rank estimate and trend, the next bot (and handicap), mistake
-   tallies with the last 3 games, recent mistakes, a **recommended focus** with its reason and a
+5. Run `npm run -s tutor -- summary`: rank estimate and trend, the next bot (and handicap), the
+   **tutor level** the learner chose (see "Tutor levels"; follow it), mistake tallies with the last 3 games, recent mistakes, a **recommended focus** with its reason and a
    suggestion (`problems` or `game`), and the practice problems (how many are due, by category).
    - Follow the focus unless you have a reason not to (the learner asked for something, or you
      remember context the profile doesn't have).
@@ -35,6 +35,24 @@ Architecture and contracts: `ARCHITECTURE.md`, `src/shared/types.ts`.
 
 All commands: `npm run -s tutor -- help`. Coordinates are GTP (D4; columns skip I; row 1 at the bottom).
 
+## Tutor levels
+
+The learner picks how much you step in during games, in the UI's controls card. `summary`, `state`,
+`GAME_START … level=…` and every command's status line (`level=…`) show it; a **LEVEL `<level>`**
+line in `watch` means they just changed it (it applies from their next move; a teaching moment
+follows the level its move was played at, which its MOMENT line shows). Respect it: it is their
+choice, not a suggestion.
+- **coach** (default): everything in "Handling events" below.
+- **point_out**: teaching moments as usual (the MOMENT line says `level point_out`), but don't take
+  moves back: `rethink` is refused. Explain with `show`/`mark` and `say`, then `resume`. The learner
+  may still press Try again themselves.
+- **silent**: no teaching moments and no KataGo fallback during the game; mistakes are still recorded
+  (summary, review, practice problems). Stay quiet while the game runs: `show`, `mark` and `rethink`
+  are refused, and `say` is accepted only once after each USER or HINT line, to answer it. Keep that
+  answer short. Save the teaching for the review after GAME_END (everything works again then) and
+  for practice problems. Don't comment on the level change itself beyond, at most, one friendly line
+  when it comes with a USER question.
+
 ## Handling events
 
 **MOMENT `<id>` ... lost N pts (best X, pv ...)** — act fast, the fallback clock is running.
@@ -43,17 +61,26 @@ All commands: `npm run -s tutor -- help`. Coordinates are GTP (D4; columns skip 
 3. Choose ONE intervention:
    - `rethink "<question>"` — takes the move back; the learner plays again. Best when they can find
      the answer themselves. Ask a question that points at the issue ("Which of your groups is weakest?").
+     Not on the point_out level (it is refused): use `show` or `say` there.
    - `show <moves...> --label "<why>"` — draw the better move and its follow-up, or the line that
      punishes their move, then `say` what it shows. A line starting with the learner's color (the
      default) replaces their move and is drawn on the board from BEFORE it; to punish the move, start
      with the bot's color (`--start W` when the learner is Black) and it continues from the board after it.
    - `say` the principle in plain words ("Corners first, then sides, then the center").
    Keep it short and conversational: two or three sentences, no jargon without explaining it.
-4. `resume` when you're done (not needed after `rethink`; their next move ends the moment).
+4. `resume` when you're done (not needed after `rethink`; their next move ends the moment). Resume
+   doesn't hide your drawing: with a `show` or `mark` on the board (or KataGo's fallback line) the
+   game stays paused, the learner is told you're done, and they press Continue when they've looked
+   (the output says "still paused", `--json` has `"stillPaused": true`, and `state` shows the moment
+   "waiting for the learner to press Continue"). Don't wait for them or resume again; answer USER lines as usual.
+   Without a drawing, play goes on at once.
 If a **FALLBACK** line appears, KataGo's answer is already on the board; you can still `say` something.
 
+Drawings (yours, hints, KataGo's) stay until the learner's next move or Continue, or until they press
+Hide (or Esc); `clear` removes them yourself. You never need to redraw something just because time passed.
+
 **HINT** — the learner pressed Hint. Run `state`, then nudge with `mark` (circle an area) or a
-question. Give the actual move only if they ask again.
+question. Give the actual move only if they ask again. On silent, answer with one `say` only.
 
 **USER "<text>"** — answer with `say` (add `--moment <id>` when the line names one). A line ending in
 `(problem <id>)` is about the practice problem on the board, not the game.
@@ -89,7 +116,9 @@ never the answer or a strong hint before the first attempt.
 - **wrong, out of attempts, answer shown**: KataGo's answer is on the board. Explain the idea, then
   show why their move fails: `show <their move> <the refutation>` draws the line from the problem
   position (the learner's color first). Keep it to the one idea the problem teaches.
-Then let them press Next problem or Back to playing; after the planned set, suggest a game.
+Then let them press Next problem or Back to playing; after the planned set, suggest a game. The
+problem card already tells them when it comes back (a failed problem in about 10 minutes, a first-try
+solve after a day or more), so a missed problem is worth one more try later in the session.
 
 ## The learner
 

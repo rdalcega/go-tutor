@@ -17,10 +17,11 @@ const game = (over: Partial<ActionState> = {}): ActionState => ({
   engineReady: true,
   tutorAttached: false,
   problem: null,
+  overlay: false,
   ...over,
 });
 
-const ALWAYS = ["new_game", "chat", "next_problem"];
+const ALWAYS = ["new_game", "chat", "next_problem", "set_tutor_level"];
 
 describe("allowedActions", () => {
   it("offers only the always-on actions without a game or after it ended", () => {
@@ -56,6 +57,14 @@ describe("allowedActions", () => {
     expect(allowedActions(problem(true, false))).toEqual([...ALWAYS, "leave_problem"]);
     expect(allowedActions(problem(false, true))).toEqual([...ALWAYS, "leave_problem"]);
     expect(allowedActions({ ...problem(false, false), engineReady: false })).toEqual([...ALWAYS, "leave_problem"]);
+  });
+
+  it("offers hiding the drawing whenever one is on the board, in every mode", () => {
+    expect(allowedActions(game({ mode: "idle", humanColor: null, overlay: true }))).toEqual([...ALWAYS, "clear_overlay"]);
+    expect(allowedActions(game({ overlay: true }))).toContain("clear_overlay");
+    expect(allowedActions(game({ finished: true, overlay: true }))).toContain("clear_overlay");
+    expect(allowedActions(game({ mode: "problem", problem: { revealed: true, checking: false }, overlay: true }))).toContain("clear_overlay");
+    expect(allowedActions(game())).not.toContain("clear_overlay");
   });
 
   it("returns a fresh array every time", () => {

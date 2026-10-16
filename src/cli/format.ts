@@ -5,7 +5,7 @@ import { toAscii } from "../engine/ascii.ts";
 import { gameBefore } from "../engine/game.ts";
 import { moveGtp, movePoint, toGtp } from "../shared/coords.ts";
 import { ratingToRank } from "../shared/rank.ts";
-import { round1 } from "../shared/text.ts";
+import { TUTOR_LEVEL_TEXT, round1 } from "../shared/text.ts";
 import type {
   ChatMessage,
   Color,
@@ -23,7 +23,9 @@ import type {
   Profile,
   SavedGame,
   TeachingMoment,
+  TutorCommand,
   TutorEvent,
+  TutorLevel,
 } from "../shared/types.ts";
 
 /** Formats a number with one decimal, dropping a trailing ".0". */
@@ -99,7 +101,9 @@ function rawEvent(e: unknown): string {
 function formatKnownEvent(e: TutorEvent, ctx: EventContext): string {
   switch (e.type) {
     case "game_start":
-      return `GAME_START ${e.gameId} ${settingsText(e.settings)}`;
+      return `GAME_START ${e.gameId} ${settingsText(e.settings)}${e.tutorLevel ? ` level=${e.tutorLevel}` : ""}`;
+    case "tutor_level":
+      return `LEVEL ${e.level} — ${TUTOR_LEVEL_TEXT[e.level].tutor} (from the learner's next move)`;
     case "move": {
       const r = e.record;
       let line = `MOVE ${r.number} ${r.move.color} ${eventMoveGtp(r.move, e.size, e.gameId, ctx)} (${e.by})`;
@@ -114,7 +118,10 @@ function formatKnownEvent(e: TutorEvent, ctx: EventContext): string {
       const head = `MOMENT ${m.id} game=${e.gameId} move ${r.number} ${r.move.color} ${gtp} lost ${num(m.pointLoss)} pts${best}`;
       // A live moment is always "waiting"; any other state means a replay that the server brought up to date.
       if (m.state === "resolved") return `${head} (replayed; already resolved)`;
-      const reply = ` — reply with: claim ${m.id}, then say/show/rethink/resume`;
+      const reply =
+        e.tutorLevel === "point_out"
+          ? ` — level point_out: ${TUTOR_LEVEL_TEXT.point_out.tutor} — reply with: claim ${m.id}, then say/show/mark/resume`
+          : ` — reply with: claim ${m.id}, then say/show/rethink/resume`;
       if (m.state !== "waiting") return `${head}${reply} (replayed; now ${m.state})`;
       const wait = m.deadline !== undefined ? `; fallback in ${secondsUntil(m.deadline, ctx.now ?? Date.now())}s` : "";
       return `${head}${reply}${wait}`;
@@ -165,6 +172,7 @@ export function momentText(m: TeachingMoment, now: number): string {
   if (m.state === "waiting" && m.deadline !== undefined) {
     s += ` (fallback in ${secondsUntil(m.deadline, now)}s; claim it to keep it)`;
   }
+  if (m.awaitingLearner) s += " (you resumed; still paused with the drawing, waiting for the learner to press Continue)";
   return s;
 }
 
@@ -179,6 +187,7 @@ export function overlayText(o: Overlay, size: number): string {
     const marks = o.marks.map((m) => `${toGtp(m.point, size)} ${m.kind}${m.text ? ` ${quote(m.text)}` : ""}`);
     parts.push(`marks: ${marks.join(", ")}`);
   }
+  if (o.best) parts.push(`KataGo's move highlighted: ${toGtp(o.best, size)}`);
   return parts.length > 0 ? parts.join("; ") : "none";
 }
 
@@ -209,12 +218,19 @@ export function problemLines(p: ProblemView): string[] {
   return lines;
 }
 
+/** The learner's tutor level and what it means for the tutor. */
+export function levelLine(level: TutorLevel): string {
+  const text = TUTOR_LEVEL_TEXT[level] as (typeof TUTOR_LEVEL_TEXT)[TutorLevel] | undefined; // a newer server may send a level this CLI doesn't know
+  return `tutor level ${level}${text ? `: ${text.tutor}` : ""}`;
+}
+
 /** One-line status of the view, printed after every successful tutor command. */
 export function statusLine(v: GameView, now = Date.now()): string {
   const parts: string[] = [];
   if (v.gameId) parts.push(`game=${v.gameId}`);
   if (v.problem) parts.push(`problem=${v.problem.id}`);
   parts.push(`mode=${v.mode}`, `status=${v.status}`);
+  if (v.tutorLevel) parts.push(`level=${v.tutorLevel}`);
   if (v.status !== "finished" && v.mode !== "idle") parts.push(`toPlay=${v.toPlay}`);
   if (v.problem) {
     const p = v.problem;
@@ -226,6 +242,23 @@ export function statusLine(v: GameView, now = Date.now()): string {
   if (v.moment && v.moment.state !== "resolved") parts.push(momentText(v.moment, now));
   if (v.result) parts.push(`result=${resultText(v.result)}`);
   return parts.join(" ");
+}
+
+/** The game stays paused with a drawing up, waiting for the learner's Continue (after the tutor's `resume`). */
+function awaitingLearner(v: GameView): boolean {
+  return !!v.moment?.awaitingLearner && v.status === "paused";
+}
+
+/** What a command that changed something prints: "ok" and the status, and for `resume` whether the pause now waits for the learner. */
+export function commandOutput(command: TutorCommand, v: GameView, now = Date.now()): string {
+  const status = `ok ${statusLine(v, now)}`;
+  if (command.type !== "resume" || !awaitingLearner(v)) return status;
+  return `${status}\nstill paused: your drawing stays on the board until the learner presses Continue (or Try again) when ready; you can keep talking with say`;
+}
+
+/** The --json output of a command: the view, and for `resume` whether the game is still paused waiting for the learner. */
+export function commandJson(command: TutorCommand, v: GameView): string {
+  return JSON.stringify(command.type === "resume" ? { ...v, stillPaused: awaitingLearner(v) } : v);
 }
 
 export function formatState(v: GameView, now = Date.now(), chatTail = 8): string {
@@ -243,6 +276,7 @@ export function formatState(v: GameView, now = Date.now(), chatTail = 8): string
       `engine=${v.engineBusy ? "busy" : "idle"}`,
     ].join(" "),
   );
+  if (v.tutorLevel) out.push(levelLine(v.tutorLevel));
   if (v.result) out.push(`result ${resultText(v.result)}`);
   if (v.problem) out.push(...problemLines(v.problem));
   if (v.board.length > 0) {
@@ -308,6 +342,7 @@ export function formatProfile(p: Profile, focus?: FocusRecommendation | null): s
   out.push(`rank estimate ${ratingToRank(p.rating)} (rating ${num(p.rating)}${trend}), games ${p.gamesPlayed}, problems solved ${p.problemsSolved}`);
   const handicap = p.handicap >= 2 ? `, learner takes ${p.handicap} handicap stones on 9x9 (rating below 20k, the weakest bot)` : "";
   out.push(`bot plays ${p.botRank}${handicap}`);
+  if (p.tutorLevel) out.push(levelLine(p.tutorLevel));
   const change = p.thresholdHistory?.at(-1);
   out.push(
     `mistake threshold ${num(p.mistakeThreshold)} pts` +

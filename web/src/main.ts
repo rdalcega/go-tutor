@@ -1,10 +1,11 @@
 import "./style.css";
-import type { ChatMessage, ClientAction, Color, GameView, GameSettings, ProfileResponse } from "../../src/shared/types.ts";
+import { TUTOR_LEVELS, type ChatMessage, type ClientAction, type Color, type GameView, type GameSettings, type ProfileResponse, type TutorLevel } from "../../src/shared/types.ts";
 import { ratingToRank } from "../../src/shared/rank.ts";
-import { categoryLabel, colorName, formatScore } from "../../src/shared/text.ts";
+import { TUTOR_LEVEL_TEXT, categoryLabel, colorName, formatScore } from "../../src/shared/text.ts";
 import { type ConnectionState, type Transport, httpTransport } from "./api.ts";
 import { BoardView } from "./board.ts";
-import { moveGtp, movePoint, tryFromGtp } from "../../src/shared/coords.ts";
+import { readCollapsed, writeCollapsed } from "./collapse.ts";
+import { moveGtp, movePoint } from "../../src/shared/coords.ts";
 import {
   attemptsLeftText,
   formatLoss,
@@ -37,6 +38,11 @@ const el = {
   boardWrap: $("board-wrap"),
   canvas: $<HTMLCanvasElement>("board"),
   variationLabel: $("variation-label"),
+  captionRow: $("caption-row"),
+  hideOverlay: $<HTMLButtonElement>("hide-overlay"),
+  levelOptions: $("level-options"),
+  levelDesc: $("level-desc"),
+  levelSummary: $("level-summary"),
   conn: $("conn"),
   turn: $("turn"),
   captures: $("captures"),
@@ -177,6 +183,7 @@ function render(): void {
   renderBoard(v);
   renderStatus(v);
   renderControls(v);
+  renderLevels(v);
   renderMoment(v);
   renderProblem(v);
   renderEval(v);
@@ -195,11 +202,7 @@ function boardBefore(v: GameView, settings: GameSettings, fromMove: number): Ret
 
 function renderBoard(v: GameView | null): void {
   if (!v) return;
-  const size = v.board.length;
   const last = v.moves.at(-1);
-  const moment = v.moment;
-  const bestGtp =
-    moment?.state === "fallback" ? v.moves[moment.moveNumber - 1]?.eval?.bestMove : undefined;
   const canMove = can(v, "play") && !!v.settings;
   // A variation that replaces a move is drawn on the board from before that move.
   const fromMove = v.overlay?.variation?.fromMove;
@@ -208,13 +211,45 @@ function renderBoard(v: GameView | null): void {
     board: before?.board ?? v.board,
     lastMove: before ? before.lastMove : movePoint(last?.move),
     overlay: v.overlay,
-    bestMove: bestGtp ? (tryFromGtp(bestGtp, size) ?? null) : null,
+    // Only what the drawing holds: KataGo's highlighted move goes when the drawing is hidden or cleared.
+    bestMove: v.overlay?.best ?? null,
     hoverColor: canMove && !before ? v.settings!.humanColor : null,
   });
   el.boardWrap.classList.toggle("locked", !canMove);
   const label = [v.overlay?.variation?.label, before && `position before move ${fromMove}`].filter(Boolean).join(" · ");
-  el.variationLabel.hidden = !label;
   el.variationLabel.textContent = label;
+  // Any drawing gets a Hide button (Esc too); it stays until the learner moves on or hides it.
+  el.captionRow.hidden = !v.overlay;
+  el.hideOverlay.disabled = !can(v, "clear_overlay");
+}
+
+/** One radio per tutor level, built once from the shared wording. */
+const levelInputs = TUTOR_LEVELS.map((level) => {
+  const label = document.createElement("label");
+  label.title = TUTOR_LEVEL_TEXT[level].learner;
+  const input = document.createElement("input");
+  input.type = "radio";
+  input.name = "tutor-level";
+  input.value = level;
+  const text = document.createElement("span");
+  text.textContent = TUTOR_LEVEL_TEXT[level].label;
+  label.append(input, text);
+  el.levelOptions.append(label);
+  input.addEventListener("change", () => {
+    if (input.checked) void act({ type: "set_tutor_level", level });
+  });
+  return input;
+});
+
+function renderLevels(v: GameView | null): void {
+  const level: TutorLevel = v?.tutorLevel ?? "coach";
+  for (const input of levelInputs) {
+    // While a change is on its way, keep the learner's pick rather than flicker back to the old level.
+    if (!pending) input.checked = input.value === level;
+    input.disabled = !can(v, "set_tutor_level");
+  }
+  el.levelDesc.textContent = TUTOR_LEVEL_TEXT[level].learner;
+  el.levelSummary.textContent = `Tutor: ${TUTOR_LEVEL_TEXT[level].label}`;
 }
 
 function renderStatus(v: GameView | null): void {
@@ -271,6 +306,7 @@ function renderMoment(v: GameView | null): void {
   const played = record ? moveGtp(record.move, size) : `move ${m.moveNumber}`;
   const best = record?.eval?.bestMove;
   el.moment.classList.toggle("fallback", m.state === "fallback");
+  el.moment.classList.toggle("awaiting", !!m.awaitingLearner);
   el.momentTitle.textContent = `Move ${m.moveNumber}: ${played} lost ${m.pointLoss.toFixed(1)} points`;
 
   if (m.state === "waiting") {
@@ -285,8 +321,9 @@ function renderMoment(v: GameView | null): void {
     countdownTimer = setInterval(tick, 250);
   } else {
     el.momentCountdown.textContent = "";
-    el.momentText.textContent =
-      m.state === "tutor"
+    el.momentText.textContent = m.awaitingLearner
+      ? "Your tutor is done — take your time, then press Continue."
+      : m.state === "tutor"
         ? m.moveNumber > v.moves.length
           ? "Your tutor took this move back. Find a better one."
           : "Your tutor is discussing this move in the chat."
@@ -319,7 +356,7 @@ function renderProblem(v: GameView | null): void {
 /** The eval strip before there is a human move to show. */
 function clearEval(): void {
   el.evalLoss.textContent = "–";
-  el.evalLoss.className = "loss";
+  el.evalLoss.className = "loss card-summary";
   el.evalDetail.textContent = "No moves yet.";
 }
 
@@ -338,13 +375,13 @@ function renderEval(v: GameView | null): void {
     clearEval();
   } else if (!last.eval) {
     el.evalLoss.textContent = "…";
-    el.evalLoss.className = "loss";
+    el.evalLoss.className = "loss card-summary";
     el.evalDetail.textContent = `Move ${last.number} · ${moveGtp(last.move, size)} · analyzing`;
   } else {
     const e = last.eval;
     const played = moveGtp(last.move, size);
     el.evalLoss.textContent = `${formatLoss(e.pointLoss)} pts`;
-    el.evalLoss.className = `loss ${lossLevel(e.pointLoss)}`;
+    el.evalLoss.className = `loss card-summary ${lossLevel(e.pointLoss)}`;
     const best = e.pointLoss >= 0.05 && e.bestMove !== played ? ` · best ${e.bestMove}` : "";
     el.evalDetail.textContent = `Move ${last.number} · ${played}${best} · win ${Math.round(e.winrateAfter * 100)}%`;
   }
@@ -490,6 +527,24 @@ el.retry.addEventListener("click", () => void act({ type: "retry" }));
 el.nextProblem.addEventListener("click", () => void act({ type: "next_problem" }));
 el.practice.addEventListener("click", () => void act({ type: "next_problem" }));
 el.leaveProblem.addEventListener("click", () => void act({ type: "leave_problem" }));
+el.hideOverlay.addEventListener("click", () => void act({ type: "clear_overlay" }));
+
+// Collapsible cards: the header button folds the card to its header line, remembered per card.
+for (const card of document.querySelectorAll<HTMLElement>(".card.collapsible")) {
+  const id = card.dataset.card ?? card.id;
+  const toggle = card.querySelector<HTMLButtonElement>(".card-toggle");
+  if (!toggle) continue;
+  const apply = (collapsed: boolean) => {
+    card.classList.toggle("collapsed", collapsed);
+    toggle.setAttribute("aria-expanded", String(!collapsed));
+  };
+  apply(readCollapsed(id));
+  toggle.addEventListener("click", () => {
+    const collapsed = !card.classList.contains("collapsed");
+    apply(collapsed);
+    writeCollapsed(id, collapsed);
+  });
+}
 
 // Resign needs a second click within a few seconds.
 let resignTimer: ReturnType<typeof setTimeout> | undefined;
@@ -540,10 +595,20 @@ el.chatForm.addEventListener("submit", (e) => {
   void act({ type: "chat", text });
 });
 
+/** Where keys belong to the focused control: any input, select, textarea, editable text, or a form's buttons. */
+const FORM_CONTROLS = "input, select, textarea, [contenteditable]:not([contenteditable=false]), form button";
+
 document.addEventListener("keydown", (e) => {
   if (e.metaKey || e.ctrlKey || e.altKey) return;
   const target = e.target as HTMLElement | null;
-  if (target?.closest("input, textarea, select, dialog") || el.resultDialog.open) return;
+  if (el.resultDialog.open) return; // Esc closes the dialog
+  // Esc hides the drawing on the board, except in a form control, which keeps its own Esc.
+  if (e.key === "Escape" && !target?.closest(FORM_CONTROLS) && can(view, "clear_overlay")) {
+    e.preventDefault();
+    void act({ type: "clear_overlay" });
+    return;
+  }
+  if (target?.closest("input, textarea, select, dialog")) return;
   const key = e.key.toLowerCase();
   if (key === "p" && !el.pass.disabled) {
     e.preventDefault();

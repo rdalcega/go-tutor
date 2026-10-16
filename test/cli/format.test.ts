@@ -1,5 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
+  commandJson,
+  commandOutput,
   dueText,
   formatEvent,
   formatProblemList,
@@ -200,6 +202,30 @@ describe("formatEvent", () => {
 
   it("formats game start", () => {
     expect(formatEvent({ ...base, type: "game_start", gameId: "g12", settings }, ctx)).toBe("GAME_START g12 9x9 komi 7 human=B bot=20k");
+    expect(formatEvent({ ...base, type: "game_start", gameId: "g12", settings, tutorLevel: "silent" }, ctx)).toBe(
+      "GAME_START g12 9x9 komi 7 human=B bot=20k level=silent",
+    );
+  });
+
+  it("formats tutor level changes and point_out moments with what they mean for the tutor", () => {
+    expect(formatEvent({ ...base, type: "tutor_level", level: "point_out", gameId: "g12" }, ctx)).toBe(
+      "LEVEL point_out — explain mistakes, don't take moves back (rethink is refused) (from the learner's next move)",
+    );
+    expect(formatEvent({ ...base, type: "tutor_level", level: "silent", gameId: null }, ctx)).toMatch(/^LEVEL silent — no teaching moments; .*one say/);
+    const moment: TutorEvent = {
+      ...base,
+      type: "teaching_moment",
+      size: 9,
+      gameId: "g12",
+      moment: { id: "m3", moveNumber: 14, pointLoss: 6.2, state: "waiting", deadline: 1_030_000 },
+      record: humanMove,
+      boardBefore: "",
+      boardAfter: "",
+      tutorLevel: "point_out",
+    };
+    expect(formatEvent(moment, ctx)).toBe(
+      "MOMENT m3 game=g12 move 14 B C3 lost 6.2 pts (best D5, pv D5 E4 C6) — level point_out: explain mistakes, don't take moves back (rethink is refused) — reply with: claim m3, then say/show/mark/resume; fallback in 30s",
+    );
   });
 });
 
@@ -236,6 +262,7 @@ const view = (over: Partial<GameView> = {}): GameView => ({
     { id: "c2", ts: 2, from: "tutor", text: "line1\nline2", momentId: "m3" },
   ],
   tutorAttached: true,
+  tutorLevel: "coach",
   engineBusy: false,
   profileVersion: 0,
   allowed: ["new_game", "chat", "next_problem", "resign", "continue", "retry"],
@@ -282,7 +309,7 @@ describe("formatState", () => {
     expect(problemLines(shown)[2]).toBe("answer D5 (pv D5 E4)");
     const v = view({ gameId: null, mode: "problem", status: "finished", moves: [], moment: null, problem: shown });
     expect(formatState(v)).toContain("problem p4 life_and_death (from g12 move 14, box 1) B to play, answer shown: Black to play. Live.");
-    expect(statusLine(v)).toBe("problem=p4 mode=problem status=finished attempts=2/2 answer shown (D5)");
+    expect(statusLine(v)).toBe("problem=p4 mode=problem status=finished level=coach attempts=2/2 answer shown (D5)");
   });
 
   it("handles an idle server", () => {
@@ -293,9 +320,35 @@ describe("formatState", () => {
     expect(text).toContain("chat: empty");
   });
 
+  it("says after resume when the pause now waits for the learner", () => {
+    const awaiting = view({ moment: { id: "m3", moveNumber: 3, pointLoss: 6.2, state: "tutor", awaitingLearner: true } });
+    const out = commandOutput({ type: "resume" }, awaiting).split("\n");
+    expect(out[0]).toBe(
+      "ok game=g12 mode=game status=paused level=coach toPlay=W moves=3 moment m3 move 3 lost 6.2 state=tutor (you resumed; still paused with the drawing, waiting for the learner to press Continue)",
+    );
+    expect(out[1]).toMatch(/^still paused: your drawing stays on the board until the learner presses Continue/);
+    // Other commands, and a resume that ended the pause, print the status only.
+    expect(commandOutput({ type: "say", text: "hi" }, awaiting)).toBe(out[0]);
+    expect(commandOutput({ type: "resume" }, view({ status: "playing", moment: { id: "m3", moveNumber: 3, pointLoss: 6.2, state: "resolved" } }))).toBe(
+      "ok game=g12 mode=game status=playing level=coach toPlay=W moves=3",
+    );
+    expect(formatState(awaiting)).toContain("tutor level coach: full coaching");
+    expect(formatState(awaiting)).toContain("waiting for the learner to press Continue");
+  });
+
+  it("resume --json says whether the game is still paused for the learner", () => {
+    const awaiting = view({ moment: { id: "m3", moveNumber: 3, pointLoss: 6.2, state: "tutor", awaitingLearner: true } });
+    const json = JSON.parse(commandJson({ type: "resume" }, awaiting)) as Record<string, unknown>;
+    expect(json).toMatchObject({ status: "paused", stillPaused: true, moment: { awaitingLearner: true } });
+    const ended = view({ status: "playing", moment: { id: "m3", moveNumber: 3, pointLoss: 6.2, state: "resolved" } });
+    expect(JSON.parse(commandJson({ type: "resume" }, ended))).toMatchObject({ status: "playing", stillPaused: false });
+    // Other commands print the view as it is.
+    expect(commandJson({ type: "say", text: "hi" }, awaiting)).toBe(JSON.stringify(awaiting));
+  });
+
   it("statusLine is a single line", () => {
     expect(statusLine(view({ moment: { id: "m3", moveNumber: 3, pointLoss: 6.2, state: "tutor" } }))).toBe(
-      "game=g12 mode=game status=paused toPlay=W moves=3 moment m3 move 3 lost 6.2 state=tutor",
+      "game=g12 mode=game status=paused level=coach toPlay=W moves=3 moment m3 move 3 lost 6.2 state=tutor",
     );
   });
 });
@@ -322,6 +375,7 @@ describe("summary and review", () => {
     practiced: {},
     gamesPlayed: 11,
     problemsSolved: 2,
+    tutorLevel: "coach",
     ...over,
   });
 
@@ -330,6 +384,7 @@ describe("summary and review", () => {
     expect(text.split("\n")).toEqual([
       "rank estimate 18k (rating 11.6, trend +1.6 over the last 2 rated games), games 11, problems solved 2",
       "bot plays 18k",
+      "tutor level coach: full coaching: say, show, mark, and rethink to let them find the move",
       "mistake threshold 4 pts (last changed 4.5 -> 4 after g11: average loss 1.2 pts per move over the last 3 games)",
       "recent rated games: g10 won vs 20k (+0.4), g11 won vs 19k (+1.2)",
       "mistakes by category (total, in the last 3 games): shape 5 (2, rising), life_and_death 3 (0, falling), opening 1 (0, steady)",

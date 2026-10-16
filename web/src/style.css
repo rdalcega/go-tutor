@@ -143,6 +143,9 @@ select, input[type="text"] {
   font-size: 0.9rem;
   text-align: center;
 }
+.caption:empty { display: none; }
+.caption-row { display: flex; align-items: center; justify-content: center; gap: 10px; max-width: 100%; }
+.hide-overlay { flex-shrink: 0; padding: 0.15rem 0.6rem; font-size: 0.8rem; color: var(--muted); }
 
 .panel {
   display: flex;
@@ -176,6 +179,44 @@ select, input[type="text"] {
   flex-direction: column;
   gap: 8px;
 }
+/* The informational cards keep their height; the chat takes what is left. */
+.panel > .card:not(.chat) { flex-shrink: 0; }
+
+/* --- collapsible cards ----------------------------------------------- */
+
+.card-head { margin: 0; font-size: inherit; font-weight: inherit; }
+.card-toggle {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  width: 100%;
+  padding: 0;
+  border: 0;
+  border-radius: 4px;
+  background: none;
+  text-align: left;
+}
+/* The title takes the free width, so a summary and the chevron sit at the right. */
+.card-toggle .turn,
+.card-toggle .label { flex: 1; min-width: 0; }
+.card-toggle .label { font-size: 0.75rem; color: var(--muted); text-transform: uppercase; letter-spacing: 0.04em; }
+.chevron {
+  flex-shrink: 0;
+  align-self: center;
+  width: 7px;
+  height: 7px;
+  margin: 0 3px 3px 2px;
+  border-right: 2px solid var(--muted);
+  border-bottom: 2px solid var(--muted);
+  transform: rotate(45deg);
+  transition: transform 0.15s;
+}
+.collapsed .chevron { transform: rotate(-45deg); margin-bottom: 0; }
+.card-body { display: flex; flex-direction: column; gap: 8px; }
+.collapsed .card-body { display: none; }
+.card-summary:empty { display: none; }
+#level-summary { font-size: 0.85rem; color: var(--muted); }
+.controls:not(.collapsed) #level-summary { display: none; }
 
 /* --- status ---------------------------------------------------------- */
 
@@ -217,6 +258,28 @@ select, input[type="text"] {
 }
 .new-game select { color: var(--text); font-size: 0.9rem; }
 
+.levels { border: 0; margin: 0; padding: 0; min-width: 0; display: flex; flex-direction: column; gap: 4px; }
+.levels legend { padding: 0; margin-bottom: 4px; font-size: 0.75rem; color: var(--muted); }
+.segmented {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  overflow: hidden;
+  background: var(--surface-2);
+}
+.segmented label { position: relative; cursor: pointer; }
+.segmented label + label { border-left: 1px solid var(--border); }
+/* The radio stays focusable and keyboard-operable (arrow keys); the span is what shows. */
+.segmented input { position: absolute; inset: 0; width: 100%; height: 100%; margin: 0; opacity: 0; cursor: pointer; }
+.segmented span { display: block; padding: 0.3rem 0.4rem; text-align: center; font-size: 0.85rem; white-space: nowrap; }
+.segmented input:checked + span { background: var(--accent); color: var(--accent-text); }
+.segmented input:focus-visible + span { outline: 2px solid var(--accent); outline-offset: -3px; }
+.segmented input:checked:focus-visible + span { outline-color: var(--accent-text); }
+.segmented input:disabled + span { opacity: 0.6; }
+.segmented input:disabled { cursor: default; }
+.level-desc { font-size: 0.8rem; color: var(--muted); }
+
 /* --- teaching moment ------------------------------------------------- */
 
 .moment {
@@ -224,6 +287,7 @@ select, input[type="text"] {
   background: color-mix(in srgb, var(--warn) 9%, var(--surface));
 }
 .moment.fallback { border-color: color-mix(in srgb, var(--accent) 50%, var(--border)); background: color-mix(in srgb, var(--accent) 8%, var(--surface)); }
+.moment.awaiting { border-color: color-mix(in srgb, var(--good) 50%, var(--border)); background: color-mix(in srgb, var(--good) 8%, var(--surface)); }
 .moment-head { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; }
 .countdown { font-variant-numeric: tabular-nums; color: var(--muted); font-size: 0.85rem; }
 
@@ -240,8 +304,6 @@ select, input[type="text"] {
 
 /* --- eval strip ------------------------------------------------------ */
 
-.eval-head { display: flex; justify-content: space-between; align-items: baseline; }
-.eval .label { font-size: 0.75rem; color: var(--muted); text-transform: uppercase; letter-spacing: 0.04em; }
 .loss { font-weight: 700; font-size: 1.15rem; font-variant-numeric: tabular-nums; }
 .loss.good { color: var(--good); }
 .loss.inaccuracy { color: var(--warn); }
@@ -265,12 +327,14 @@ select, input[type="text"] {
 
 /* --- chat ------------------------------------------------------------ */
 
-.chat { flex: 1; min-height: 200px; padding: 0; gap: 0; overflow: hidden; }
+/* Fills the rest of the side panel (collapsing other cards gives it room); the input stays visible. */
+.chat { flex: 1 1 0; min-height: 220px; padding: 0; gap: 0; overflow: hidden; }
 .chat-log {
   list-style: none;
   margin: 0;
   padding: 12px 14px;
   flex: 1;
+  min-height: 0;
   overflow-y: auto;
   display: flex;
   flex-direction: column;
@@ -297,6 +361,7 @@ select, input[type="text"] {
 }
 .chat-log .empty { align-self: center; color: var(--muted); font-size: 0.85rem; }
 .chat-form {
+  flex-shrink: 0;
   display: flex;
   gap: 8px;
   padding: 10px;

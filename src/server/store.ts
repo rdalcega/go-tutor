@@ -5,7 +5,7 @@
 import { appendFileSync, closeSync, existsSync, fstatSync, mkdirSync, openSync, readFileSync, readSync, readdirSync, renameSync, statSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { MISTAKE_CATEGORIES, type MistakeCategory, type Profile, type SavedGame, type TutorEvent } from "../shared/types.ts";
+import { MISTAKE_CATEGORIES, TUTOR_LEVELS, type MistakeCategory, type Profile, type SavedGame, type TutorEvent, type TutorLevel } from "../shared/types.ts";
 import { withBuiltins, type StoredProblem } from "./problems.ts";
 
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
@@ -24,6 +24,7 @@ export function defaultProfile(): Profile {
     practiced: {},
     gamesPlayed: 0,
     problemsSolved: 0,
+    tutorLevel: "coach",
   };
 }
 
@@ -195,7 +196,8 @@ export class Store {
     if (!existsSync(this.profilePath)) return base;
     try {
       const saved = JSON.parse(readFileSync(this.profilePath, "utf8")) as Partial<Profile>;
-      return { ...base, ...saved, mistakeCounts: { ...base.mistakeCounts, ...saved.mistakeCounts } };
+      const tutorLevel = TUTOR_LEVELS.includes(saved.tutorLevel as TutorLevel) ? saved.tutorLevel! : base.tutorLevel;
+      return { ...base, ...saved, mistakeCounts: { ...base.mistakeCounts, ...saved.mistakeCounts }, tutorLevel };
     } catch {
       renameSync(this.profilePath, `${this.profilePath}.corrupt-${Date.now()}`);
       return base;

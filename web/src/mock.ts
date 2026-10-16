@@ -17,7 +17,8 @@ import type {
 import type { ConnectionState, Transport } from "./api.ts";
 import { allowedActions } from "../../src/shared/allowed.ts";
 import { fromGtp, toGtp, tryFromGtp } from "../../src/shared/coords.ts";
-import { colorName, round1 } from "../../src/shared/text.ts";
+import { BOX_INTERVALS, nextBox, resultOf } from "../../src/shared/schedule.ts";
+import { colorName, round1, tutorLevelChangedText } from "../../src/shared/text.ts";
 import { BUILTIN_PROBLEMS, type BuiltinProblem } from "../../src/server/builtin-problems.ts";
 
 function fakeEval(size: number, pointLoss: number, bestMove: string, lead: number, line?: string[]): MoveEval {
@@ -106,6 +107,7 @@ class MockServer implements Transport {
       practiced: {},
       gamesPlayed: games.length,
       problemsSolved: 0,
+      tutorLevel: this.view.tutorLevel,
     };
     return {
       profile,
@@ -152,6 +154,7 @@ class MockServer implements Transport {
       engineReady: true,
       tutorAttached: v.tutorAttached,
       problem: v.problem ? { revealed: v.problem.revealed, checking: false } : null,
+      overlay: v.overlay !== null,
     });
   }
 
@@ -179,7 +182,8 @@ class MockServer implements Transport {
     this.game = game;
     const momentId = "mom-13";
     v.status = "paused";
-    v.moment = { id: momentId, moveNumber: 13, pointLoss: 6.2, state: "waiting", deadline: Date.now() + 25_000 };
+    // The tutor drew a line and resumed: the drawing stays until the learner presses Continue.
+    v.moment = { id: momentId, moveNumber: 13, pointLoss: 6.2, state: "tutor", awaitingLearner: true };
     v.overlay = {
       variation: {
         label: "Tutor: C7 keeps the corner connected",
@@ -221,6 +225,7 @@ class MockServer implements Transport {
       overlay: null,
       chat: [],
       tutorAttached: this.view?.tutorAttached ?? true,
+      tutorLevel: this.view?.tutorLevel ?? "coach",
       engineBusy: false,
       problem: null,
       profileVersion: this.view?.profileVersion ?? 0,
@@ -236,7 +241,9 @@ class MockServer implements Transport {
       const rec = this.game?.moves[m.moveNumber - 1];
       const best = rec?.eval?.bestMove ?? "pass";
       const size = this.game?.size ?? 9;
+      const bestPoint = tryFromGtp(best, size);
       this.view.overlay = {
+        ...(bestPoint && { best: bestPoint }),
         variation: {
           label: "KataGo's line",
           fromMove: m.moveNumber,
@@ -264,6 +271,15 @@ class MockServer implements Transport {
         if (this.gameView) ({ view: this.view, game: this.game } = this.gameView);
         this.gameView = null;
         this.problemDef = null;
+        return null;
+      case "clear_overlay":
+        v.overlay = null;
+        return null;
+      case "set_tutor_level":
+        v.tutorLevel = a.level;
+        if (this.gameView) this.gameView.view.tutorLevel = a.level;
+        v.profileVersion++;
+        this.msg("system", tutorLevelChangedText(a.level));
         return null;
       case "new_game": {
         this.gameView = null;
@@ -383,6 +399,9 @@ class MockServer implements Transport {
       p.revealed = true;
       p.solved = correct;
       p.answer = { move: answer, pv: [answer] };
+      // Scheduled as the server does it (src/shared/schedule.ts); the panel's "see this again" reads nextDue.
+      p.box = nextBox(p.box, resultOf(correct, p.attempts));
+      p.nextDue = Date.now() + BOX_INTERVALS[p.box]!;
       v.status = "finished";
       const shown = fromGtp(correct ? gtp : answer, 9)!;
       v.overlay = {
@@ -402,7 +421,8 @@ class MockServer implements Transport {
     const best = this.randomEmpty() ?? { x: 0, y: 0 };
     rec.eval = fakeEval(size, loss, toGtp(best, size), 1);
     v.engineBusy = false;
-    if (loss >= 4) {
+    // On Silent a mistake is recorded but the game doesn't pause.
+    if (loss >= 4 && v.tutorLevel !== "silent") {
       const id = `mom-${rec.number}`;
       v.status = "paused";
       v.moment = { id, moveNumber: rec.number, pointLoss: loss, state: "waiting", deadline: Date.now() + 15_000 };

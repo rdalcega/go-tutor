@@ -116,6 +116,34 @@ describe("problem mode", () => {
     expect(profile.practiced.life_and_death).toBe(0);
   });
 
+  it("says when a finished problem comes back, and next_problem brings a failed one back once it is due", async () => {
+    // Everything else waits a day, so only the failed problem can come due.
+    const problems = store.loadProblems();
+    for (const p of problems) if (p.id !== LIVE) p.due = clock.now() + 24 * 3_600_000;
+    store.saveProblems(problems);
+    engine.lossAfter(["D1"], 19);
+    engine.lossAfter(["F1"], 18);
+    await startLive();
+    expect(ctl.view().problem?.nextDue).toBeUndefined();
+    await ctl.handleAction({ type: "play", point: at("D1") });
+    await flush();
+    expect(ctl.view().problem?.nextDue).toBeUndefined(); // not over yet
+    await ctl.handleAction({ type: "play", point: at("F1") });
+    await flush();
+    const failedAt = clock.now();
+    expect(ctl.view().problem).toMatchObject({ revealed: true, solved: false, nextDue: failedAt + BOX_INTERVALS[1]! });
+
+    // Before it is due, Next problem moves on to another one (an early review).
+    clock.advance(5 * 60_000);
+    await ctl.handleAction({ type: "next_problem" });
+    expect(ctl.view().problem?.id).not.toBe(LIVE);
+    // Ten minutes after the failure it is due again, and it is the one next_problem picks.
+    clock.advance(5 * 60_000);
+    await ctl.handleAction({ type: "next_problem" });
+    expect(ctl.view().problem).toMatchObject({ id: LIVE, box: 1, attempts: 0 });
+    expect(ctl.view().chat.at(-1)?.text).not.toMatch(/early review/);
+  });
+
   it("counts an unexpected move within a point of KataGo's best as correct and keeps it as an answer", async () => {
     engine.lossAfter(["D1"], 19);
     // KataGo searched H8 well in the problem position: 0.6 below its best in that same search.

@@ -12,7 +12,7 @@ export interface BoardScene {
   board: Board;
   lastMove: Point | null;
   overlay: Overlay | null;
-  /** KataGo's preferred move, highlighted during a fallback. */
+  /** KataGo's preferred move, highlighted (the overlay's `best`, from its fallback answer). */
   bestMove: Point | null;
   /** Color of the hover ghost, or null when the board does not accept input. */
   hoverColor: Color | null;

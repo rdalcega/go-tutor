@@ -28,6 +28,11 @@ export interface MoveRecord {
   captures: Point[];
   /** Filled in once KataGo has analyzed the position after this move. */
   eval?: MoveEval;
+  /**
+   * The learner's tutor level when they played this move (human moves only; absent in games saved
+   * before levels existed, which meant coach). It decides whether the move can open a teaching moment.
+   */
+  tutorLevel?: TutorLevel;
 }
 
 /** KataGo's verdict on one played move, always from the mover's perspective. */
@@ -78,6 +83,13 @@ export interface TeachingMoment {
   state: "waiting" | "tutor" | "fallback" | "resolved";
   /** Absolute ms epoch when the fallback kicks in, while state === "waiting". */
   deadline?: number;
+  /**
+   * The tutor sent `resume` while a drawing was on the board: the game stays paused with the
+   * drawing until the learner presses Continue (or Try again). Only with state "tutor".
+   */
+  awaitingLearner?: boolean;
+  /** The tutor level the moment's move was played at (absent before levels existed: coach). */
+  level?: TutorLevel;
 }
 
 /** Overlays the board UI draws on top of the stones. */
@@ -90,7 +102,18 @@ export interface Overlay {
   variation?: { label?: string; moves: { color: Color; point: Point }[]; fromMove?: number };
   /** Marked points (e.g. "the better move", "this group is weak"). */
   marks?: { point: Point; kind: MarkKind | "label"; text?: string }[];
+  /** KataGo's preferred move, highlighted (part of its fallback answer to a teaching moment). */
+  best?: Point;
 }
+
+/**
+ * How much the tutor steps in during games (the learner's choice, kept in the profile):
+ * "silent" = no pauses or comments during a game (hints and questions still answered, review after);
+ * "point_out" = pauses at mistakes and explains, but never takes a move back;
+ * "coach" = everything, including taking a move back for another try.
+ */
+export const TUTOR_LEVELS = ["silent", "point_out", "coach"] as const;
+export type TutorLevel = (typeof TUTOR_LEVELS)[number];
 
 /** Marks the tutor can draw with `mark` (the UI also draws "label" marks). */
 export const MARK_KINDS = ["circle", "triangle", "square", "x"] as const;
@@ -121,6 +144,8 @@ export interface GameView {
   chat: ChatMessage[];
   /** True while a tutor session holds an open `tutor watch` connection. */
   tutorAttached: boolean;
+  /** How much the tutor steps in during games (the profile's setting). */
+  tutorLevel: TutorLevel;
   /** True while KataGo is thinking (bot move or analysis). */
   engineBusy: boolean;
   /** Present in problem mode. */
@@ -160,6 +185,8 @@ export interface ProblemView {
   lastAttempt?: ProblemAttempt;
   /** KataGo's best move and its line, once the problem is over. */
   answer?: { move: Gtp; pv: Gtp[] };
+  /** When the problem is due again (ms epoch), once its result is recorded (spaced repetition). */
+  nextDue?: number;
 }
 
 export interface ProblemAttempt {
@@ -183,7 +210,9 @@ export type ClientAction =
   | { type: "chat"; text: string }
   | { type: "ask_tutor"; text?: string } // explicit "hint please" button
   | { type: "next_problem" } // enter problem mode, or go on to the next problem
-  | { type: "leave_problem" }; // back to the game (or the idle board)
+  | { type: "leave_problem" } // back to the game (or the idle board)
+  | { type: "clear_overlay" } // hide the drawing on the board (the tutor's, KataGo's or a hint)
+  | { type: "set_tutor_level"; level: TutorLevel }; // applies from the learner's next move
 
 // ---------------------------------------------------------------------------
 // Tutor → server (the `tutor` CLI posts these to POST /api/tutor)
@@ -197,7 +226,10 @@ export type TutorCommand =
   | { type: "show"; moves: Gtp[]; start?: Color; label?: string }
   | { type: "mark"; points: Gtp[]; kind?: MarkKind; text?: string }
   | { type: "clear" }
-  /** End the pause and let play continue. */
+  /**
+   * End the pause and let play continue. With a drawing on the board the pause stays, waiting for
+   * the learner's Continue (the moment gets `awaitingLearner`), so the drawing isn't wiped at once.
+   */
   | { type: "resume" }
   /** Tutor took ownership of the current moment; cancels the fallback timer. */
   | { type: "claim"; momentId: string }
@@ -210,7 +242,7 @@ export type TutorCommand =
 // ---------------------------------------------------------------------------
 
 export type TutorEvent =
-  | { seq: number; ts: number; type: "game_start"; gameId: string; settings: GameSettings }
+  | { seq: number; ts: number; type: "game_start"; gameId: string; settings: GameSettings; tutorLevel?: TutorLevel }
   | { seq: number; ts: number; type: "move"; gameId: string; size: number; record: MoveRecord; by: "human" | "bot" }
   | {
       seq: number;
@@ -226,7 +258,11 @@ export type TutorEvent =
       boardBefore: string;
       /** ASCII rendering AFTER the move. */
       boardAfter: string;
+      /** The learner's tutor level (absent in events logged before levels existed, which meant coach). */
+      tutorLevel?: TutorLevel;
     }
+  /** The learner changed the tutor level; it applies from their next move. */
+  | { seq: number; ts: number; type: "tutor_level"; level: TutorLevel; gameId: string | null }
   /** `problemId` is set when the learner wrote while a practice problem was on the board (the message is about it). */
   | { seq: number; ts: number; type: "user_message"; text: string; momentId?: string; gameId: string | null; problemId?: string }
   | { seq: number; ts: number; type: "hint_request"; text?: string; gameId: string; size: number; board: string; toPlay: Color }
@@ -353,6 +389,8 @@ export interface Profile {
   practiced: Partial<Record<MistakeCategory, number>>;
   gamesPlayed: number;
   problemsSolved: number;
+  /** How much the tutor steps in during games (default "coach"). */
+  tutorLevel: TutorLevel;
 }
 
 /** What to teach next (`recommendFocus` in src/server/profile.ts). */

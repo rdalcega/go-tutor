@@ -7,6 +7,7 @@ import type { IncomingMessage, ServerResponse } from "node:http";
 import {
   MARK_KINDS,
   MISTAKE_CATEGORIES,
+  TUTOR_LEVELS,
   type ClientAction,
   type Color,
   type GameSettings,
@@ -14,6 +15,7 @@ import {
   type MistakeCategory,
   type TutorCommand,
   type TutorEvent,
+  type TutorLevel,
 } from "../shared/types.ts";
 import { UserError, type TutorEventInput } from "./common.ts";
 import type { GameController } from "./game.ts";
@@ -323,7 +325,13 @@ export function parseClientAction(body: unknown): ClientAction {
     case "retry":
     case "next_problem":
     case "leave_problem":
+    case "clear_overlay":
       return { type: o.type };
+    case "set_tutor_level": {
+      const level = str(o, "level", true);
+      if (!(TUTOR_LEVELS as readonly string[]).includes(level)) throw new UserError(`Tutor level must be one of ${TUTOR_LEVELS.join(", ")}.`);
+      return { type: "set_tutor_level", level: level as TutorLevel };
+    }
     case "chat":
       return { type: "chat", text: str(o, "text", true) };
     case "ask_tutor": {

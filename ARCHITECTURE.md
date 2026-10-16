@@ -21,8 +21,9 @@ The contract for every boundary is `src/shared/types.ts`.
 |---|---|
 | `src/shared/types.ts` | All cross-boundary types. |
 | `src/shared/coords.ts` | `toGtp(point, size)`, `fromGtp(gtp, size)` (columns `A`–`T` skipping `I`; row 1 at the bottom), `movePoint(move)`, `moveGtp(move, size)`, `samePoint`. |
-| `src/shared/allowed.ts` | `allowedActions(state)`: the browser actions the server accepts in a given state (mode, status, result, moment, turn, engine, tutor, problem), used by the controller and the UI mock. |
-| `src/shared/text.ts` | Wording shared by server, CLI and UI: `colorName`, `categoryLabel`, `round1`, `formatScore`. |
+| `src/shared/allowed.ts` | `allowedActions(state)`: the browser actions the server accepts in a given state (mode, status, result, moment, turn, engine, tutor, problem, drawing on the board), used by the controller and the UI mock. |
+| `src/shared/text.ts` | Wording shared by server, CLI and UI: `colorName`, `categoryLabel`, `round1`, `formatScore`, `TUTOR_LEVEL_TEXT` (each level's label, the learner's description and the tutor's), `tutorLevelChangedText` (the chat line for a level change), `comeBackText` (when a problem is due again). |
+| `src/shared/schedule.ts` | Leitner scheduling for practice problems (`BOX_INTERVALS`, `MAX_BOX`, `resultOf`, `nextBox`, `schedule`), used by the server's problems and the UI mock. |
 | `src/shared/rank.ts` | `rankToRating("20k") → 10`, `ratingToRank(10) → "20k"` on the scale 30k=0 … 1k=29, 1d=30 … 9d=38. |
 | `src/engine/` | Pure Go rules: `GoGame` class (play/pass/undo, captures, suicide illegal, positional superko; `before(n)` copies the game before move n from its history, `fromBoard` sets up a position), `gameBefore(settings, moves, n)` (replays a saved move list), `boardFromDiagram`, area scoring with komi, dead-stone input from KataGo ownership, `toAscii(board)`, SGF read/write. No I/O. |
 | `src/server/katago.ts` | Long-lived `katago analysis` child process speaking the JSON analysis protocol; query queue with ids; `analyze(position, opts)`, `botMove(position, rank)`, `ownership`. |
@@ -32,7 +33,7 @@ The contract for every boundary is `src/shared/types.ts`.
 | `src/server/bridge.ts` | Tutor bridge: event sequence numbers, `data/events.jsonl` append log, SSE fan-out to `tutor watch` connections, `tutorAttached` tracking, applying `TutorCommand`s to the controller. |
 | `src/server/store.ts` | Persistence under `data/` (path overridable with `GO_TUTOR_DATA`): `games/<id>.sgf` + `games/<id>.json` (settings, moves with evals, result, summary), `games/index.json` (creation time and finished flag per game, so finding the last game reads one file; read and checked against the files once at startup, then kept in memory), `profile.json`, `problems.json`. The controller writes a game at the end of the tick that changed it (one action's burst of changes is one write), and at once for a new game, at game end and on shutdown (SIGINT, SIGTERM, SIGHUP, beforeExit). |
 | `src/server/profile.ts` | Learner memory, pure functions over `Profile`: rank adaptation (`applyGame`), heuristic mistake categories (`classifyMistake`), tutor tags (`applyTag`), the adaptive mistake threshold, and `recommendFocus`. See "Learner profile". |
-| `src/server/problems.ts` | Practice problems, pure functions over `StoredProblem`: problems from a finished game's mistakes, the built-in merge, position hashes, Leitner scheduling, which problem comes next, the `GET /api/problems` body. See "Practice problems". |
+| `src/server/problems.ts` | Practice problems, pure functions over `StoredProblem`: problems from a finished game's mistakes, the built-in merge, position hashes, Leitner scheduling (`src/shared/schedule.ts`), which problem comes next, the `GET /api/problems` body. See "Practice problems". |
 | `src/server/builtin-problems.ts` | The built-in starter set: a dozen classic 9×9 problems as readable board diagrams with their answers (verified against real KataGo in `test/server/katago.integration.test.ts`). |
 | `src/server/index.ts` | `node:http` server on port 4747 (`PORT` env): JSON API, SSE, serves `dist/` in production. |
 | `src/cli/tutor.ts` | The tutor's command line. See "Tutor CLI". |
@@ -70,9 +71,14 @@ The contract for every boundary is `src/shared/types.ts`.
      (`claim`, `say`, `rethink`, `show`, `mark`). Any of them sets state `tutor` and cancels the timer.
    - If no tutor is attached or the timer fires: state `fallback`, overlay draws KataGo's PV as a variation
      with `fromMove` set (the UI shows the board from before the mistake, numbered PV, the played point
-     marked ✕), a system chat message states the point loss in plain words. Emit `fallback`.
-   - The pause ends when the human presses Continue (`continue`), the tutor sends `resume`, or the human
-     plays again after a `rethink` (which undoes their move).
+     marked ✕, KataGo's move highlighted from the overlay's `best`), a system chat message states the point loss in plain words. Emit `fallback`.
+   - The pause ends when the human presses Continue (`continue`) or Try again (`retry`), or plays again
+     after a `rethink` (which undoes their move). The tutor's `resume` ends it only when nothing is drawn
+     on the board; with a drawing up (the tutor's `show`/`mark`, or KataGo's fallback line) the moment
+     gets `awaitingLearner: true` (state `tutor`, the timer cancelled), the drawing stays, and the UI
+     says the tutor is done and the learner can press Continue when ready.
+   - For a move played on the **Silent** tutor level (see "Tutor levels") none of this happens: the
+     move is evaluated and recorded, and the bot replies.
 4. When not paused, the bot replies (with a small delay so it feels natural). Emit `move` (by bot).
 5. Game ends on two consecutive passes (score with KataGo ownership to remove dead stones) or resign.
    Build the `GameSummary` (mistakes categorized), update the profile (its `RatingChange` goes into
@@ -92,6 +98,31 @@ isn't saved). A mistake without one (evaluated before a restart) is classified a
 ownership.
 
 Bot moves are never evaluated as teaching moments. Only the human's moves are.
+
+**Drawings** (`overlay`: the tutor's `show`/`mark`, KataGo's fallback line, a hint mark, a problem's
+verdict) stay on the board until the learner's next move or action that changes the position (a
+move or problem attempt, Continue, Try again, a new game), until the tutor's `clear`, or until the learner hides
+them: the `clear_overlay` action (the Hide button next to the board caption, or Esc), offered in
+`allowed` whenever a drawing is up. Hiding a drawing during a pause keeps the pause.
+
+**Tutor levels** (`Profile.tutorLevel`, in `GameView.tutorLevel`; default `coach`): the learner's
+`set_tutor_level` action changes it at any time (the profile is saved, `tutor_level` is emitted with a
+system chat line), and it applies from their next move: each human `MoveRecord` keeps the
+`tutorLevel` it was played at (saved with the game, so a restart opens or skips a due moment by that
+level, not the current one), and a moment keeps its move's level as `TeachingMoment.level`.
+`game_start` carries the current level, `teaching_moment` the moment's.
+- `coach`: everything above.
+- `point_out`: as coach, but the tutor's `rethink` on a Point out moment is refused ("The learner chose Point out: explain,
+  don't take moves back"). The learner's own Try again works.
+- `silent`: a human move played on Silent never opens a teaching moment (no pause, no
+  `teaching_moment`, no KataGo fallback line or system mistake message, with or without a tutor). Its
+  eval, heuristic category, summary entry, profile tallies and practice problem are the same as on the
+  other levels. While a game is in progress (no result, no open moment) the tutor's `show`, `mark`
+  and `rethink` are refused, and `say` is accepted only once per learner question: after a
+  `user_message` or `hint_request` that reached an attached tutor and has no tutor `say`, `show` or
+  `mark` after it yet (a hint KataGo answered doesn't count; a new game, the game's end, and entering
+  or leaving a problem drop an unanswered question). Hints work as usual. Practice
+  problems, a moment opened before the switch, and the post-game review are not restricted.
 
 `ask_tutor` emits `hint_request` (with the current ASCII board). With no tutor attached the server
 answers with KataGo's top move marked as a hint.
@@ -194,7 +225,9 @@ which merges in the built-in set) holds every problem with its spaced-repetition
 - **Spaced repetition** (Leitner, boxes 1–5): new problems are in box 1 and due at once. Solved first
   try: up a box; solved on the second try: same box; failed (out of attempts, or left with Next
   problem, Back to playing or a new game after a wrong attempt): box 1. Left before any attempt: no
-  change. Due again after the box's interval: 10 min, 1 day, 3 days, 7 days, 21 days.
+  change. Due again after the box's interval: 10 min, 1 day, 3 days, 7 days, 21 days. Once a
+  problem on the board is over, `ProblemView.nextDue` holds its new due time, and the problem card
+  says when it comes back ("You'll see this one again in about 10 minutes", "…tomorrow", "…in 3 days").
 - **Next problem** (`pickNextProblem`): a due problem, preferring the recommended focus category (the
   learner's own before built-ins), then the learner's own problems, then built-ins; lower boxes and
   older due times first; never the problem just shown while there is another. When nothing is due,
@@ -229,16 +262,22 @@ unless `--json`).
   the essentials: moment id, move, point loss, best move, PV. Reconnects with `since=` on drop.
 - `state` — the current position as ASCII plus move list with evals, moment, and chat tail.
 - `say <text>`, `rethink <text>`, `show <moves...> [--label L] [--start B|W]`, `mark <pts...> [--kind circle] [--text T]`,
-  `clear`, `resume`, `claim <momentId>`, `new-game [--size 9] [--rank 20k] [--color B]`,
+  `clear`, `resume` (with a drawing up it prints a second line, "still paused: …", since the pause
+  then waits for the learner's Continue; `--json` adds `stillPaused` to the view, and `state` shows the
+  moment "waiting for the learner to press Continue"), `claim <momentId>`, `new-game [--size 9] [--rank 20k] [--color B]`,
   `problem [id]` (start a practice problem, the next due one without an id), `tag <gameId> <move#> <category> [note]`.
 - `summary` — learner profile: rank estimate with the trend over the last 5 rated games, bot rank (and
-  handicap), threshold and its last change, mistake counts by category with the last 3 games and a
+  handicap), the tutor level and what it means for the tutor, threshold and its last change, mistake counts by category with the last 3 games and a
   rising/falling trend, recent mistakes, the recommended focus and its reason, and practice problems
   (counts from games and built-in, due now by category, per box, and the next few due). Used at
   session start.
 - `problems` — every practice problem in the order `problem` picks them, with source, box, due time,
   results and the accepted answers.
 - `watch` prints chat sent during a problem as `USER "<text>" (problem <id>)`.
+- `watch` prints the level on `GAME_START … level=<level>`, a `point_out` moment as `MOMENT … — level
+  point_out: explain mistakes, don't take moves back … — reply with: claim <id>, then say/show/mark/resume`,
+  and a change as `LEVEL <level> — <what it means for the tutor> (from the learner's next move)`.
+  `state` and every command's status line (`level=<level>`) show it too.
 - `watch` prints `PROBLEM_START <id> <category> <color> to play (<source>, box N) answers … — "<prompt>"`
   and `PROBLEM <id> attempt N <move> correct, first try | wrong, lost X (…; another attempt left | out of
   attempts, answer shown) — best …, pv …` with a hint of what to do next.
@@ -259,10 +298,23 @@ banner (Continue / Try again buttons, countdown while waiting for the tutor), a 
 estimate, next bot with any handicap, games, top 2 mistake categories, rating sparkline; fetched from
 `GET /api/profile` on load and whenever the view's `profileVersion` changes), and the chat panel. The result dialog shows the
 game's rating change. The new-game form's bot defaults to "Auto" (the profile's rank and handicap). Mobile
-width stacks the panel under the board. Ghost stones and marks from `overlay` are drawn on the board.
+width stacks the panel under the board. Ghost stones and marks from `overlay` are drawn on the board;
+KataGo's highlighted move too (`overlay.best`): the UI draws only what the overlay holds, so hiding
+it hides everything. While one is up, a "✕ Hide" button next to the board caption (and Esc, unless
+focus is in a form control, which keeps its own Esc) sends `clear_overlay`.
+The status, controls, last-move and progress cards are collapsible: their header is a `<button
+aria-expanded>` that folds the card to its header line (the turn, the last move's loss, the rank, or
+the tutor level stay visible there), remembered per card in localStorage (`web/src/collapse.ts`; any
+storage failure just means cards start open). The teaching-moment banner and the problem card are not
+collapsible, so a decision is never hidden. The chat card fills the rest of the panel's height (its
+input always visible), so folding cards gives it room. The controls card has a segmented control
+(radio buttons) for the tutor level, "Silent", "Point out", "Coach", with the selected level's
+description below it (and each one's in its tooltip). The moment banner says "Your tutor is done —
+take your time, then press Continue." while the moment is `awaitingLearner`.
 Practice (or the tutor's `problem`) switches to problem mode: a problem card replaces the eval strip
 with the category and source, the prompt, attempts left, the verdict (correct, or the point loss of
-the attempt and, once out of attempts, the answer), and Next problem / Back to playing buttons. The
+the attempt and, once out of attempts, the answer; once the problem is over, when it comes back), and
+Next problem / Back to playing buttons. The
 board takes clicks and shows the hover stone as in games; Pass, Hint and Resign are disabled.
 Live updates arrive over `GET /api/events` (SSE of `GameView`; each connection starts with the current
 view, and `GET /api/state` is fetched only if the stream never opens). Controls follow the view's

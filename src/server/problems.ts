@@ -6,6 +6,7 @@
 import { createHash } from "node:crypto";
 import { GoGame, boardFromDiagram, emptyBoard, gameBefore, opponent, positionKey, setCell } from "../engine/index.ts";
 import { toGtp, tryFromGtp } from "../shared/coords.ts";
+import { MAX_BOX } from "../shared/schedule.ts";
 import { colorName, round1 } from "../shared/text.ts";
 import type {
   Board,
@@ -22,18 +23,12 @@ import type {
 import { BUILTIN_PROBLEMS, type BuiltinProblem } from "./builtin-problems.ts";
 import { TRUSTED_CANDIDATE_VISITS, type Analysis, type Position } from "./katago.ts";
 
+export { BOX_INTERVALS, MAX_BOX, resultOf, schedule, type ProblemResult } from "../shared/schedule.ts";
+
 /** A move within this many points of KataGo's best counts as a correct answer. */
 export const ANSWER_MARGIN = 1.0;
 /** Attempts before the answer is shown. */
 export const MAX_ATTEMPTS = 2;
-export const MAX_BOX = 5;
-const MINUTE = 60_000;
-const DAY = 24 * 60 * MINUTE;
-/**
- * How long until a problem is due again after a result, by Leitner box (index = box). Box 1 comes
- * back within the session; a problem solved first try five times in a row waits three weeks.
- */
-export const BOX_INTERVALS: readonly number[] = [0, 10 * MINUTE, DAY, 3 * DAY, 7 * DAY, 21 * DAY];
 /** A mistake's candidates with fewer visits than this in total are re-analyzed before answers are taken from them. */
 export const THIN_VISITS = 200;
 /** Visits for that re-analysis. */
@@ -398,26 +393,7 @@ export async function generateProblems(
 // Spaced repetition
 // ---------------------------------------------------------------------------
 
-export type ProblemResult = "first_try" | "solved" | "failed";
-
-export function resultOf(solved: boolean, attempts: number): ProblemResult {
-  return !solved ? "failed" : attempts <= 1 ? "first_try" : "solved";
-}
-
-/**
- * Leitner scheduling (mutates): solved first try moves the problem up a box, solved on a later try
- * keeps its box, failing sends it back to box 1. It is due again after its box's interval.
- */
-export function schedule(p: StoredProblem, result: ProblemResult, now: number): void {
-  if (result === "first_try") p.box = Math.min(MAX_BOX, p.box + 1);
-  else if (result === "failed") p.box = 1;
-  p.box = Math.max(1, Math.min(MAX_BOX, p.box));
-  p.due = now + BOX_INTERVALS[p.box]!;
-  p.seen++;
-  if (result !== "failed") p.solves++;
-  p.lastResult = result;
-  p.lastSeen = now;
-}
+// Leitner boxes: src/shared/schedule.ts (BOX_INTERVALS, MAX_BOX, resultOf, schedule).
 
 /**
  * Selection order: problems in the focus category first (the learner's own before built-ins), then

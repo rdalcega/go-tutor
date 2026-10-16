@@ -46,6 +46,8 @@ export class PracticeSession {
   private lastAttempt: ProblemAttempt | undefined;
   /** KataGo's best move and line, once the problem is over. */
   private answer: { move: Gtp; pv: Gtp[] } | undefined;
+  /** When the problem is due again, once its result is recorded. */
+  private nextDue: number | undefined;
   private closed = false;
   /** Analyses of the problem position (key "") and after each attempt (key = the move). */
   private readonly analyses = new Map<string, Promise<Analysis>>();
@@ -149,7 +151,7 @@ export class PracticeSession {
     return { revealed: this.revealed, checking: this.checking };
   }
 
-  view(common: Pick<GameView, "chat" | "tutorAttached" | "engineBusy" | "profileVersion" | "allowed">, botRank: string): GameView {
+  view(common: Pick<GameView, "chat" | "tutorAttached" | "tutorLevel" | "engineBusy" | "profileVersion" | "allowed">, botRank: string): GameView {
     const { problem } = this;
     return {
       gameId: null,
@@ -179,6 +181,7 @@ export class PracticeSession {
         box: problem.box,
         ...(this.lastAttempt && { lastAttempt: { ...this.lastAttempt } }),
         ...(this.answer && { answer: { move: this.answer.move, pv: [...this.answer.pv] } }),
+        ...(this.nextDue !== undefined && { nextDue: this.nextDue }),
       },
     };
   }
@@ -279,7 +282,7 @@ export class PracticeSession {
       bestMove,
       bestPv: bestPv.slice(0, 8),
     });
-    if (this.revealed) this.deps.recordResult(problem, this.solved, this.attempts);
+    if (this.revealed) this.nextDue = this.deps.recordResult(problem, this.solved, this.attempts)?.due;
     this.deps.changed();
   }
 

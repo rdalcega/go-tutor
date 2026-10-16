@@ -17,13 +17,24 @@ SESSION FLOW
   1. summary                 learner's rank, weak categories, recommended focus: decide what to do
   2. watch                   start under the Monitor tool; prints one line per event, forever
   3. on MOMENT:  claim <id> within the deadline, run state, then teach with say/show/mark/rethink,
-                 and finish with resume (or let the learner press Continue). If you don't claim in time
+                 and finish with resume. A drawing you made stays up after resume: the game stays
+                 paused until the learner presses Continue when ready. If you don't claim in time
                  a FALLBACK line appears: KataGo's answer is already shown; you can still add a say.
   4. on HINT:    run state, then say/show/mark. Don't give the answer outright unless asked.
   5. on USER:    answer with say (pass --moment <id> when the line names one).
   6. on GAME_END: review last, discuss the top 1-2 mistakes, tag categories, maybe new-game.
   7. on PROBLEM_START / PROBLEM: the learner is on a practice problem. Let them try; after a wrong
                  first attempt ask what they see (say); after the answer is shown, explain it with show.
+  8. on LEVEL:   the learner changed how much you step in (see TUTOR LEVELS); follow it from now on.
+
+TUTOR LEVELS (the learner picks one in the UI; summary, state and GAME_START show it)
+  coach      full coaching: teaching moments, say/show/mark, and rethink to take the move back.
+  point_out  teaching moments as usual, but rethink is refused: explain with say/show/mark, then
+             resume. The learner may still press Try again themselves.
+  silent     no teaching moments and no KataGo fallback during the game. say/show/mark/rethink are
+             refused while the game runs, except one say answering a USER or HINT line. Teach in the
+             review after GAME_END (everything works again then), and in practice problems.
+  Mistakes are evaluated and recorded the same way at every level (summary, review, problems).
 
 COMMANDS
   watch [--since N]
@@ -32,9 +43,11 @@ COMMANDS
       replay. --since N replays events after seq N. A replayed MOMENT shows its current state instead of
       a countdown, e.g. "(replayed; now fallback)" or "(replayed; already resolved)".
       Lines:
-        GAME_START g12 9x9 komi 7 human=B bot=20k
+        GAME_START g12 9x9 komi 7 human=B bot=20k level=coach
         MOVE 15 W D6 (bot)
         MOMENT m3 game=g12 move 14 B C3 lost 6.2 pts (best D5, pv D5 E4 C6) — reply with: claim m3, ...
+        MOMENT m4 ... — level point_out: explain mistakes, don't take moves back ... — reply with: ...
+        LEVEL silent — no teaching moments; ... (from the learner's next move)
         HINT game=g12 B to play — user asks: "where now?" — run: state, then say/show/mark
         USER "why was that bad?" (moment m3) game=g12
         FALLBACK m3 (tutor too slow; KataGo answer shown)
@@ -48,7 +61,7 @@ COMMANDS
   state
       The current board as ASCII (X black, O white, + star point, (X) last move), the move list with the
       human's point loss per move (! = mistake), KataGo's best move and candidates for the last move,
-      the teaching moment, the overlay currently drawn, and the last chat lines.
+      the tutor level, the teaching moment, the overlay currently drawn, and the last chat lines.
       Example: npm run -s tutor -- state
 
   claim <momentId>
@@ -56,12 +69,14 @@ COMMANDS
       Example: npm run -s tutor -- claim m3
 
   say <text> [--moment <id>]
-      Post a chat message to the learner. Quote the text.
+      Post a chat message to the learner. Quote the text. On Silent, during a game, only one say
+      answering the learner's latest USER or HINT line is accepted.
       Example: npm run -s tutor -- say "C3 is slow: it doesn't threaten anything. Where is the weak group?" --moment m3
 
   rethink <text> [--moment <id>]
       Take back the open teaching moment's move and ask the learner to try again; the game stays
       paused until they play. Only works once per moment, while its move is still the last one.
+      Refused on the Point out and Silent levels.
       Example: npm run -s tutor -- rethink "Your group at E5 has one eye. Find a move that saves it."
 
   show <moves...> [--label <text>] [--start B|W]
@@ -79,11 +94,18 @@ COMMANDS
       Mark points on the board (default kind circle).
       Example: npm run -s tutor -- mark E5 F5 --kind triangle --text "weak"
 
+      Drawings stay until the learner's next move (or Continue during a pause), until they press
+      Hide (or Esc), or until you run clear.
+
   clear
       Remove variations and marks. Example: npm run -s tutor -- clear
 
   resume
-      End the pause so play continues. Example: npm run -s tutor -- resume
+      Say you're done with the teaching moment. Without a drawing on the board, play continues at
+      once. With one (yours, or KataGo's fallback line), the game stays paused so the learner can
+      study it: the UI tells them you're done, and they press Continue when ready (the output says
+      "still paused", --json has "stillPaused": true, and state shows the moment "waiting for the
+      learner to press Continue"). Example: npm run -s tutor -- resume
 
   new-game [--size 9|13|19] [--rank 20k] [--color B|W] [--komi 7] [--handicap N]
       Start a new game. Unset options use defaults (9x9, komi 7, human black, bot rank from the profile;
@@ -114,7 +136,7 @@ COMMANDS
 
   summary
       Learner profile: rank estimate and rating trend, the bot's rank (and handicap stones while the
-      learner is below 20k), the mistake threshold, mistake counts by category with the last 3 games,
+      learner is below 20k), the tutor level, the mistake threshold, mistake counts by category with the last 3 games,
       recent mistakes, the recommended focus with its reason, and practice problems (how many, how
       many are due, by category, and the next few due).
       Example: npm run -s tutor -- summary
@@ -129,4 +151,4 @@ COMMANDS
       This text.
 
 Every command that changes something prints "ok" and a one-line status, e.g.
-  ok game=g12 mode=game status=paused toPlay=B moves=14 moment m3 move 14 lost 6.2 state=tutor`;
+  ok game=g12 mode=game status=paused level=coach toPlay=B moves=14 moment m3 move 14 lost 6.2 state=tutor`;

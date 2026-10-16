@@ -4,7 +4,7 @@
 import { gameBefore } from "../../src/engine/game.ts";
 import { GTP_COLUMNS, movePoint } from "../../src/shared/coords.ts";
 import { ratingToRank } from "../../src/shared/rank.ts";
-import { categoryLabel } from "../../src/shared/text.ts";
+import { categoryLabel, comeBackText } from "../../src/shared/text.ts";
 import type { Board, Color, GameSettings, MistakeCategory, MoveRecord, Point, ProblemView, Profile } from "../../src/shared/types.ts";
 
 export interface BoardLayout {
@@ -177,19 +177,21 @@ export function attemptsLeftText(p: ProblemView): string {
 /**
  * What the problem card says about the latest attempt, from KataGo's verdict: correct (and what
  * the board shows), wrong with tries left, or the answer once out of attempts. Null before any attempt.
+ * Once the problem is over it also says when it comes back (spaced repetition), from `now`.
  */
-export function problemResult(p: ProblemView): { text: string; tone: "good" | "bad" } | null {
+export function problemResult(p: ProblemView, now = Date.now()): { text: string; tone: "good" | "bad" } | null {
   const a = p.lastAttempt;
   if (!a) return null;
   const loss = a.pointLoss !== null ? ` loses about ${a.pointLoss.toFixed(1)} points` : " isn't it";
+  const again = p.revealed && p.nextDue !== undefined ? ` You'll see this one again ${comeBackText(p.nextDue, now)}.` : "";
   if (a.correct) {
     const first = p.attempts === 1 ? " on the first try" : "";
     const also = p.answer && p.answer.move !== a.move ? ` KataGo's favorite is ${p.answer.move}, and yours is about as good.` : "";
-    return { text: `Correct${first}: ${a.move}.${also} The numbered stones show how play goes on.`, tone: "good" };
+    return { text: `Correct${first}: ${a.move}.${also} The numbered stones show how play goes on.${again}`, tone: "good" };
   }
   if (!p.revealed) return { text: `${a.move}${loss}. Look again and try another move.`, tone: "bad" };
   const answer = p.answer ? ` The answer is ${p.answer.move}; the numbered stones show KataGo's line.` : "";
-  return { text: `${a.move}${loss}.${answer}`, tone: "bad" };
+  return { text: `${a.move}${loss}.${answer}${again}`, tone: "bad" };
 }
 
 /** Exponential reconnect delay: 500ms, 1s, 2s … capped at `max`. */

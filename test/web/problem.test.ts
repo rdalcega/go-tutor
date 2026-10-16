@@ -47,4 +47,23 @@ describe("problem card helpers", () => {
       problemResult({ ...base, attempts: 2, solved: true, revealed: true, lastAttempt: { move: "E5", correct: true, pointLoss: null }, answer: { move: "D5", pv: [] } })!.text,
     ).toBe("Correct: E5. KataGo's favorite is D5, and yours is about as good. The numbered stones show how play goes on.");
   });
+
+  it("says when a finished problem comes back", () => {
+    const now = 1_000_000;
+    const failed: ProblemView = {
+      ...base,
+      attempts: 2,
+      revealed: true,
+      lastAttempt: { move: "C7", correct: false, pointLoss: 5 },
+      answer: { move: "D5", pv: ["D5"] },
+      nextDue: now + 10 * 60_000,
+    };
+    expect(problemResult(failed, now)!.text).toBe(
+      "C7 loses about 5.0 points. The answer is D5; the numbered stones show KataGo's line. You'll see this one again in about 10 minutes.",
+    );
+    const solved: ProblemView = { ...base, attempts: 1, solved: true, revealed: true, lastAttempt: { move: "D5", correct: true, pointLoss: 0 }, nextDue: now + 86_400_000 };
+    expect(problemResult(solved, now)!.text).toMatch(/You'll see this one again tomorrow\.$/);
+    // Not while an attempt is left (nothing is scheduled yet).
+    expect(problemResult({ ...failed, revealed: false, attempts: 1 }, now)!.text).not.toMatch(/again in/);
+  });
 });

@@ -3,7 +3,7 @@
 import type { FocusRecommendation, ProblemsResponse, Profile, ProfileResponse, SavedGame } from "../shared/types.ts";
 import { parseInvocation, UsageError, type Invocation } from "./args.ts";
 import { Client, ServerError, serverUrl } from "./client.ts";
-import { formatProblemList, formatProblems, formatProfile, formatReview, formatState, statusLine } from "./format.ts";
+import { commandJson, commandOutput, formatProblemList, formatProblems, formatProfile, formatReview, formatState } from "./format.ts";
 import { HELP, USAGE } from "./help.ts";
 import { watch } from "./watch.ts";
 
@@ -82,7 +82,7 @@ async function run(inv: Invocation, client: Client): Promise<void> {
       return review(client, inv.gameId, inv.json);
     case "command": {
       const view = await client.send(inv.command);
-      print(inv.json ? JSON.stringify(view) : `ok ${statusLine(view)}`);
+      print(inv.json ? commandJson(inv.command, view) : commandOutput(inv.command, view));
       return;
     }
   }

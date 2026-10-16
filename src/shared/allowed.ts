@@ -20,10 +20,17 @@ export interface ActionState {
   tutorAttached: boolean;
   /** In problem mode: the answer is shown, or KataGo is still checking the last attempt. */
   problem: { revealed: boolean; checking: boolean } | null;
+  /** A drawing (variation or marks) is on the board, which the learner can hide. */
+  overlay: boolean;
 }
 
 /** Actions the browser can send in any mode. */
-const ALWAYS: readonly ActionType[] = ["new_game", "chat", "next_problem"];
+const ALWAYS: readonly ActionType[] = ["new_game", "chat", "next_problem", "set_tutor_level"];
+
+/** ALWAYS, plus hiding the drawing when there is one. */
+function always(s: Pick<ActionState, "overlay">): ActionType[] {
+  return s.overlay ? [...ALWAYS, "clear_overlay"] : [...ALWAYS];
+}
 
 /** Two consecutive passes: the game is over, though its score may not be in yet. */
 function twoPasses(moves: ActionState["moves"]): boolean {
@@ -49,10 +56,10 @@ export function retryBlocked(s: Pick<ActionState, "humanColor" | "finished" | "m
 export function allowedActions(s: ActionState): ActionType[] {
   if (s.mode === "problem") {
     const canPlay = s.problem !== null && !s.problem.revealed && !s.problem.checking && s.engineReady;
-    return [...ALWAYS, "leave_problem", ...(canPlay ? (["play"] as const) : [])];
+    return [...always(s), "leave_problem", ...(canPlay ? (["play"] as const) : [])];
   }
-  if (s.mode === "idle" || s.humanColor === null || s.finished) return [...ALWAYS];
-  const allowed: ActionType[] = [...ALWAYS, "resign"];
+  if (s.mode === "idle" || s.humanColor === null || s.finished) return always(s);
+  const allowed: ActionType[] = [...always(s), "resign"];
   const humanToPlay = s.toPlay === s.humanColor;
   const paused = s.status === "paused";
   if (humanToPlay && !twoPasses(s.moves) && !paused && s.engineReady) allowed.push("play", "pass");
