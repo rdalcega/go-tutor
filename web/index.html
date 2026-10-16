@@ -1,0 +1,112 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="color-scheme" content="light dark" />
+    <title>Go Tutor</title>
+    <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><circle cx='8' cy='8' r='7' fill='%23222'/></svg>" />
+  </head>
+  <body>
+    <div class="app">
+      <main class="board-area">
+        <div class="board-wrap" id="board-wrap">
+          <canvas id="board" aria-label="Go board"></canvas>
+        </div>
+        <p class="caption" id="variation-label" hidden></p>
+      </main>
+
+      <aside class="panel">
+        <header class="panel-head">
+          <h1>Go Tutor</h1>
+          <span class="conn" id="conn" hidden>reconnecting…</span>
+        </header>
+
+        <section class="card status" aria-live="polite">
+          <p class="turn" id="turn">Connecting…</p>
+          <dl class="facts">
+            <div><dt>Captures</dt><dd id="captures">–</dd></div>
+            <div><dt>Bot</dt><dd id="bot-rank">–</dd></div>
+            <div><dt>Tutor</dt><dd><span class="dot" id="tutor-dot"></span><span id="tutor-text">–</span></dd></div>
+          </dl>
+        </section>
+
+        <section class="card controls">
+          <div class="row">
+            <button id="pass" title="Pass (P)">Pass</button>
+            <button id="hint" title="Hint (H)">Hint</button>
+            <button id="resign" class="danger">Resign</button>
+          </div>
+          <form class="new-game" id="new-game">
+            <label>Size
+              <select id="ng-size">
+                <option value="9">9×9</option>
+                <option value="13">13×13</option>
+                <option value="19">19×19</option>
+              </select>
+            </label>
+            <label>Bot
+              <select id="ng-rank"></select>
+            </label>
+            <label>You
+              <select id="ng-color">
+                <option value="B">Black</option>
+                <option value="W">White</option>
+              </select>
+            </label>
+            <button type="submit" class="primary">New game</button>
+          </form>
+        </section>
+
+        <section class="card moment" id="moment" hidden>
+          <div class="moment-head">
+            <strong id="moment-title">Teaching moment</strong>
+            <span class="countdown" id="moment-countdown"></span>
+          </div>
+          <p id="moment-text"></p>
+          <div class="row">
+            <button id="continue" class="primary" title="Continue (Enter)">Continue</button>
+            <button id="retry">Try again</button>
+          </div>
+        </section>
+
+        <section class="card problem" id="problem" hidden>
+          <strong>Problem</strong>
+          <p id="problem-text"></p>
+          <div class="row"><button id="next-problem">Next problem</button></div>
+        </section>
+
+        <section class="card eval">
+          <div class="eval-head">
+            <span class="label">Last move</span>
+            <span class="loss" id="eval-loss">–</span>
+          </div>
+          <p class="eval-detail" id="eval-detail">No moves yet.</p>
+          <svg class="spark" id="spark" viewBox="0 0 300 44" preserveAspectRatio="none" aria-label="Point loss per move"></svg>
+        </section>
+
+        <section class="card chat">
+          <ol class="chat-log" id="chat-log" aria-live="polite"></ol>
+          <form class="chat-form" id="chat-form">
+            <input id="chat-input" type="text" placeholder="Ask your tutor…" autocomplete="off" />
+            <button type="submit">Send</button>
+          </form>
+        </section>
+      </aside>
+    </div>
+
+    <dialog id="result-dialog" class="result">
+      <h2 id="result-title"></h2>
+      <p id="result-text"></p>
+      <ul id="result-mistakes"></ul>
+      <div class="row">
+        <button id="result-new" class="primary">New game</button>
+        <button id="result-close">Close</button>
+      </div>
+    </dialog>
+
+    <div class="toast" id="toast" role="status" hidden></div>
+
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

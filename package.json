@@ -1,0 +1,27 @@
+{
+  "name": "go-tutor",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "A Go (baduk/weiqi) tutor: play in the browser, KataGo analyzes, a Claude Code session teaches.",
+  "scripts": {
+    "dev": "concurrently -k -n server,web \"tsx watch src/server/index.ts\" \"vite\"",
+    "build": "vite build",
+    "start": "vite build && tsx src/server/index.ts",
+    "tutor": "tsx src/cli/tutor.ts",
+    "setup:katago": "bash scripts/setup-katago.sh",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.2",
+    "concurrently": "^9.1.0",
+    "tsx": "^4.19.2",
+    "typescript": "^5.6.3",
+    "vite": "^5.4.11",
+    "vitest": "^2.1.8"
+  }
+}
