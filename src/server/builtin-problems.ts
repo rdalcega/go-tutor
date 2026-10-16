@@ -1,0 +1,253 @@
+// Built-in practice problems: classic 9×9 beginner positions, so practice works before the learner
+// has played a game. Each board is drawn top row (9) first, columns A–J without I:
+// X = Black, O = White, . = empty. The rest of each board is settled on purpose (solid walls and
+// closed territories), so the local problem decides the game and KataGo agrees on the answer.
+//
+// Every answer is checked against real KataGo in test/server/katago.integration.test.ts: it must
+// lose at most 1 point against KataGo's best move, KataGo's best must be one of the answers, and
+// the problem must be clear (passing, or the best wrong move, costs points).
+
+import type { Color, Gtp, MistakeCategory } from "../shared/types.ts";
+
+export interface BuiltinProblem {
+  /** Stable id ("b-…"); spaced-repetition progress is stored under it in data/problems.json. */
+  id: string;
+  /** What the problem teaches, for the tutor (the learner sees `prompt`). */
+  title: string;
+  category: MistakeCategory;
+  toPlay: Color;
+  prompt: string;
+  board: readonly string[];
+  answers: readonly Gtp[];
+}
+
+export const BUILTIN_PROBLEMS: readonly BuiltinProblem[] = [
+  {
+    id: "b-live-straight-three",
+    title: "Life and death: make two eyes in a straight three",
+    category: "life_and_death",
+    toPlay: "B",
+    prompt: "Black to play. Your group at the bottom is surrounded. Make two eyes so it lives.",
+    board: [
+      ". . . . . . . . .",
+      ". . . . . . . . .",
+      ". . . . . . . . .",
+      "X X X X X X X X X",
+      "O O O O O O O O O",
+      ". . . . . . . . .",
+      "O O O O O O O O O",
+      ". O X X X X X O .",
+      ". O X . . . X O .",
+    ],
+    answers: ["E1"],
+  },
+  {
+    id: "b-kill-pyramid-four",
+    title: "Life and death: kill a pyramid four at its vital point",
+    category: "life_and_death",
+    toPlay: "B",
+    prompt: "Black to play. White's group at the top is surrounded. Find the move that stops it from making two eyes.",
+    board: [
+      ". X O . . . O X .",
+      ". X O O . O O X .",
+      ". X X O O O X X .",
+      ". . X X X X X . .",
+      ". . . . . . . . .",
+      "O O O O O O O O O",
+      ". . . . . . . . .",
+      ". . . . . . . . .",
+      ". . . . . . . . .",
+    ],
+    answers: ["E9"],
+  },
+  {
+    id: "b-live-corner-bent-three",
+    title: "Life and death: live in the corner with a bent three",
+    category: "life_and_death",
+    toPlay: "B",
+    prompt: "Black to play. Your corner group at the lower left is surrounded. Make it live.",
+    board: [
+      ". . . . . . . . .",
+      ". . . . . . . . .",
+      ". . . . . . . . .",
+      "X X X X X X X . .",
+      "O O O O O O X . .",
+      "O O O . . O X . .",
+      "X X O O O O X . .",
+      ". X X O . O X . .",
+      ". . X O . O X . .",
+    ],
+    answers: ["A1"],
+  },
+  {
+    id: "b-kill-bulky-five",
+    title: "Life and death: kill a bulky five at its vital point",
+    category: "life_and_death",
+    toPlay: "B",
+    prompt: "Black to play. White's group at the top has five points of eye space. Find the vital point that kills it.",
+    board: [
+      ". X O . . . O X .",
+      ". X O . . O O X .",
+      ". X O O O O X X .",
+      ". X X X X X X . .",
+      ". . . . . . . . .",
+      "O O O O O O O O O",
+      ". . . . . . . . .",
+      ". . . . . . . . .",
+      ". . . . . . . . .",
+    ],
+    answers: ["E9"],
+  },
+  {
+    id: "b-kill-corner-bent-three",
+    title: "Life and death: kill a corner bent three",
+    category: "life_and_death",
+    toPlay: "B",
+    prompt: "Black to play. White's corner group at the lower left is surrounded. Kill it.",
+    board: [
+      ". . . . . . . . .",
+      ". . . . . . . . .",
+      ". . . . . . . . .",
+      "O O O O O O O . .",
+      "X X X X X X O . .",
+      "X X X . . X O . .",
+      "O O X X X X O . .",
+      ". O O X . X O . .",
+      ". . O X . X O . .",
+    ],
+    answers: ["A1"],
+  },
+  {
+    id: "b-snapback-corner",
+    title: "Snapback: atari, let White capture, then take back more",
+    category: "tactics",
+    toPlay: "B",
+    prompt: "Black to play. Your stones at the lower left are running out of liberties. Capture White's stones in the corner.",
+    board: [
+      ". . . . . . . . .",
+      ". . . . . . . . .",
+      "X X X X X X X X X",
+      "O O O O O O O O O",
+      ". . . . . . . . .",
+      "O O O O O . . . .",
+      "X X X X O . . . .",
+      "O O O X . . . . .",
+      ". X O . . . . . .",
+    ],
+    answers: ["D1"],
+  },
+  {
+    id: "b-snapback-throw-in",
+    title: "Snapback: throw in a stone so White can't connect",
+    category: "tactics",
+    toPlay: "B",
+    prompt: "Black to play. Capture the two white stones at the bottom before they connect to White's wall.",
+    board: [
+      ". O X . . X O . .",
+      ". O X . . X O . .",
+      ". O X . . X O . .",
+      ". O X . . X O . .",
+      ". O X . . X O . .",
+      ". O X . . X O O .",
+      ". O X X X X X O .",
+      ". O X X O O X O .",
+      ". O X X . . O O .",
+    ],
+    answers: ["F1"],
+  },
+  {
+    id: "b-connect-two-eyes",
+    title: "Connecting: join two one-eyed halves into one living group",
+    category: "shape",
+    toPlay: "B",
+    prompt: "Black to play. Your group at the bottom has one eye at each end, and White wants to cut it in two. Keep it in one piece.",
+    board: [
+      ". . . . . . . . .",
+      ". . . . . . . . .",
+      ". . . . . . . . .",
+      "X X X X X X X X X",
+      ". . . . . . . . .",
+      ". . . . . . . . .",
+      "O O O O O O O O O",
+      "X X X X O X X X X",
+      ". X X X . X X X .",
+    ],
+    answers: ["E1"],
+  },
+  {
+    id: "b-race-three-liberties",
+    title: "Capturing race: three liberties each, take White's from the outside",
+    category: "capturing_race",
+    toPlay: "B",
+    prompt: "Black to play. Your three stones at the lower left and White's three stones next to them are racing to capture each other. Win the race.",
+    board: [
+      ". . O X . . X O .",
+      ". . O X . . X O .",
+      ". . O X . . X O .",
+      ". . O X . . X O .",
+      ". . O X . . X O .",
+      ". . O X . . X O .",
+      "O O O X X X X O .",
+      "X X X O O O X O .",
+      ". . . . . . . O .",
+    ],
+    answers: ["D1", "F1"],
+  },
+  {
+    id: "b-race-shared-liberty",
+    title: "Capturing race: fill the outside liberty before the shared one",
+    category: "capturing_race",
+    toPlay: "B",
+    prompt: "Black to play. Your two stones and White's three stones at the bottom share a liberty. Win the capturing race.",
+    board: [
+      ". . . O X . X O .",
+      ". . . O X . X O .",
+      ". . . O X . X O .",
+      ". . . O X . X O .",
+      ". . . O X . X O .",
+      ". . . O X . X O .",
+      "O O O O X X X O .",
+      ". O X X O O X O .",
+      ". O . . O . X O .",
+    ],
+    answers: ["F1"],
+  },
+  {
+    id: "b-ladder",
+    title: "Ladder: atari from the side that drives White into your wall",
+    category: "tactics",
+    toPlay: "B",
+    prompt: "Black to play. Your two stones on the left are in atari. Save them by capturing the white stone that cuts them off.",
+    board: [
+      ". . . . . . . . .",
+      "X X X X X X X X X",
+      "O O X . . . . . .",
+      "O O X . . . . . .",
+      "O X O . . . . . .",
+      "O X . X X X X X X",
+      "O O O O O O O O O",
+      ". . . . . . . . .",
+      ". . . . . . . . .",
+    ],
+    answers: ["C4"],
+  },
+  {
+    id: "b-net",
+    title: "Net: when a ladder fails, surround loosely",
+    category: "tactics",
+    toPlay: "B",
+    prompt: "Black to play. The white stone at D5 cuts off your three stones on the left. Capture it so it can't escape.",
+    board: [
+      ". . . . . . . . .",
+      "O O O O O O O O O",
+      "O O X . . O O O O",
+      "O . X . . . O O O",
+      "O . X O . . . X X",
+      "O O O X X X X X X",
+      "X X X X X X X X X",
+      ". . . . . . . . .",
+      ". . . . . . . . .",
+    ],
+    answers: ["E6"],
+  },
+];

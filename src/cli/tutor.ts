@@ -1,27 +1,42 @@
 // Entry point: `npm run -s tutor -- <command> [args]`.
 
-import type { Profile } from "../shared/types.ts";
+import type { FocusRecommendation, ProblemsResponse, Profile, ProfileResponse } from "../shared/types.ts";
 import { parseInvocation, UsageError, type Invocation } from "./args.ts";
 import { Client, ServerError, serverUrl } from "./client.ts";
-import { formatProblems, formatProfile, formatReview, formatState, statusLine, type ProblemInfo, type SavedGame } from "./format.ts";
+import { formatProblemList, formatProblems, formatProfile, formatReview, formatState, statusLine, type SavedGame } from "./format.ts";
 import { HELP, USAGE } from "./help.ts";
 import { watch } from "./watch.ts";
 
 const print = (text: string) => process.stdout.write(text + "\n");
 const printErr = (text: string) => process.stderr.write(text + "\n");
 
+/** GET /api/profile: `{ profile, focus }` (an older server sent the bare profile). */
+async function getProfile(client: Client): Promise<{ profile: Profile; focus: FocusRecommendation | null } | null> {
+  const body = await client.getJson<ProfileResponse | Profile>("/api/profile");
+  if (!body) return null;
+  return "profile" in body ? body : { profile: body, focus: null };
+}
+
+/** GET /api/problems, or null when the server has none (an older server) or it fails. */
+async function getProblems(client: Client): Promise<ProblemsResponse | null> {
+  const body = await client.getJson<ProblemsResponse>("/api/problems").catch(() => null);
+  return body && Array.isArray(body.problems) && body.counts ? body : null;
+}
+
 async function summary(client: Client, json: boolean): Promise<void> {
-  const [profile, problems] = await Promise.all([
-    client.getJson<Profile>("/api/profile"),
-    client.getJson<ProblemInfo[] | { problems: ProblemInfo[] }>("/api/problems"),
-  ]);
-  const list = problems === null ? null : Array.isArray(problems) ? problems : problems.problems;
+  const [profile, problems] = await Promise.all([getProfile(client), getProblems(client)]);
   if (json) {
-    print(JSON.stringify({ profile, problems: list }));
+    print(JSON.stringify({ profile: profile?.profile ?? null, focus: profile?.focus ?? null, problems }));
     return;
   }
-  print(profile ? formatProfile(profile) : "profile: not available yet (the server has no /api/profile; arrives with Milestone 4)");
-  print(list ? formatProblems(list) : "problems: not available yet (the server has no /api/problems; arrives with Milestone 5)");
+  print(profile ? formatProfile(profile.profile, profile.focus) : "profile: not available (the server has no /api/profile)");
+  print(problems ? formatProblems(problems) : "practice problems: not available on this server");
+}
+
+async function problems(client: Client, json: boolean): Promise<void> {
+  const body = await getProblems(client);
+  if (!body) throw new ServerError("this server has no practice problems (GET /api/problems failed)", 404);
+  print(json ? JSON.stringify(body) : formatProblemList(body));
 }
 
 async function review(client: Client, gameId: string, json: boolean): Promise<void> {
@@ -33,8 +48,11 @@ async function review(client: Client, gameId: string, json: boolean): Promise<vo
     print(JSON.stringify(game));
     return;
   }
-  const profile = await client.getJson<Profile>("/api/profile").catch(() => null);
-  print(formatReview(game, profile?.mistakeThreshold));
+  const profile = (await getProfile(client).catch(() => null))?.profile;
+  // The threshold the game was played with decides what counted as a mistake.
+  const id = game.id ?? game.gameId;
+  const threshold = profile?.recentGames?.find((g) => g.gameId === id)?.threshold ?? profile?.mistakeThreshold;
+  print(formatReview(game, threshold));
 }
 
 async function run(inv: Invocation, client: Client): Promise<void> {
@@ -56,6 +74,8 @@ async function run(inv: Invocation, client: Client): Promise<void> {
     }
     case "summary":
       return summary(client, inv.json);
+    case "problems":
+      return problems(client, inv.json);
     case "review":
       return review(client, inv.gameId, inv.json);
     case "command": {

@@ -1,15 +1,30 @@
 import { describe, expect, it } from "vitest";
 import {
+  dueText,
   formatEvent,
+  formatProblemList,
   formatProblems,
   formatProfile,
   formatReview,
   formatState,
   num,
+  problemLines,
   resultText,
   statusLine,
+  winrateSwings,
 } from "../../src/cli/format.ts";
-import type { Board, GameSettings, GameView, MoveEval, MoveRecord, Profile, TutorEvent } from "../../src/shared/types.ts";
+import type {
+  Board,
+  GameSettings,
+  GameView,
+  MoveEval,
+  MoveRecord,
+  ProblemListItem,
+  ProblemsResponse,
+  ProblemView,
+  Profile,
+  TutorEvent,
+} from "../../src/shared/types.ts";
 
 const settings: GameSettings = { size: 9, komi: 7, humanColor: "B", botRank: "20k", handicap: 0 };
 const ctx = { sizeOf: (g: string) => (g === "g12" ? 9 : undefined), now: 1_000_000 };
@@ -83,6 +98,9 @@ describe("formatEvent", () => {
     expect(formatEvent({ ...base, type: "user_message", text: "why was that bad?\nreally", momentId: "m3", gameId: "g12" }, ctx)).toBe(
       'USER "why was that bad?\\nreally" (moment m3) game=g12',
     );
+    expect(formatEvent({ ...base, type: "user_message", text: "what is this?", gameId: "g12", problemId: "b-ladder" }, ctx)).toBe(
+      'USER "what is this?" (problem b-ladder)',
+    );
     expect(formatEvent({ ...base, type: "hint_request", text: "where now?", gameId: "g12", board: "", toPlay: "B" }, ctx)).toBe(
       'HINT game=g12 B to play — user asks: "where now?" — run: state, then say/show/mark',
     );
@@ -104,8 +122,56 @@ describe("formatEvent", () => {
     expect(formatEvent(end, ctx)).toBe(
       "GAME_END g12 W+3.5 — 2 mistakes, worst move 14 (6.2), total loss 15 over 61 moves — run: review g12",
     );
-    expect(formatEvent({ ...base, type: "problem_attempt", problemId: "p4", move: "C7", correct: false }, ctx)).toBe(
-      "PROBLEM p4 attempt C7 wrong",
+    if (end.type !== "game_end") throw new Error("expected game_end");
+    const rated = { ...end, summary: { ...end.summary, rating: { before: 10, after: 8.5, rated: true, nextBotRank: "20k", nextHandicap: 0 } } };
+    expect(formatEvent(rated, ctx)).toBe(
+      "GAME_END g12 W+3.5 — 2 mistakes, worst move 14 (6.2), total loss 15 over 61 moves, rating 10 -> 8.5 — run: review g12",
+    );
+  });
+
+  it("formats problem starts and attempts with the category, first try and what to do next", () => {
+    const start: TutorEvent = {
+      ...base,
+      type: "problem_start",
+      problemId: "p4",
+      kind: "game",
+      category: "life_and_death",
+      toPlay: "B",
+      prompt: "Black to play. Live.",
+      answers: ["D5", "E5"],
+      box: 2,
+      source: { gameId: "g12", moveNumber: 14 },
+      board: "",
+    };
+    expect(formatEvent(start, ctx)).toBe(
+      'PROBLEM_START p4 life_and_death B to play (from g12 move 14, box 2) answers D5,E5 — "Black to play. Live." — run: state; let them try, don\'t give the answer',
+    );
+    if (start.type !== "problem_start") throw new Error("expected problem_start");
+    const { source: _source, ...builtin } = start;
+    expect(formatEvent({ ...builtin, kind: "builtin", problemId: "b-net" }, ctx)).toContain("PROBLEM_START b-net life_and_death B to play (built-in, box 2)");
+
+    const attempt = {
+      ...base,
+      type: "problem_attempt" as const,
+      problemId: "p4",
+      move: "C7",
+      correct: false,
+      category: "life_and_death" as const,
+      attempt: 1,
+      firstTry: false,
+      pointLoss: 5.24,
+      revealed: false,
+      bestMove: "D5",
+      bestPv: ["D5", "E4", "C6"],
+    };
+    expect(formatEvent(attempt, ctx)).toBe(
+      "PROBLEM p4 attempt 1 C7 wrong, lost 5.2 (life_and_death; another attempt left) — ask what they see, don't give the answer (best D5, pv D5 E4 C6)",
+    );
+    expect(formatEvent({ ...attempt, attempt: 2, revealed: true }, ctx)).toBe(
+      "PROBLEM p4 attempt 2 C7 wrong, lost 5.2 (life_and_death; out of attempts, answer shown) — best D5, pv D5 E4 C6 — explain it; show the refutation of C7",
+    );
+    expect(formatEvent({ ...attempt, move: "D5", correct: true, firstTry: true, pointLoss: 0, revealed: true }, ctx)).toBe(
+      "PROBLEM p4 attempt 1 D5 correct, first try (life_and_death) — best D5, pv D5 E4 C6 — say why it works",
     );
   });
 
@@ -168,6 +234,32 @@ describe("formatState", () => {
     expect(text).toContain("[user] hi\n[tutor m3] line1 / line2");
   });
 
+  it("describes a practice problem: where it's from, the attempt, the last verdict and the answer once shown", () => {
+    const problem: ProblemView = {
+      id: "p4",
+      prompt: "Black to play. Live.",
+      source: { gameId: "g12", moveNumber: 14 },
+      attempts: 1,
+      solved: false,
+      kind: "game",
+      category: "life_and_death",
+      toPlay: "B",
+      maxAttempts: 2,
+      revealed: false,
+      box: 1,
+      lastAttempt: { move: "C7", correct: false, pointLoss: 5.2 },
+    };
+    expect(problemLines(problem)).toEqual([
+      "problem p4 life_and_death (from g12 move 14, box 1) B to play, attempt 2 of 2: Black to play. Live.",
+      "last attempt C7 wrong, lost 5.2",
+    ]);
+    const shown = { ...problem, attempts: 2, revealed: true, answer: { move: "D5", pv: ["D5", "E4"] } };
+    expect(problemLines(shown)[2]).toBe("answer D5 (pv D5 E4)");
+    const v = view({ gameId: null, mode: "problem", status: "finished", moves: [], moment: null, problem: shown });
+    expect(formatState(v)).toContain("problem p4 life_and_death (from g12 move 14, box 1) B to play, answer shown: Black to play. Live.");
+    expect(statusLine(v)).toBe("problem=p4 mode=problem status=finished attempts=2/2 answer shown (D5)");
+  });
+
   it("handles an idle server", () => {
     const text = formatState(view({ gameId: null, mode: "idle", settings: null, status: "playing", board: [], moves: [], moment: null, overlay: null, chat: [] }));
     expect(text).toContain("no game mode=idle");
@@ -183,48 +275,159 @@ describe("formatState", () => {
   });
 });
 
+
 describe("summary and review", () => {
-  it("formats a profile", () => {
-    const p: Profile = {
-      botRank: "18k",
-      rating: 10.6,
-      ratingHistory: [{ ts: 1, gameId: "g11", rating: 10, botRank: "19k", won: true }],
-      mistakeThreshold: 4,
-      mistakeCounts: { life_and_death: 3, capturing_race: 0, opening: 1, direction: 0, shape: 5, endgame: 0, tactics: 0, other: 0 },
-      recentMistakes: [{ ts: 1, gameId: "g11", moveNumber: 14, category: "shape", pointLoss: 6.2, note: "empty triangle" }],
-      gamesPlayed: 11,
-      problemsSolved: 2,
-    };
-    const text = formatProfile(p);
-    expect(text).toContain("rank estimate 19k (rating 10.6), bot plays 18k, games 11, problems solved 2, mistake threshold 4 pts");
-    expect(text).toContain("mistakes by category: shape 5, life_and_death 3, opening 1");
-    expect(text).toContain('g11 move 14 shape -6.2 "empty triangle"');
+  const profile = (over: Partial<Profile> = {}): Profile => ({
+    botRank: "18k",
+    rating: 11.6,
+    handicap: 0,
+    ratingHistory: [
+      { ts: 1, gameId: "g10", rating: 10.4, botRank: "20k", won: true, delta: 0.4 },
+      { ts: 2, gameId: "g11", rating: 11.6, botRank: "19k", won: true, handicap: 0, delta: 1.2 },
+    ],
+    mistakeThreshold: 4,
+    thresholdHistory: [{ ts: 2, gameId: "g11", from: 4.5, to: 4, reason: "average loss 1.2 pts per move over the last 3 games" }],
+    mistakeCounts: { life_and_death: 3, capturing_race: 0, opening: 1, direction: 0, shape: 5, endgame: 0, tactics: 0, other: 0 },
+    recentMistakes: [
+      { ts: 3, gameId: "g11", moveNumber: 14, category: "shape", pointLoss: 6.2, note: "empty triangle" },
+      { ts: 2, gameId: "g11", moveNumber: 9, category: "shape", pointLoss: 5 },
+      { ts: 1, gameId: "g7", moveNumber: 20, category: "life_and_death", pointLoss: 9 },
+    ],
+    recentGames: ["g7", "g8", "g9", "g10", "g11"].map((gameId, i) => ({ ts: i, gameId, size: 9, humanMoves: 30, avgPointLoss: 2, mistakes: 1, threshold: 4 })),
+    practiced: {},
+    gamesPlayed: 11,
+    problemsSolved: 2,
+    ...over,
   });
 
-  it("lists open problems", () => {
-    expect(formatProblems([])).toBe("open problems: none (0 total)");
-    expect(formatProblems([{ id: "p1", solved: true }, { id: "p2", prompt: "Black to live", source: { gameId: "g3", moveNumber: 9 } }])).toBe(
-      "open problems (1 of 2) — start one with: problem <id>\n  p2 from g3 move 9: Black to live",
+  it("formats a profile with the rating trend, bot, threshold, category trends and focus", () => {
+    const text = formatProfile(profile(), { category: "shape", reason: "shape keeps costing points.", suggestion: "problems" });
+    expect(text.split("\n")).toEqual([
+      "rank estimate 18k (rating 11.6, trend +1.6 over the last 2 rated games), games 11, problems solved 2",
+      "bot plays 18k",
+      "mistake threshold 4 pts (last changed 4.5 -> 4 after g11: average loss 1.2 pts per move over the last 3 games)",
+      "recent rated games: g10 won vs 20k (+0.4), g11 won vs 19k (+1.2)",
+      "mistakes by category (total, in the last 3 games): shape 5 (2, rising), life_and_death 3 (0, falling), opening 1 (0, steady)",
+      "recent mistakes:",
+      '  g11 move 14 shape -6.2 "empty triangle"',
+      "  g11 move 9 shape -5",
+      "  g7 move 20 life_and_death -9",
+      "recommended focus: shape, as practice problems — shape keeps costing points.",
+    ]);
+  });
+
+  it("mentions handicap stones while the learner is below 20k", () => {
+    const text = formatProfile(profile({ botRank: "20k", rating: 7, handicap: 2, ratingHistory: [], thresholdHistory: [] }));
+    expect(text).toContain("bot plays 20k, learner takes 2 handicap stones on 9x9 (rating below 20k, the weakest bot)");
+    expect(text).toContain("mistake threshold 4 pts\n");
+  });
+
+  const NOW = 1_000_000_000;
+  const item = (over: Partial<ProblemListItem>): ProblemListItem => ({
+    id: "p1",
+    kind: "game",
+    category: "life_and_death",
+    toPlay: "B",
+    prompt: "Black to play.",
+    answers: ["D5"],
+    box: 1,
+    due: NOW,
+    isDue: true,
+    seen: 0,
+    solves: 0,
+    ...over,
+  });
+  const problemsBody = (problems: ProblemListItem[]): ProblemsResponse => ({
+    problems,
+    counts: {
+      total: problems.length,
+      due: problems.filter((p) => p.isDue).length,
+      fromGames: problems.filter((p) => p.kind === "game").length,
+      builtin: problems.filter((p) => p.kind === "builtin").length,
+      byBox: [problems.length, 0, 0, 0, 0],
+      dueByCategory: { life_and_death: 1, tactics: 1 },
+    },
+    focus: { category: "life_and_death", reason: "", suggestion: "problems" },
+  });
+
+  it("summarizes practice problems: counts, boxes and the next due", () => {
+    const body = problemsBody([
+      item({ source: { gameId: "g3", moveNumber: 9 }, difficulty: 6.2 }),
+      item({ id: "b-net", kind: "builtin", category: "tactics", seen: 2, solves: 1, lastResult: "failed" }),
+      item({ id: "p2", due: NOW + 3 * 3_600_000, isDue: false }),
+    ]);
+    expect(formatProblems(body, NOW)).toBe(
+      [
+        "practice problems: 3 (2 from the learner's games, 1 built-in), 2 due now (life_and_death 1, tactics 1); boxes 1:3 2:0 3:0 4:0 5:0",
+        'next due (the first is what "problem" starts):',
+        "  p1 life_and_death from g3 move 9 (lost 6.2) box 1 due now",
+        "  b-net tactics built-in box 1 due now solved 1/2 last failed",
+      ].join("\n"),
     );
+    expect(formatProblems(problemsBody([item({ due: NOW + 60_000, isDue: false })]), NOW)).toContain('nothing is due; "problem" still starts the one due soonest');
   });
 
-  it("formats a review", () => {
+  it("lists every problem with its answers and due time", () => {
+    const text = formatProblemList(problemsBody([item({}), item({ id: "p2", answers: ["E5", "F5"], due: NOW + 2 * 86_400_000, isDue: false })]), NOW);
+    expect(text.split("\n")).toEqual([
+      "problems: 2, 1 due; focus life_and_death (next_problem prefers it, then the learner's own, then built-ins)",
+      "  p1 life_and_death built-in box 1 due now answers D5",
+      "  p2 life_and_death built-in box 1 due in 2d answers E5,F5",
+      "start one with: problem <id> (or problem for the next due)",
+    ]);
+    expect([dueText(NOW + 30_000, NOW), dueText(NOW + 5 * 3_600_000, NOW), dueText(NOW - 1, NOW)]).toEqual(["in 1m", "in 5h", "now"]);
+  });
+
+  it("finds the win-rate swings of both sides, biggest first, shown in move order", () => {
+    const moves = view().moves;
+    expect(winrateSwings(moves, "B").map((s) => [s.record.number, s.from, s.to])).toEqual([
+      [1, 0.6, 0.3],
+      [2, 0.3, 0.6],
+      [3, 0.6, 0.3],
+    ]);
+    expect(winrateSwings(moves, "B", 1)).toHaveLength(1);
+  });
+
+  it("formats a compact review", () => {
     const text = formatReview({
       id: "g12",
       settings,
       moves: view().moves,
       result: { winner: "W", margin: -3.5, reason: "score" },
-      summary: { moves: 3, totalPointLoss: 6.5, mistakes: [{ moveNumber: 3, move: "C3", pointLoss: 6.2, bestMove: "D5" }] },
+      summary: {
+        moves: 3,
+        totalPointLoss: 6.5,
+        mistakes: [{ moveNumber: 3, move: "C3", pointLoss: 6.2, bestMove: "D5", category: "shape", categorySource: "heuristic" }],
+        rating: { before: 10, after: 11.5, rated: true, nextBotRank: "18k", nextHandicap: 0 },
+      },
     });
-    expect(text.split("\n")).toEqual([
+    const lines = text.split("\n");
+    expect(lines.slice(0, 9)).toEqual([
       "game g12 9x9 komi 7 human=B bot=20k result W+3.5 moves 3",
-      "moves (human: loss, best move, pv; bot moves bare):",
-      "1 B E5 -0.3",
-      "2 W C7",
-      "3 B C3 -6.2 MISTAKE best D5 pv D5 E4 C6",
-      "summary: 1 mistake, worst move 3 (6.2), total loss 6.5",
-      "  move 3 C3 -6.2 best D5 [untagged]",
-      "tag untagged mistakes with: tag g12 <move#> <category> [note]",
+      "rating 10 -> 11.5 (+1.5, rank 18k); next bot 18k",
+      "mistakes (1, worst first, total loss 6.5):",
+      "  move 3 B C3 -6.2 best D5 [shape, heuristic] pv D5 E4 C6",
+      "  confirm or correct categories with: tag g12 <move#> <category> [note]",
+      "win-rate swings (learner's win rate):",
+      "  move 1 B E5 60% -> 30% (-30)",
+      "  move 2 W C7 (bot) 30% -> 60% (+30)",
+      "  move 3 B C3 60% -> 30% (-30)",
     ]);
+    expect(lines[9]).toBe("board before move 3 (B played C3, best D5):");
+    expect(text).toContain("(O)"); // the board before move 3 ends with White's C7
+    expect(lines.slice(-2)).toEqual(["moves (human loss in pts, ! = mistake):", "1 B E5 -0.3 | 2 W C7 | 3 B C3 -6.2!"]);
+  });
+
+  it("reviews a game without a summary from its moves, and says when a game didn't count", () => {
+    const text = formatReview({
+      id: "g13",
+      settings,
+      moves: view().moves,
+      summary: { moves: 3, totalPointLoss: 6.5, mistakes: [], rating: { before: 10, after: 10, rated: false, nextBotRank: "20k", nextHandicap: 2 } },
+    });
+    expect(text).toContain("rating unchanged at 10 (games under 10 moves don't count); next bot 20k with 2 handicap stones");
+    expect(text).toContain("mistakes: none");
+    const bare = formatReview({ id: "g14", settings, moves: view().moves });
+    expect(bare).toContain("  move 3 B C3 -6.2 best D5 [untagged] pv D5 E4 C6");
   });
 });

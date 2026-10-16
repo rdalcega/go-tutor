@@ -11,9 +11,12 @@ import type {
   MoveEval,
   MoveRecord,
   Point,
+  Profile,
+  ProfileResponse,
 } from "../../src/shared/types.ts";
 import type { ActionResponse, ConnectionState, Transport } from "./api.ts";
 import { fromGtp, toGtp, tryFromGtp } from "../../src/shared/coords.ts";
+import { BUILTIN_PROBLEMS, type BuiltinProblem } from "../../src/server/builtin-problems.ts";
 
 const other = (c: Color): Color => (c === "B" ? "W" : "B");
 
@@ -112,6 +115,10 @@ class MockServer implements Transport {
   private view: GameView;
   private listeners = new Set<(v: GameView) => void>();
   private msgId = 0;
+  /** In problem mode: the game view underneath, and the problem on the board. */
+  private gameView: GameView | null = null;
+  private problemDef: BuiltinProblem | null = null;
+  private problemIndex = 0;
 
   constructor() {
     this.view = this.sampleView();
@@ -130,6 +137,35 @@ class MockServer implements Transport {
     if (error) return { ok: false, error };
     this.emit();
     return { ok: true, view: structuredClone(this.view) };
+  }
+
+  async getProfile(): Promise<ProfileResponse> {
+    const games = [9.2, 10.4, 11.1, 10.6, 11.4];
+    const profile: Profile = {
+      botRank: "19k",
+      rating: games.at(-1)!,
+      handicap: 0,
+      ratingHistory: games.map((rating, i) => ({
+        ts: Date.now() - (games.length - i) * 3_600_000,
+        gameId: `mock-${i + 1}`,
+        rating,
+        botRank: "20k",
+        won: i === 0 || rating > games[i - 1]!,
+        delta: i === 0 ? 1.2 : Math.round((rating - games[i - 1]!) * 100) / 100,
+      })),
+      mistakeThreshold: 4,
+      thresholdHistory: [],
+      mistakeCounts: { life_and_death: 4, capturing_race: 1, opening: 2, direction: 1, shape: 3, endgame: 0, tactics: 2, other: 1 },
+      recentMistakes: [],
+      recentGames: [],
+      practiced: {},
+      gamesPlayed: games.length,
+      problemsSolved: 0,
+    };
+    return {
+      profile,
+      focus: { category: "life_and_death", reason: "life and death keeps costing points.", suggestion: "problems" },
+    };
   }
 
   subscribe(onView: (v: GameView) => void, onConnection: (s: ConnectionState) => void): () => void {
@@ -243,8 +279,19 @@ class MockServer implements Transport {
   private apply(a: ClientAction): string | null {
     const v = this.view;
     const s = v.settings;
+    if (v.mode === "problem" && a.type === "play") return this.problemPlay(a.point);
     switch (a.type) {
+      case "next_problem":
+        this.startProblem();
+        return null;
+      case "leave_problem":
+        if (this.gameView) this.view = this.gameView;
+        this.gameView = null;
+        this.problemDef = null;
+        return null;
       case "new_game": {
+        this.gameView = null;
+        this.problemDef = null;
         const settings: GameSettings = {
           size: 9, komi: 7, humanColor: "B", botRank: s?.botRank ?? "18k", handicap: 0, ...a.settings,
         };
@@ -323,9 +370,64 @@ class MockServer implements Transport {
         this.msg("system", p ? `Hint: consider ${toGtp(p, s.size)}.` : "No hint available.");
         return null;
       }
-      case "next_problem":
-        return "Problems are not available in the mock.";
     }
+  }
+
+  /** Problem mode with the built-in problems in turn; the game view waits underneath. */
+  private startProblem(): void {
+    const def = BUILTIN_PROBLEMS[this.problemIndex++ % BUILTIN_PROBLEMS.length]!;
+    this.gameView ??= this.view;
+    this.problemDef = def;
+    const board = def.board.map((row) => [...row.replace(/\s+/g, "")].map((c) => (c === "X" ? "B" : c === "O" ? "W" : null)) as (Color | null)[]);
+    this.view = {
+      ...this.freshView({ size: 9, komi: 7, humanColor: def.toPlay, botRank: "20k", handicap: 0 }),
+      gameId: null,
+      mode: "problem",
+      board,
+      toPlay: def.toPlay,
+      chat: this.gameView.chat,
+      problem: {
+        id: def.id,
+        prompt: def.prompt,
+        attempts: 0,
+        solved: false,
+        kind: "builtin",
+        category: def.category,
+        toPlay: def.toPlay,
+        maxAttempts: 2,
+        revealed: false,
+        box: 1,
+      },
+    };
+    this.msg("system", `Practice problem: ${def.prompt}`);
+  }
+
+  private problemPlay(point: Point): string | null {
+    const v = this.view;
+    const p = v.problem;
+    const def = this.problemDef;
+    if (!p || !def) return "No problem on the board.";
+    if (p.revealed) return "This problem is over. Press Next problem, or Back to playing.";
+    if (v.board[point.y]![point.x] !== null) return "That point is already taken.";
+    const gtp = toGtp(point, 9);
+    p.attempts++;
+    const correct = def.answers.includes(gtp);
+    p.lastAttempt = { move: gtp, correct, pointLoss: correct ? 0 : Math.round((3 + Math.random() * 5) * 10) / 10 };
+    const answer = def.answers[0]!;
+    if (correct || p.attempts >= p.maxAttempts) {
+      p.revealed = true;
+      p.solved = correct;
+      p.answer = { move: answer, pv: [answer] };
+      v.status = "finished";
+      const shown = fromGtp(correct ? gtp : answer, 9)!;
+      v.overlay = {
+        variation: { label: correct ? `${gtp} and how play goes on` : `KataGo's answer: ${answer}`, moves: [{ color: def.toPlay, point: shown }] },
+        ...(!correct && { marks: [{ point, kind: "x" as const }] }),
+      };
+    } else {
+      v.overlay = { marks: [{ point, kind: "x" }] };
+    }
+    return null;
   }
 
   private evaluate(rec: MoveRecord): void {

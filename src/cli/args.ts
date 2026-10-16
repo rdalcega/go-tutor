@@ -10,6 +10,7 @@ export type Invocation =
   | { kind: "watch"; since?: number; json: boolean }
   | { kind: "state"; json: boolean }
   | { kind: "summary"; json: boolean }
+  | { kind: "problems"; json: boolean }
   | { kind: "review"; gameId: string; json: boolean }
   | { kind: "command"; command: TutorCommand; json: boolean };
 
@@ -147,8 +148,9 @@ export function parseInvocation(argv: string[]): Invocation {
         noPositionals(positional, name);
         return { kind: "state", json };
       case "summary":
+      case "problems":
         noPositionals(positional, name);
-        return { kind: "summary", json };
+        return { kind: name, json };
       case "review": {
         if (positional.length > 1) throw new UsageError(`review takes one game id (or "last")`);
         return { kind: "review", gameId: positional[0] ?? "last", json };

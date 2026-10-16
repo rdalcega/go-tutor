@@ -2,7 +2,9 @@
 // Prints measured latencies so the server can size its timeouts.
 import { execFileSync } from "node:child_process";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { BUILTIN_PROBLEMS } from "../../src/server/builtin-problems.ts";
 import { KataGo, moveEvalFrom, type Position } from "../../src/server/katago.ts";
+import { ANSWER_MARGIN, builtinProblem, problemPosition } from "../../src/server/problems.ts";
 
 function hasKataGo(): boolean {
   try {
@@ -120,4 +122,40 @@ describe.skipIf(!hasKataGo())("KataGo (real engine)", () => {
     expect(good.candidates.length).toBeGreaterThan(0);
     expect(good.candidates.length).toBeLessThanOrEqual(5);
   }, 300_000);
+
+  // The built-in practice problems (src/server/builtin-problems.ts): KataGo's best move is one of
+  // the answers, every answer loses at most ANSWER_MARGIN (the server's check for an attempt), and
+  // each problem is clear: passing costs at least 3 points and the best wrong move at least 2.
+  it("agrees with every built-in problem's answers, and each problem has a clear best move", async () => {
+    const VISITS = 1200;
+    const reports = await timed("built-in problems (1200 visits)", () =>
+      Promise.all(
+        BUILTIN_PROBLEMS.map(async (def) => {
+          const p = builtinProblem(def);
+          const analyze = (moves: string[] = []) => kg.analyze(problemPosition(p, moves), { maxVisits: VISITS });
+          const [root, pass, ...answers] = await Promise.all([analyze(), analyze(["pass"]), ...p.answers.map((a) => analyze([a]))]);
+          const best = root.moveInfos[0]!;
+          const wrong = root.moveInfos.find((m) => !p.answers.includes(m.move) && m.move !== "pass");
+          const round = (n: number) => Math.round(n * 10) / 10;
+          return {
+            id: p.id,
+            best: best.move,
+            answerLosses: Object.fromEntries(p.answers.map((a, i) => [a, round(moveEvalFrom(root, answers[i]!).pointLoss)])),
+            passLoss: round(moveEvalFrom(root, pass).pointLoss),
+            wrong: wrong ? { move: wrong.move, gap: round(best.scoreLead - wrong.scoreLead) } : null,
+          };
+        }),
+      ),
+    );
+    console.log("built-in problems:", JSON.stringify(reports));
+    for (const r of reports) {
+      const def = BUILTIN_PROBLEMS.find((d) => d.id === r.id)!;
+      expect(def.answers, `${r.id}: KataGo's best ${r.best} is an answer`).toContain(r.best);
+      for (const [move, loss] of Object.entries(r.answerLosses)) {
+        expect(loss, `${r.id}: answer ${move} loses ${loss}`).toBeLessThanOrEqual(ANSWER_MARGIN);
+      }
+      expect(r.passLoss, `${r.id}: passing loses ${r.passLoss}`).toBeGreaterThanOrEqual(3);
+      if (r.wrong) expect(r.wrong.gap, `${r.id}: the best wrong move ${r.wrong.move} is ${r.wrong.gap} worse`).toBeGreaterThanOrEqual(2);
+    }
+  }, 600_000);
 });

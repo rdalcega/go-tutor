@@ -408,7 +408,15 @@ describe("GameController", () => {
     expect(v.chat.at(-1)!.text).toMatch(/Black \(you\) wins by 74 points \(1 dead stone removed\)/);
     const end = events.at(-1)!;
     expect(end.type).toBe("game_end");
-    if (end.type === "game_end") expect(end.summary).toEqual({ moves: 4, mistakes: [], totalPointLoss: 0 });
+    if (end.type === "game_end") {
+      // Two human moves: too short to change the rating.
+      expect(end.summary).toEqual({
+        moves: 4,
+        mistakes: [],
+        totalPointLoss: 0,
+        rating: { before: 10, after: 10, rated: false, nextBotRank: "20k", nextHandicap: 0 },
+      });
+    }
 
     const saved = store.loadGame(id)!;
     expect(saved.result?.winner).toBe("B");
@@ -418,7 +426,9 @@ describe("GameController", () => {
     expect(sgf).toContain("RE[B+74]");
     const profile = store.loadProfile();
     expect(profile.gamesPlayed).toBe(1);
-    expect(profile.ratingHistory).toEqual([{ ts: clock.now(), gameId: id, rating: 10, botRank: "20k", won: true }]);
+    expect(profile.ratingHistory).toEqual([]);
+    expect(profile.recentGames).toEqual([{ ts: clock.now(), gameId: id, size: 9, humanMoves: 2, avgPointLoss: 0, mistakes: 0, threshold: 4 }]);
+    expect(store.loadGame(id)!.summary?.rating?.rated).toBe(false);
     expect(() => ctl.play(D4)).toThrow(UserError);
   });
 
@@ -475,13 +485,23 @@ describe("GameController", () => {
     if (end.type !== "game_end") throw new Error("expected game_end");
     expect(end.result).toEqual({ winner: "W", margin: 0, reason: "resign" });
     expect(end.summary.mistakes).toEqual([
-      { moveNumber: 3, move: "D4", pointLoss: 10, bestMove: "E5", category: "shape" },
-      { moveNumber: 1, move: "C3", pointLoss: 4.5, bestMove: "E5" },
+      { moveNumber: 3, move: "D4", pointLoss: 10, bestMove: "E5", category: "shape", categorySource: "tutor" },
+      { moveNumber: 1, move: "C3", pointLoss: 4.5, bestMove: "E5", category: "opening", categorySource: "heuristic" },
     ]);
     expect(end.summary.totalPointLoss).toBe(14.5);
     const profile = store.loadProfile();
     expect(profile.mistakeCounts.shape).toBe(1);
-    expect(profile.recentMistakes[0]).toMatchObject({ moveNumber: 3, category: "shape", pointLoss: 10, note: "empty triangle" });
+    expect(profile.mistakeCounts.opening).toBe(1); // the untagged mistake counts under its heuristic category
+    expect(profile.recentMistakes.map((m) => [m.moveNumber, m.category])).toEqual([
+      [1, "opening"],
+      [3, "shape"],
+    ]);
+    expect(profile.recentMistakes[1]).toMatchObject({ moveNumber: 3, category: "shape", pointLoss: 10, note: "empty triangle" });
+
+    // The tutor's tag replaces a heuristic category in the summary and the tallies.
+    await ctl.handleTutor({ type: "tag", gameId: end.gameId, moveNumber: 1, category: "tactics" });
+    expect(store.loadProfile().mistakeCounts).toMatchObject({ opening: 0, tactics: 1 });
+    expect(ctl.view().status).toBe("finished");
 
     // Re-tagging a saved game moves the tally to the new category.
     await ctl.handleTutor({ type: "tag", gameId: end.gameId, moveNumber: 3, category: "direction" });
@@ -650,5 +670,108 @@ describe("GameController", () => {
       ["B", "G7"],
     ]);
     expect(pos.initialPlayer).toBe("W");
+  });
+});
+
+describe("GameController and the learner profile", () => {
+  beforeEach(() => setup());
+
+  it("asks for ownership only around a mistake and categorizes a mistake that kills a group as life and death", async () => {
+    await startGame();
+    const id = ctl.view().gameId!;
+    engine.botMoves = ["A9", "A8"];
+    // E5-F5 (row 5 from the top is y 4) is alive until J1, after which KataGo sees it dead.
+    const group = new Set([4 * 9 + 4, 4 * 9 + 5]);
+    engine.ownership = (size, moves) => Array.from({ length: size * size }, (_, i) => (group.has(i) ? (moves.endsWith("J1") ? -0.9 : 0.9) : 0));
+    engine.lossAfter(["E5", "A9", "F5", "A8", "J1"], 12);
+    ctl.play(E5);
+    await flush();
+    ctl.play({ x: 5, y: 4 });
+    await flush();
+    ctl.play({ x: 8, y: 8 }); // J1
+    await flush();
+    expect(ctl.view().status).toBe("paused");
+    await flush();
+    expect(store.loadGame(id)!.heuristics).toEqual({ 5: "life_and_death" });
+    // The move evals ran without ownership; the mistake's two positions were asked again with it.
+    const keyOf = (c: (typeof engine.analyzeCalls)[number]) => c.pos.moves.map((m) => m[1]).join(" ");
+    expect(engine.analyzeCalls.filter((c) => c.opts?.includeOwnership).map(keyOf)).toEqual(["E5 A9 F5 A8", "E5 A9 F5 A8 J1"]);
+    expect(engine.analyzeCalls.filter((c) => keyOf(c) === "E5 A9 F5 A8").map((c) => !!c.opts?.includeOwnership)).toEqual([false, true]);
+    await ctl.handleAction({ type: "continue" });
+    await flush();
+
+    await ctl.handleAction({ type: "resign" });
+    const end = events.at(-1)!;
+    if (end.type !== "game_end") throw new Error("expected game_end");
+    expect(end.summary.mistakes).toEqual([{ moveNumber: 5, move: "J1", pointLoss: 12, bestMove: "E5", category: "life_and_death", categorySource: "heuristic" }]);
+    expect(store.loadProfile().mistakeCounts.life_and_death).toBe(1);
+  });
+
+  it("still saves and announces a finished game when the profile can't be updated", async () => {
+    const logs: string[] = [];
+    ctl = new GameController({ engine, store, clock, botDelayMs: 0, log: (m) => logs.push(m) });
+    ctl.onEvent((e) => events.push(e));
+    ctl.setEngineState("ready");
+    await startGame();
+    const id = ctl.view().gameId!;
+    store.saveProfile = () => {
+      throw new Error("disk full");
+    };
+    engine.botMoves = ["pass"];
+    ctl.play(E5);
+    await flush();
+    ctl.play(null); // two passes: the game is scored
+    await flush();
+    expect(types().at(-1)).toBe("game_end");
+    expect(ctl.view().status).toBe("finished");
+    expect(store.loadGame(id)!.result).toMatchObject({ reason: "score" });
+    expect(logs).toContainEqual(expect.stringMatching(/updating the profile after game .* failed: disk full/));
+  });
+
+  it("Try again drops the heuristic category of the move taken back", async () => {
+    await startGame();
+    engine.lossAfter(["C3"], 6);
+    ctl.play(C3);
+    await flush();
+    await ctl.handleAction({ type: "retry" });
+    ctl.play(E5);
+    await flush();
+    await ctl.handleAction({ type: "resign" });
+    const end = events.at(-1)!;
+    if (end.type !== "game_end") throw new Error("expected game_end");
+    expect(end.summary.mistakes).toEqual([]);
+    expect(store.loadGame(end.gameId)!.heuristics).toEqual({});
+  });
+
+  it("updates the rating after a game of 10+ moves and offers the next bot", async () => {
+    await startGame();
+    for (let i = 0; i < 10; i++) {
+      ctl.play({ x: i % 9, y: 8 - Math.floor(i / 9) });
+      await flush();
+    }
+    await ctl.handleAction({ type: "resign" });
+    const end = events.at(-1)!;
+    if (end.type !== "game_end") throw new Error("expected game_end");
+    expect(end.summary.rating).toEqual({ before: 10, after: 8.5, rated: true, nextBotRank: "20k", nextHandicap: 0 });
+    const profile = store.loadProfile();
+    expect(profile.rating).toBe(8.5);
+    expect(profile.ratingHistory).toEqual([{ ts: clock.now(), gameId: end.gameId, rating: 8.5, botRank: "20k", won: false, handicap: 0, delta: -1.5 }]);
+    expect(store.loadGame(end.gameId)!.summary!.rating!.after).toBe(8.5);
+  });
+
+  it("gives the learner the profile's handicap stones on 9x9 unless the game picks its own bot", async () => {
+    store.saveProfile({ ...store.loadProfile(), rating: 7, botRank: "20k", handicap: 2 });
+    ctl = new GameController({ engine, store, clock, botDelayMs: 0 });
+    ctl.setEngineState("ready");
+    ctl.newGame();
+    expect(ctl.view().settings).toEqual({ size: 9, komi: 0.5, humanColor: "B", botRank: "20k", handicap: 2 });
+    expect(ctl.view().chat.at(-1)!.text).toMatch(/2 handicap stones.*weakest one KataGo has/);
+    ctl.newGame({ botRank: "18k" });
+    expect(ctl.view().settings).toMatchObject({ komi: 7, botRank: "18k", handicap: 0 });
+    ctl.newGame({ size: 13 });
+    expect(ctl.view().settings).toMatchObject({ size: 13, komi: 7, handicap: 0 });
+    ctl.newGame({ humanColor: "W" });
+    expect(ctl.view().settings).toMatchObject({ humanColor: "W", handicap: 0 });
+    await flush();
   });
 });

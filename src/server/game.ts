@@ -25,12 +25,33 @@ import type {
   MoveRecord,
   Overlay,
   Point,
+  ProblemAttempt,
   Profile,
   TeachingMoment,
   TutorCommand,
   TutorEvent,
 } from "../shared/types.ts";
-import { moveEvalFrom, type Analysis, type AnalyzeOptions, type Engine, type Position } from "./katago.ts";
+import { TRUSTED_CANDIDATE_VISITS, moveEvalFrom, type Analysis, type AnalyzeOptions, type Engine, type Position } from "./katago.ts";
+import {
+  ANSWER_MARGIN,
+  DEEP_VISITS,
+  MAX_ATTEMPTS,
+  addProblems,
+  candidatesFromAnalysis,
+  candidatesThin,
+  nextProblemId,
+  pickNextProblem,
+  problemFromMistake,
+  problemGame,
+  problemPosition,
+  promptFor,
+  resultOf,
+  schedule,
+  stonesOf,
+  type MistakeSnapshot,
+  type StoredProblem,
+} from "./problems.ts";
+import { applyGame, applyProblemResult, applyTag, classifyMistake, recommendFocus } from "./profile.ts";
 import type { SavedGame, Store } from "./store.ts";
 
 /** An error whose message is meant for the person (or tutor) who sent the request. */
@@ -52,7 +73,7 @@ type DistributiveOmit<T, K extends PropertyKey> = T extends unknown ? Omit<T, K>
 /** A TutorEvent before the bridge stamps `seq` and `ts`. */
 export type TutorEventInput = DistributiveOmit<TutorEvent, "seq" | "ts">;
 
-export type GameEngine = Pick<Engine, "analyze" | "botMove">;
+export type GameEngine = Pick<Engine, "analyze" | "botMove"> & Partial<Pick<Engine, "concurrency">>;
 export type EngineState = "starting" | "ready" | "failed";
 
 export interface ControllerOptions {
@@ -67,7 +88,29 @@ export interface ControllerOptions {
   botRetryMs?: number;
   /** Visits for move evaluation; default is the config's maxVisits. */
   analysisVisits?: number;
+  /** Visits for checking a practice-problem attempt. Default 600. */
+  problemVisits?: number;
   log?: (msg: string) => void;
+}
+
+/** The practice problem on the board in problem mode. The game, if any, waits underneath. */
+interface Practice {
+  problem: StoredProblem;
+  /** The rules engine at the problem position (it never changes; attempts are checked on copies). */
+  game: GoGame;
+  /** The problem's box when it started. */
+  box: number;
+  attempts: number;
+  solved: boolean;
+  /** Solved or out of attempts: the answer is shown and the board is locked. */
+  revealed: boolean;
+  /** An attempt is with KataGo. */
+  checking: boolean;
+  lastAttempt?: ProblemAttempt;
+  answer?: { move: Gtp; pv: Gtp[] };
+  overlay: Overlay | null;
+  /** Analyses of the problem position (key "") and after each attempt (key = the move). */
+  analyses: Map<string, Promise<Analysis>>;
 }
 
 export const DEFAULT_SETTINGS: Omit<GameSettings, "botRank"> = { size: 9, komi: 7, humanColor: "B", handicap: 0 };
@@ -75,6 +118,11 @@ const CHAT_LIMIT = 200;
 const VIEW_CHAT_LIMIT = 100;
 const FALLBACK_PV_LENGTH = 6;
 const BOT_RETRIES = 3;
+const DEFAULT_PROBLEM_VISITS = 600;
+/** Moves of the follow-up drawn after a correct answer: the answer, the opponent's best reply, the next move. */
+const ANSWER_LINE_LENGTH = 3;
+/** Komi when the profile gives the learner handicap stones. */
+const HANDICAP_KOMI = 0.5;
 
 const ILLEGAL_TEXT: Record<IllegalReason, string> = {
   occupied: "That point is already taken.",
@@ -90,6 +138,16 @@ const round1 = (n: number) => Math.round(n * 10) / 10;
 
 function moveGtp(move: Move, size: number): Gtp {
   return "pass" in move ? "pass" : toGtp(move.point, size);
+}
+
+/** KataGo searched `move` well enough in `analysis` to judge it within that one search. */
+function searchedWell(analysis: Analysis, move: Gtp): boolean {
+  return analysis.moveInfos.some((m) => m.move === move && m.visits >= TRUSTED_CANDIDATE_VISITS);
+}
+
+/** Some empty point is illegal only because of ko (superko): the position depends on its history. */
+function hasKoBan(game: GoGame): boolean {
+  return game.board.some((row, y) => row.some((cell, x) => cell === null && game.illegalReason({ x, y }) === "ko"));
 }
 
 function plural(n: number, word: string): string {
@@ -123,6 +181,7 @@ export class GameController {
   private readonly botDelayMs: number;
   private readonly botRetryMs: number;
   private readonly analysisVisits: number | undefined;
+  private readonly problemVisits: number;
   private readonly log: (msg: string) => void;
 
   private readonly eventListeners: ((e: TutorEventInput) => void)[] = [];
@@ -140,8 +199,14 @@ export class GameController {
   private overlay: Overlay | null = null;
   private chat: ChatMessage[] = [];
   private tags: SavedGame["tags"] = {};
+  /** Heuristic mistake categories by move number, from the eval of each mistake (refined with ownership). */
+  private heuristics: Record<number, MistakeCategory> = {};
   private tutorAttached = false;
   private engineState: EngineState = "starting";
+  /** Problem mode: the problem on the board. */
+  private practice: Practice | null = null;
+  /** The problem shown last, so Next problem moves on to a different one. */
+  private lastProblemId: string | undefined;
 
   /** Bumped whenever a pending engine reply could become stale. */
   private gen = 0;
@@ -153,7 +218,12 @@ export class GameController {
   /** The human move whose evaluation is in flight. The bot waits for it, so a moment can't be skipped. */
   private evaluating: MoveRecord | null = null;
   private momentTimer: unknown = null;
-  private readonly analyses = new Map<string, Promise<Analysis>>();
+  /** A mistake evaluated while the learner was on a practice problem: its moment opens on Back to playing. */
+  private deferredMoment: MoveRecord | null = null;
+  /** The fallback came due while the learner was on a practice problem: it is applied on Back to playing. */
+  private fallbackDeferred = false;
+  /** Analyses by position (moves as a GTP list), and whether they include ownership. */
+  private readonly analyses = new Map<string, { pending: Promise<Analysis>; ownership: boolean }>();
   private nextChatId = 1;
   /** A save is scheduled for the end of this tick. */
   private saveQueued = false;
@@ -166,6 +236,7 @@ export class GameController {
     this.botDelayMs = opts.botDelayMs ?? 500;
     this.botRetryMs = opts.botRetryMs ?? 2000;
     this.analysisVisits = opts.analysisVisits;
+    this.problemVisits = opts.problemVisits ?? DEFAULT_PROBLEM_VISITS;
     this.log = opts.log ?? (() => {});
     this.profile = this.store.loadProfile();
   }
@@ -181,6 +252,7 @@ export class GameController {
   // --- view ------------------------------------------------------------------
 
   view(): GameView {
+    if (this.practice) return this.problemView(this.practice);
     const game = this.game;
     return {
       gameId: this.gameId,
@@ -201,6 +273,11 @@ export class GameController {
     };
   }
 
+  /** The game's teaching moment, also while a practice problem is on the board (whose view shows none). */
+  gameMoment(): TeachingMoment | null {
+    return this.moment ? { ...this.moment } : null;
+  }
+
   get currentProfile(): Profile {
     return this.profile;
   }
@@ -212,6 +289,9 @@ export class GameController {
     this.tutorAttached = attached;
     // Nobody is left to answer a waiting moment.
     if (!attached && this.moment?.state === "waiting") this.applyFallback();
+    // A tutor is back while the fallback waits under a practice problem: the moment is theirs to
+    // answer again, with a fresh wait, instead of KataGo's answer on Back to playing.
+    else if (attached && this.fallbackDeferred && this.moment?.state === "waiting") this.waitForTutor();
     this.changed();
   }
 
@@ -267,6 +347,7 @@ export class GameController {
     this.settings = saved.settings;
     this.createdAt = saved.createdAt;
     this.tags = saved.tags ?? {};
+    this.heuristics = saved.heuristics ?? {};
     this.chat = saved.chat ?? [];
     const maxChatId = Math.max(0, ...this.chat.map((m) => Number(/^c(\d+)$/.exec(m.id)?.[1] ?? 0)));
     this.nextChatId = Math.max(this.nextChatId, maxChatId + 1);
@@ -288,37 +369,52 @@ export class GameController {
   // --- browser actions -------------------------------------------------------
 
   async handleAction(action: ClientAction): Promise<void> {
+    // In problem mode the game waits underneath: only a stone on the board counts as an answer.
+    const practicing = !!this.practice;
     switch (action.type) {
       case "new_game":
         return this.newGame(action.settings);
       case "play":
-        return this.play(action.point);
+        return practicing ? this.problemPlay(action.point) : this.play(action.point);
       case "pass":
+        if (practicing) throw new UserError("In a problem, answer by playing a stone on the board.");
         return this.play(null);
       case "resign":
+        if (practicing) throw new UserError("You're on a practice problem. Press Back to playing to return to your game first.");
         return this.resign();
       case "continue":
+        if (practicing) return; // Enter on the problem screen: nothing to continue
         return this.continueGame();
       case "retry":
+        if (practicing) throw new UserError("Try again is for games. In a problem, just play another move while you have attempts left.");
         return this.retry(null);
       case "chat":
         return this.userChat(action.text);
       case "ask_tutor":
+        if (practicing) throw new UserError("Hints are for games. In a problem, ask your tutor in the chat.");
         return this.hint(action.text);
       case "next_problem":
-        throw new UserError("Practice problems aren't available yet.");
+        return this.startProblem();
+      case "leave_problem":
+        return this.leaveProblem();
     }
   }
 
   // --- tutor commands -----------------------------------------------------------
 
   async handleTutor(cmd: TutorCommand): Promise<void> {
+    const practice = this.practice;
     switch (cmd.type) {
       case "say":
+        if (practice) {
+          this.addChat("tutor", cmd.text, cmd.momentId);
+          return this.changed();
+        }
         this.engage(cmd.momentId);
         this.addChat("tutor", cmd.text, cmd.momentId ?? this.activeMomentId());
         return this.changed();
       case "rethink": {
+        if (practice) throw new UserError("The learner is on a practice problem; rethink is for games. Use say, show or mark.");
         const moment = this.rethinkMoment(cmd.momentId);
         this.engage(moment.id);
         this.retry(cmd.text, moment.id);
@@ -326,28 +422,39 @@ export class GameController {
       }
       // Validate the drawing before engaging, so a typo doesn't cancel the fallback.
       case "show": {
+        if (practice) {
+          practice.overlay = { ...practice.overlay, variation: this.problemVariation(practice, cmd.moves, cmd.start, cmd.label) };
+          return this.changed();
+        }
         const variation = this.variationFrom(cmd.moves, cmd.start, cmd.label);
         this.engage();
         this.overlay = { ...this.overlay, variation };
         return this.changed();
       }
       case "mark": {
+        if (practice) {
+          const marks = this.markPoints(cmd.points, practice.problem.size, cmd.kind ?? "circle", cmd.text);
+          practice.overlay = { ...practice.overlay, marks: [...(practice.overlay?.marks ?? []), ...marks] };
+          return this.changed();
+        }
         const marks = this.marksFrom(cmd.points, cmd.kind ?? "circle", cmd.text);
         this.engage();
         this.overlay = { ...this.overlay, marks: [...(this.overlay?.marks ?? []), ...marks] };
         return this.changed();
       }
       case "clear":
-        this.overlay = null;
+        if (practice) practice.overlay = null;
+        else this.overlay = null;
         return this.changed();
       case "resume":
+        if (practice) return; // the game stays paused underneath until the learner goes back to it
         return this.continueGame();
       case "claim":
         return this.claim(cmd.momentId);
       case "new_game":
         return this.newGame(cmd.settings);
       case "start_problem":
-        throw new UserError("Practice problems aren't available yet (Milestone 5).");
+        return this.startProblem(cmd.problemId);
       case "tag":
         return this.tag(cmd.gameId, cmd.moveNumber, cmd.category, cmd.note);
     }
@@ -356,7 +463,8 @@ export class GameController {
   // --- game lifecycle ----------------------------------------------------------
 
   newGame(partial: Partial<GameSettings> = {}): void {
-    const settings = this.validateSettings(partial);
+    const { settings, fromProfile } = this.validateSettings(partial);
+    this.closePractice(); // a new game ends problem mode
     if (this.game && !this.result && this.gameId) {
       // Leaving an unfinished game: keep its record, but it doesn't count.
       this.result = { winner: null, margin: 0, reason: "abandon" };
@@ -371,8 +479,12 @@ export class GameController {
     this.game = new GoGame(settings.size, settings.komi, settings.handicap);
     this.emit({ type: "game_start", gameId: this.gameId, settings });
     const handicap = settings.handicap >= 2 ? `, ${settings.handicap} handicap stones` : "";
+    const why =
+      settings.handicap >= 2 && fromProfile
+        ? ` The handicap stands in for a bot weaker than ${settings.botRank}, the weakest one KataGo has; it goes away as your rating rises.`
+        : "";
     this.system(
-      `New game: ${settings.size}×${settings.size}, you play ${settings.humanColor === "B" ? "Black" : "White"} against a ${settings.botRank} bot (komi ${settings.komi}${handicap}).`,
+      `New game: ${settings.size}×${settings.size}, you play ${settings.humanColor === "B" ? "Black" : "White"} against a ${settings.botRank} bot (komi ${settings.komi}${handicap}).${why}`,
     );
     this.save();
     if (this.engineState === "ready") void this.prefetch();
@@ -390,12 +502,16 @@ export class GameController {
     this.moment = null;
     this.overlay = null;
     this.tags = {};
+    this.heuristics = {};
     this.status = "playing";
     this.botFailures = 0;
     this.evaluating = null;
+    this.deferredMoment = null;
+    this.fallbackDeferred = false;
   }
 
-  private validateSettings(partial: Partial<GameSettings>): GameSettings {
+  /** A new game's settings, and whether its handicap came from the profile (the learner is below the weakest bot). */
+  private validateSettings(partial: Partial<GameSettings>): { settings: GameSettings; fromProfile: boolean } {
     const size = partial.size ?? DEFAULT_SETTINGS.size;
     if (size !== 9 && size !== 13 && size !== 19) throw new UserError(`Board size must be 9, 13 or 19 (got ${String(size)}).`);
     const komi = partial.komi ?? DEFAULT_SETTINGS.komi;
@@ -404,7 +520,12 @@ export class GameController {
     }
     const humanColor = partial.humanColor ?? DEFAULT_SETTINGS.humanColor;
     if (humanColor !== "B" && humanColor !== "W") throw new UserError('Color must be "B" or "W".');
-    const handicap = partial.handicap ?? DEFAULT_SETTINGS.handicap;
+    // Below the weakest bot the profile gives the learner (Black, 9×9) handicap stones, unless the
+    // game asks for its own bot rank or handicap.
+    const profileHandicap = this.profile.handicap ?? 0;
+    const fromProfile =
+      profileHandicap >= 2 && partial.handicap === undefined && partial.botRank === undefined && size === 9 && humanColor === "B";
+    const handicap = partial.handicap ?? (fromProfile ? profileHandicap : DEFAULT_SETTINGS.handicap);
     if (!Number.isInteger(handicap) || handicap < 0 || handicap > 9 || handicap === 1) {
       throw new UserError("Handicap must be 0 or 2–9 stones.");
     }
@@ -414,7 +535,9 @@ export class GameController {
     } catch (err) {
       throw new UserError((err as Error).message);
     }
-    return { size, komi, humanColor, botRank, handicap };
+    // Handicap stones replace komi (White keeps half a point so there are no draws).
+    const finalKomi = fromProfile && partial.komi === undefined ? HANDICAP_KOMI : komi;
+    return { settings: { size, komi: finalKomi, humanColor, botRank, handicap }, fromProfile };
   }
 
   private newGameId(now: number): string {
@@ -469,7 +592,17 @@ export class GameController {
         this.analysisOf([...movesBefore, record.move]),
       ]);
       if (!this.isCurrent(gen, record)) return;
-      record.eval = moveEvalFrom(before, after);
+      record.eval = moveEvalFrom(before, after, moveGtp(record.move, game.size));
+      if (record.eval.pointLoss >= this.profile.mistakeThreshold) {
+        try {
+          // A first category without ownership; KataGo's ownership refines it in the background.
+          this.heuristics[record.number] = this.classify(record, before, after);
+          void this.refineCategory(record, movesBefore, gen);
+        } catch (err) {
+          // Only the category is lost; game end classifies the move again without ownership.
+          this.log(`classifying move ${record.number} failed: ${(err as Error).message}`);
+        }
+      }
     } catch (err) {
       if (!this.isCurrent(gen, record)) return;
       this.system(`KataGo couldn't evaluate that move (${(err as Error).message}). Playing on without feedback.`);
@@ -481,11 +614,29 @@ export class GameController {
     this.save();
     const evaluation = record.eval;
     if (evaluation && evaluation.pointLoss >= this.profile.mistakeThreshold) {
-      this.startMoment(record);
+      // On a practice problem the moment waits until the learner goes back to the game.
+      if (this.practice) this.deferredMoment = record;
+      else this.startMoment(record);
     } else {
       this.maybeBotMove();
     }
     this.changed();
+  }
+
+  /**
+   * Classify a mistake again with KataGo's ownership before and after it, which spots groups that
+   * live or die. It doesn't hold up the teaching moment; a game that ends first keeps the category
+   * from the eval.
+   */
+  private async refineCategory(record: MoveRecord, movesBefore: Move[], gen: number): Promise<void> {
+    try {
+      const [before, after] = await Promise.all([this.analysisOf(movesBefore, true), this.analysisOf([...movesBefore, record.move], true)]);
+      if (this.gen !== gen || this.game?.moves[record.number - 1] !== record) return;
+      this.heuristics[record.number] = this.classify(record, before, after);
+      this.save();
+    } catch (err) {
+      this.log(`classifying move ${record.number} with ownership failed: ${(err as Error).message}`);
+    }
   }
 
   private isCurrent(gen: number, record?: MoveRecord): boolean {
@@ -517,18 +668,25 @@ export class GameController {
       boardAfter: toAscii(game.board, this.lastPoint()),
     });
     this.save();
-    if (waiting) {
-      const id = this.moment.id;
-      this.momentTimer = this.clock.setTimeout(() => {
-        this.momentTimer = null;
-        if (this.moment?.id === id && this.moment.state === "waiting") {
-          this.applyFallback();
-          this.changed();
-        }
-      }, this.tutorTimeoutMs);
-    } else {
-      this.applyFallback();
-    }
+    if (waiting) this.waitForTutor();
+    else this.applyFallback();
+  }
+
+  /** Give the attached tutor `tutorTimeoutMs` to take the waiting moment before KataGo answers. */
+  private waitForTutor(): void {
+    const moment = this.moment;
+    if (!moment) return;
+    this.cancelMomentTimer();
+    this.fallbackDeferred = false;
+    this.moment = { ...moment, deadline: this.clock.now() + this.tutorTimeoutMs };
+    const id = moment.id;
+    this.momentTimer = this.clock.setTimeout(() => {
+      this.momentTimer = null;
+      if (this.moment?.id === id && this.moment.state === "waiting") {
+        this.applyFallback();
+        this.changed();
+      }
+    }, this.tutorTimeoutMs);
   }
 
   /** KataGo answers instead of the tutor: best move and its line on the board, plus plain words. */
@@ -537,6 +695,12 @@ export class GameController {
     const game = this.game;
     if (!moment || !game || !this.settings) return;
     this.cancelMomentTimer();
+    if (this.practice) {
+      // Its "Press Continue" would land on the problem screen; it waits for Back to playing.
+      this.fallbackDeferred = true;
+      return;
+    }
+    this.fallbackDeferred = false;
     const { deadline: _deadline, ...rest } = moment;
     this.moment = { ...rest, state: "fallback" };
     const record = game.moves[moment.moveNumber - 1];
@@ -654,6 +818,8 @@ export class GameController {
     if (lastHuman < 0) throw new UserError("There is no move of yours to take back.");
     this.gen++;
     this.evaluating = null;
+    this.deferredMoment = null;
+    this.fallbackDeferred = false;
     this.cancelMomentTimer();
     game.undo(moves.length - lastHuman);
     this.dropTagsAfter(game.moves.length);
@@ -669,6 +835,7 @@ export class GameController {
 
   /** Tags on moves that were taken back no longer describe anything: remove them and their tallies. */
   private dropTagsAfter(moveCount: number): void {
+    for (const n of Object.keys(this.heuristics).map(Number)) if (n > moveCount) delete this.heuristics[n];
     const dropped = Object.keys(this.tags).map(Number).filter((n) => n > moveCount);
     if (dropped.length === 0) return;
     const profile = this.store.loadProfile();
@@ -687,7 +854,8 @@ export class GameController {
   private maybeBotMove(): void {
     const game = this.game;
     const settings = this.settings;
-    if (!game || !settings || this.result || this.status !== "playing") return;
+    // The bot waits while the learner is on a practice problem; leaving problem mode resumes the turn.
+    if (!game || !settings || this.result || this.status !== "playing" || this.practice) return;
     if (game.toPlay === settings.humanColor || game.isOver || this.evaluating) return;
     if (this.engineState !== "ready" || this.botFor === this.gen) return;
     void this.botMove(game, settings);
@@ -717,7 +885,7 @@ export class GameController {
       this.busy--;
       if (this.botFor === gen) this.botFor = null;
     }
-    if (this.gen !== gen || this.game !== game || game.moves.length !== moveCount || this.status !== "playing") {
+    if (this.gen !== gen || this.game !== game || game.moves.length !== moveCount || this.status !== "playing" || this.practice) {
       this.changed();
       return;
     }
@@ -803,9 +971,11 @@ export class GameController {
   private userChat(text: string): void {
     const trimmed = text.trim();
     if (!trimmed) throw new UserError("Type a message first.");
-    const momentId = this.activeMomentId();
+    // On a practice problem the message is about the problem, not the game waiting underneath.
+    const problemId = this.practice?.problem.id;
+    const momentId = problemId ? undefined : this.activeMomentId();
     this.addChat("user", trimmed, momentId);
-    this.emit({ type: "user_message", text: trimmed, gameId: this.gameId, ...(momentId && { momentId }) });
+    this.emit({ type: "user_message", text: trimmed, gameId: this.gameId, ...(momentId && { momentId }), ...(problemId && { problemId }) });
     if (!this.tutorAttached) {
       this.system("Your tutor isn't connected right now, so nobody can answer chat. KataGo's feedback still works.");
     }
@@ -838,8 +1008,12 @@ export class GameController {
 
   private marksFrom(points: Gtp[], kind: "circle" | "triangle" | "square" | "x", text?: string): NonNullable<Overlay["marks"]> {
     const { settings } = this.requireGame();
+    return this.markPoints(points, settings.size, kind, text);
+  }
+
+  private markPoints(points: Gtp[], size: number, kind: "circle" | "triangle" | "square" | "x", text?: string): NonNullable<Overlay["marks"]> {
     if (points.length === 0) throw new UserError("mark needs at least one point.");
-    return points.map((gtp) => ({ point: this.parsePoint(gtp, settings.size, false)!, kind, ...(text && { text }) }));
+    return points.map((gtp) => ({ point: this.parsePoint(gtp, size, false)!, kind, ...(text && { text }) }));
   }
 
   private parsePoint(gtp: Gtp, size: number, allowPass: boolean): Point | null {
@@ -869,7 +1043,7 @@ export class GameController {
     this.busy++;
     this.changed();
     try {
-      const analysis = await this.analysisOf(game.moves.map((r) => r.move), { includeOwnership: true });
+      const analysis = await this.analysisOf(game.moves.map((r) => r.move), true);
       if (analysis.ownership) dead = deadStonesFromOwnership(board, analysis.ownership);
     } catch (err) {
       if (this.isCurrent(gen)) this.system(`KataGo couldn't judge dead stones (${(err as Error).message}); counting every stone as alive.`);
@@ -886,17 +1060,109 @@ export class GameController {
     const settings = this.settings!;
     this.gen++;
     this.cancelMomentTimer();
+    this.deferredMoment = null;
+    this.fallbackDeferred = false;
     this.result = result;
     this.status = "finished";
     this.moment = null;
     this.overlay = null;
     this.summary = this.buildSummary();
+    // The game must still be saved and announced if the profile can't be updated.
+    try {
+      this.summary.rating = this.updateProfileAfterGame(result, this.summary);
+    } catch (err) {
+      this.log(`updating the profile after game ${this.gameId} failed: ${(err as Error).message}`);
+    }
     const dead = deadCount ? ` (${plural(deadCount, "dead stone")} removed)` : "";
     this.system(`Game over: ${formatScore(result, settings.humanColor)}${dead}.`);
     this.saveNow();
-    this.updateProfileAfterGame(result);
     this.emit({ type: "game_end", gameId: this.gameId!, result, summary: this.summary });
     this.changed();
+    const gameId = this.gameId!;
+    this.generateProblems(gameId, settings, this.game!.moves, this.summary).catch((err: unknown) =>
+      this.log(`making practice problems from ${gameId} failed: ${(err as Error).message}`),
+    );
+  }
+
+  /**
+   * Turns each mistake of a finished game into a practice problem: the position before it, the
+   * learner to play, and KataGo's candidates within ANSWER_MARGIN of its best as the answers. A
+   * mistake whose stored candidates are thin is analyzed again, deeper, first. So is one where a ko
+   * ban applied: the problem position has no move history, so the immediate recapture is legal
+   * there and the game's candidates (a ko threat, say) no longer answer it; without that analysis
+   * there is no problem.
+   */
+  private async generateProblems(gameId: string, settings: GameSettings, moves: MoveRecord[], summary: GameSummary): Promise<void> {
+    const snapshots: MistakeSnapshot[] = [];
+    const koBanned = new Set<MistakeSnapshot>();
+    for (const m of summary.mistakes) {
+      const record = moves[m.moveNumber - 1];
+      const evaluation = record?.eval;
+      if (!record || !evaluation) continue;
+      let before: GoGame;
+      try {
+        before = GoGame.fromMoves(settings.size, settings.komi, settings.handicap, moves.slice(0, m.moveNumber - 1).map((r) => r.move));
+      } catch {
+        continue;
+      }
+      const snapshot: MistakeSnapshot = {
+        gameId,
+        moveNumber: m.moveNumber,
+        played: m.move,
+        pointLoss: evaluation.pointLoss,
+        category: m.category ?? "other",
+        size: settings.size,
+        komi: settings.komi,
+        board: before.board,
+        toPlay: record.move.color,
+        candidates: evaluation.candidates.map((c) => ({ move: c.move, lead: c.lead, visits: c.visits, pv: c.pv })),
+      };
+      snapshots.push(snapshot);
+      if (hasKoBan(before)) koBanned.add(snapshot);
+    }
+    const deepen = async (s: MistakeSnapshot): Promise<void> => {
+      const ko = koBanned.has(s);
+      if (this.engineState === "ready") {
+        try {
+          const position = problemPosition({ size: s.size, komi: s.komi, stones: stonesOf(s.board), toPlay: s.toPlay });
+          s.candidates = candidatesFromAnalysis(await this.engine.analyze(position, { maxVisits: DEEP_VISITS }));
+          return;
+        } catch (err) {
+          this.log(`deeper analysis for a problem from ${gameId} move ${s.moveNumber} failed: ${(err as Error).message}`);
+        }
+      }
+      if (ko) s.candidates = []; // the game's answers belong to a position the problem can't show
+    };
+    // As many at once as KataGo runs, so they don't queue up ahead of the next game's analyses.
+    const queue = snapshots.filter((s) => koBanned.has(s) || candidatesThin(s.candidates));
+    const workers = Math.max(1, Math.min(queue.length, this.engine.concurrency ?? 1));
+    await Promise.all(
+      Array.from({ length: workers }, async () => {
+        for (let s = queue.shift(); s; s = queue.shift()) await deepen(s);
+      }),
+    );
+    try {
+      const problems = this.store.loadProblems();
+      const now = this.clock.now();
+      const fresh: StoredProblem[] = [];
+      // The tutor may have tagged a mistake while KataGo was busy: the problem takes the tag. The
+      // current game's summary is the object `tag` updates; a saved game's lives on disk.
+      const current = (gameId === this.gameId ? this.summary : this.store.loadGame(gameId)?.summary) ?? summary;
+      for (const s of snapshots) {
+        s.category = current.mistakes.find((m) => m.moveNumber === s.moveNumber)?.category ?? s.category;
+        const problem = problemFromMistake(s, nextProblemId([...problems, ...fresh]), now);
+        if (problem) fresh.push(problem);
+      }
+      const added = addProblems(problems, fresh);
+      if (added.length === 0) return;
+      this.store.saveProblems(problems);
+      this.log(`practice problems from ${gameId}: ${added.map((p) => p.id).join(", ")}`);
+      if (this.gameId === gameId && !this.practice) {
+        this.system(`${added.length === 1 ? "One of your mistakes is" : `${added.length} of your mistakes are`} now a practice problem. Press Practice to try ${added.length === 1 ? "it" : "them"}.`);
+      }
+    } catch (err) {
+      this.log(`saving practice problems from ${gameId} failed: ${(err as Error).message}`);
+    }
   }
 
   private buildSummary(): GameSummary {
@@ -907,36 +1173,83 @@ export class GameController {
       .filter((r) => r.eval!.pointLoss >= this.profile.mistakeThreshold)
       .sort((a, b) => b.eval!.pointLoss - a.eval!.pointLoss)
       .map((r) => {
-        const category = this.tags[r.number]?.category;
+        const tagged = this.tags[r.number]?.category;
+        // A mistake evaluated before this boot (or below the threshold back then) is classified now.
+        const category = tagged ?? (this.heuristics[r.number] ??= this.classifyOrOther(r));
         return {
           moveNumber: r.number,
           move: moveGtp(r.move, settings.size),
           pointLoss: round1(r.eval!.pointLoss),
           bestMove: r.eval!.bestMove,
-          ...(category && { category }),
+          category,
+          categorySource: tagged ? ("tutor" as const) : ("heuristic" as const),
         };
       });
     const total = human.reduce((sum, r) => sum + r.eval!.pointLoss, 0);
     return { moves: game.moves.length, mistakes, totalPointLoss: round1(total) };
   }
 
-  /** Minimal for now: count the game and record the rating; adaptation arrives with profile.ts. */
-  private updateProfileAfterGame(result: GameResult): void {
+  /**
+   * A heuristic category for a human move (src/server/profile.ts). The analyses around the move
+   * give KataGo's ownership, for spotting groups that live or die; without them that check is skipped.
+   */
+  private classify(record: MoveRecord, before?: Analysis, after?: Analysis): MistakeCategory {
+    const settings = this.settings!;
+    const replay = this.gameBefore(record.number);
+    const boardBefore = replay.board;
+    replay.play(record.move);
+    return classifyMistake({
+      size: settings.size,
+      moveNumber: record.number,
+      move: record.move,
+      captures: record.captures.length,
+      pointLoss: record.eval?.pointLoss ?? 0,
+      threshold: this.profile.mistakeThreshold,
+      bestMove: record.eval?.bestMove ?? "pass",
+      reply: after?.moveInfos[0]?.move,
+      boardBefore,
+      boardAfter: replay.board,
+      ...(before?.ownership && { ownershipBefore: before.ownership }),
+      ...(after?.ownership && { ownershipAfter: after.ownership }),
+    });
+  }
+
+  /** `classify`, or "other" (logged) when it fails, so a bad replay can't stop the game from ending. */
+  private classifyOrOther(record: MoveRecord, before?: Analysis, after?: Analysis): MistakeCategory {
+    try {
+      return this.classify(record, before, after);
+    } catch (err) {
+      this.log(`classifying move ${record.number} failed: ${(err as Error).message}`);
+      return "other";
+    }
+  }
+
+  /** Rating, next bot, heuristic mistake tallies and the threshold, from the finished game. */
+  private updateProfileAfterGame(result: GameResult, summary: GameSummary): GameSummary["rating"] {
     const settings = this.settings!;
     const profile = this.store.loadProfile();
-    profile.gamesPlayed++;
-    profile.ratingHistory.push({
-      ts: this.clock.now(),
+    const update = applyGame(profile, {
       gameId: this.gameId!,
-      rating: profile.rating,
-      botRank: settings.botRank,
-      won: result.winner === settings.humanColor,
+      ts: this.clock.now(),
+      settings,
+      result,
+      moves: this.game!.moves,
+      summary,
+      threshold: this.profile.mistakeThreshold,
     });
     this.store.saveProfile(profile);
     this.profile = profile;
+    if (update.threshold) {
+      const { from, to } = update.threshold;
+      this.log(`mistake threshold ${from} -> ${to} (${update.threshold.reason})`);
+    }
+    return update.rating;
   }
 
-  /** Tag a mistake with a category (current or saved game). Updates the summary and the profile tallies. */
+  /**
+   * Tag a mistake with a category (current or saved game). The tutor's tag replaces the heuristic
+   * category in the summary and in the profile tallies.
+   */
   private tag(gameId: string, moveNumber: number, category: MistakeCategory, note?: string): void {
     const saved = gameId === this.gameId ? null : this.store.loadGame(gameId);
     if (gameId !== this.gameId && !saved) throw new UserError(`No saved game "${gameId}".`);
@@ -948,28 +1261,340 @@ export class GameController {
       throw new UserError(`Move ${moveNumber} was the bot's. Tag the learner's moves (${humanColor === "B" ? "Black" : "White"}).`);
     }
     const tags = saved ? (saved.tags ??= {}) : this.tags;
-    const previous = tags[moveNumber];
+    const summary = saved ? saved.summary : this.summary;
+    const entry = summary?.mistakes.find((m) => m.moveNumber === moveNumber);
+    // What the move counts as so far: an earlier tag, or the heuristic category counted at game end.
+    const previous = tags[moveNumber]?.category ?? (entry?.categorySource === "heuristic" ? entry.category : undefined);
     tags[moveNumber] = { category, ...(note && { note }) };
 
     const profile = this.store.loadProfile();
-    if (previous) profile.mistakeCounts[previous.category] = Math.max(0, profile.mistakeCounts[previous.category] - 1);
-    profile.mistakeCounts[category]++;
-    profile.recentMistakes = [
-      { ts: this.clock.now(), gameId, moveNumber, category, pointLoss: round1(record.eval?.pointLoss ?? 0), ...(note && { note }) },
-      ...profile.recentMistakes.filter((m) => m.gameId !== gameId || m.moveNumber !== moveNumber),
-    ].slice(0, 50);
+    const pointLoss = round1(record.eval?.pointLoss ?? 0);
+    applyTag(profile, { ts: this.clock.now(), gameId, moveNumber, category, pointLoss, ...(note && { note }) }, previous);
     this.store.saveProfile(profile);
     this.profile = profile;
 
+    if (entry) {
+      entry.category = category;
+      entry.categorySource = "tutor";
+    }
+    this.retagProblem(gameId, moveNumber, category);
     if (saved) {
-      const entry = saved.summary?.mistakes.find((m) => m.moveNumber === moveNumber);
-      if (entry) entry.category = category;
       this.store.saveGame({ ...saved, updatedAt: this.clock.now() }, this.sgfFor(saved.settings, saved.moves, saved.result, tags));
     } else {
-      if (this.summary) this.summary = this.buildSummary();
       this.save();
     }
     this.changed();
+  }
+
+  /** A tag changes what a mistake was about; the practice problem made from it follows. */
+  private retagProblem(gameId: string, moveNumber: number, category: MistakeCategory): void {
+    // The problem may be on the board right now: its result and attempts count for the new category.
+    const onBoard = this.practice?.problem;
+    if (onBoard?.source?.gameId === gameId && onBoard.source.moveNumber === moveNumber && onBoard.category !== category) {
+      onBoard.category = category;
+      onBoard.prompt = promptFor(category, onBoard.toPlay);
+    }
+    try {
+      const problems = this.store.loadProblems();
+      const problem = problems.find((p) => p.source?.gameId === gameId && p.source.moveNumber === moveNumber);
+      if (!problem || problem.category === category) return;
+      problem.category = category;
+      problem.prompt = promptFor(category, problem.toPlay);
+      this.store.saveProblems(problems);
+    } catch (err) {
+      this.log(`updating the problem from ${gameId} move ${moveNumber} failed: ${(err as Error).message}`);
+    }
+  }
+
+  // --- practice problems -------------------------------------------------------------
+
+  /**
+   * Enter problem mode with problem `id`, or the next one due: the recommended focus category
+   * first, then the learner's own problems, then the built-ins (src/server/problems.ts).
+   */
+  private startProblem(id?: string): void {
+    const problems = this.store.loadProblems();
+    let problem: StoredProblem | undefined;
+    let early = false;
+    if (id) {
+      problem = problems.find((p) => p.id === id);
+      if (!problem) throw new UserError(`No practice problem "${id}". List them with: tutor problems`);
+    } else {
+      const next = pickNextProblem(problems, {
+        now: this.clock.now(),
+        focus: recommendFocus(this.profile).category,
+        exclude: this.practice?.problem.id ?? this.lastProblemId,
+      });
+      if (!next) throw new UserError("There are no practice problems yet.");
+      ({ problem, early } = next);
+    }
+    let game: GoGame;
+    try {
+      game = problemGame(problem);
+    } catch (err) {
+      throw new UserError(`Problem ${problem.id} can't be set up: ${(err as Error).message}`);
+    }
+    // Leaving the problem on the board after a wrong attempt reschedules it; the same problem again
+    // then starts from its new box.
+    const previous = this.practice?.problem.id;
+    if (this.closePractice() && problem.id === previous) {
+      problem = this.store.loadProblems().find((p) => p.id === problem!.id) ?? problem;
+    }
+    this.practice = { problem, game, box: problem.box, attempts: 0, solved: false, revealed: false, checking: false, overlay: null, analyses: new Map() };
+    this.lastProblemId = problem.id;
+    const from = problem.source ? ` from your game ${problem.source.gameId} (move ${problem.source.moveNumber})` : "";
+    this.system(`Practice problem${from}: ${problem.prompt}${early ? " (Nothing is due right now, so this is an early review.)" : ""}`);
+    this.emit({
+      type: "problem_start",
+      problemId: problem.id,
+      kind: problem.kind,
+      category: problem.category,
+      toPlay: problem.toPlay,
+      prompt: problem.prompt,
+      answers: [...problem.answers],
+      box: problem.box,
+      ...(problem.source && { source: { gameId: problem.source.gameId, moveNumber: problem.source.moveNumber } }),
+      board: toAscii(game.board, null),
+    });
+    // KataGo reads the position while the learner does.
+    if (this.engineState === "ready") this.problemAnalysis(this.practice, []).catch(() => {});
+    this.changed();
+  }
+
+  /** Back to playing: the game (paused, finished or mid-turn) as it was, or the idle board. */
+  private leaveProblem(): void {
+    if (!this.practice) return;
+    this.closePractice();
+    const deferred = this.deferredMoment;
+    this.deferredMoment = null;
+    if (deferred && this.isCurrent(this.gen, deferred) && !this.result) {
+      this.startMoment(deferred);
+    } else if (this.fallbackDeferred && this.moment?.state === "waiting") {
+      this.applyFallback();
+    } else {
+      this.fallbackDeferred = false;
+      this.resumeTurn();
+    }
+    this.changed();
+  }
+
+  /**
+   * End problem mode. A problem left unfinished after a wrong attempt counts as failed (box 1);
+   * one left before any judged attempt keeps its schedule. Returns whether a failure was recorded.
+   */
+  private closePractice(): boolean {
+    const practice = this.practice;
+    this.practice = null;
+    // Unrevealed means unsolved, so any judged attempt was wrong.
+    if (!practice || practice.revealed || !practice.lastAttempt) return false;
+    this.finishProblem(practice);
+    return true;
+  }
+
+  private problemPlay(point: Point): void {
+    const practice = this.practice!;
+    if (practice.revealed) throw new UserError("This problem is over. Press Next problem, or Back to playing.");
+    if (practice.checking) throw new UserError("KataGo is still checking your last move.");
+    if (this.engineState !== "ready") throw new UserError(this.engineNotReadyText());
+    const reason = practice.game.illegalReason(point);
+    if (reason) throw new UserError(ILLEGAL_TEXT[reason]);
+    practice.attempts++;
+    practice.checking = true;
+    practice.overlay = null;
+    this.changed();
+    void this.checkAttempt(practice, toGtp(point, practice.problem.size), point);
+  }
+
+  /**
+   * Judge an attempt: a known answer is correct; any other move is correct when KataGo finds it
+   * within ANSWER_MARGIN of its best (and becomes an answer). A wrong move with attempts left gets
+   * a ✕ and another try; otherwise the problem ends with KataGo's line on the board.
+   */
+  private async checkAttempt(practice: Practice, move: Gtp, point: Point): Promise<void> {
+    let before: Analysis | null = null;
+    let after: Analysis | null = null;
+    let failure: Error | null = null;
+    this.busy++;
+    try {
+      [before, after] = await Promise.all([this.problemAnalysis(practice, []), this.problemAnalysis(practice, [move])]);
+    } catch (err) {
+      failure = err as Error;
+    } finally {
+      this.busy--;
+    }
+    if (this.practice !== practice) {
+      this.changed();
+      return;
+    }
+    practice.checking = false;
+    const problem = practice.problem;
+    const known = problem.answers.includes(move);
+    if (!known && (!before || !after)) {
+      practice.attempts--; // KataGo's failure doesn't cost the learner an attempt
+      this.system(`KataGo couldn't check ${move} (${failure?.message ?? "no answer"}). Try the move again.`);
+      this.changed();
+      return;
+    }
+    // The margin is checked on the raw loss; it is rounded only for display.
+    const rawLoss = before && after ? moveEvalFrom(before, after, move).pointLoss : null;
+    const loss = rawLoss === null ? null : round1(rawLoss);
+    const correct = known || (rawLoss !== null && rawLoss <= ANSWER_MARGIN);
+    // A known answer KataGo now rates lower stays correct; its loss would only confuse.
+    const pointLoss = correct && rawLoss !== null && rawLoss > ANSWER_MARGIN ? null : loss;
+    // The attempt is judged either way, but it becomes an answer for good only when KataGo searched
+    // it well in the problem position: otherwise its loss compares two separate searches, which
+    // disagree by a point or more run to run.
+    if (correct && !known && before && searchedWell(before, move)) problem.answers = [...problem.answers, move];
+    const best = before?.moveInfos[0];
+    const bestMove = best && best.move !== "pass" ? best.move : (problem.bestMove ?? problem.answers[0] ?? move);
+    const bestPv = best && best.move !== "pass" ? best.pv : (problem.bestPv ?? [bestMove]);
+    practice.lastAttempt = { move, correct, pointLoss };
+    const left = MAX_ATTEMPTS - practice.attempts;
+
+    if (correct) {
+      practice.solved = true;
+      practice.revealed = true;
+      practice.answer = { move: bestMove, pv: bestPv };
+      // The answer, the opponent's best reply and the next move.
+      const line = this.problemStones(practice, [move, ...(after?.moveInfos[0]?.pv ?? [])].slice(0, ANSWER_LINE_LENGTH));
+      // Even a line of one stone is drawn: the board is the fixed problem position, so without it
+      // the learner's stone would vanish (KataGo's reply on a settled board is usually a pass).
+      practice.overlay = line.length ? { variation: { label: line.length > 1 ? `${move} and how play goes on` : move, moves: line } } : null;
+      const also = bestMove !== move ? ` KataGo's favorite is ${bestMove}, and yours is about as good.` : "";
+      const shown = line.length > 1 ? " The board shows the opponent's best reply." : "";
+      this.system(`Correct${practice.attempts === 1 ? ", first try" : ""}: ${move}.${also}${shown}`);
+    } else if (left > 0) {
+      practice.overlay = { marks: [{ point, kind: "x" }] };
+      this.system(`${move} isn't it: it loses about ${loss} points. Try again (${plural(left, "attempt")} left).`);
+    } else {
+      practice.revealed = true;
+      practice.answer = { move: bestMove, pv: bestPv };
+      const line = this.problemStones(practice, bestPv.slice(0, FALLBACK_PV_LENGTH));
+      const covered = line.some((s) => s.point.x === point.x && s.point.y === point.y);
+      practice.overlay = {
+        ...(line.length && { variation: { label: `KataGo's answer: ${bestMove}`, moves: line } }),
+        ...(!covered && { marks: [{ point, kind: "x" as const }] }),
+      };
+      this.system(`${move} loses about ${loss} points. The answer is ${bestMove}; the board shows KataGo's line (your move is marked ✕).`);
+    }
+    this.emit({
+      type: "problem_attempt",
+      problemId: problem.id,
+      move,
+      correct,
+      category: problem.category,
+      attempt: practice.attempts,
+      firstTry: correct && practice.attempts === 1,
+      pointLoss,
+      revealed: practice.revealed,
+      bestMove,
+      bestPv: bestPv.slice(0, 8),
+    });
+    if (practice.revealed) this.finishProblem(practice);
+    this.changed();
+  }
+
+  /** The problem is over: schedule it (Leitner box), keep any new answer, and update the profile. */
+  private finishProblem(practice: Practice): void {
+    const { problem } = practice;
+    try {
+      const problems = this.store.loadProblems();
+      const stored = problems.find((p) => p.id === problem.id);
+      if (stored) {
+        stored.answers = [...new Set([...stored.answers, ...problem.answers])];
+        schedule(stored, resultOf(practice.solved, practice.attempts), this.clock.now());
+        this.store.saveProblems(problems);
+      }
+    } catch (err) {
+      this.log(`saving problem ${problem.id} failed: ${(err as Error).message}`);
+    }
+    try {
+      const profile = this.store.loadProfile();
+      applyProblemResult(profile, problem.category, practice.solved);
+      this.store.saveProfile(profile);
+      this.profile = profile;
+    } catch (err) {
+      this.log(`updating the profile after problem ${problem.id} failed: ${(err as Error).message}`);
+    }
+  }
+
+  /** Cached analysis of the problem position after `moves` (the learner moving first). */
+  private problemAnalysis(practice: Practice, moves: Gtp[]): Promise<Analysis> {
+    const key = moves.join(" ");
+    let pending = practice.analyses.get(key);
+    if (!pending) {
+      pending = this.engine.analyze(problemPosition(practice.problem, moves), { maxVisits: this.problemVisits });
+      practice.analyses.set(key, pending);
+      pending.catch(() => practice.analyses.delete(key));
+    }
+    return pending;
+  }
+
+  /** Ghost stones for a line from the problem position, stopping at a pass or an illegal move. */
+  private problemStones(practice: Practice, line: Gtp[]): { color: Color; point: Point }[] {
+    const replay = problemGame(practice.problem);
+    const stones: { color: Color; point: Point }[] = [];
+    for (const gtp of line) {
+      const point = tryFromGtp(gtp, replay.size);
+      const color = replay.toPlay;
+      if (!point || !replay.play({ color, point }).ok) break;
+      stones.push({ color, point });
+    }
+    return stones;
+  }
+
+  /** A tutor's `show` in problem mode: always from the problem position, the learner's color first by default. */
+  private problemVariation(practice: Practice, moves: Gtp[], start: Color | undefined, label: string | undefined): NonNullable<Overlay["variation"]> {
+    if (moves.length === 0) throw new UserError("show needs at least one move.");
+    let color = start ?? practice.problem.toPlay;
+    const stones: { color: Color; point: Point }[] = [];
+    for (const gtp of moves) {
+      const point = this.parsePoint(gtp, practice.problem.size, true);
+      if (point) stones.push({ color, point });
+      color = other(color);
+    }
+    return { moves: stones, ...(label && { label }) };
+  }
+
+  private problemView(p: Practice): GameView {
+    const { problem } = p;
+    return {
+      gameId: null,
+      mode: "problem",
+      settings: {
+        size: problem.size as GameSettings["size"],
+        komi: problem.komi,
+        humanColor: problem.toPlay,
+        botRank: this.settings?.botRank ?? this.profile.botRank,
+        handicap: 0,
+      },
+      status: p.revealed ? "finished" : "playing",
+      board: p.game.board,
+      toPlay: problem.toPlay,
+      moves: [],
+      captures: { B: 0, W: 0 },
+      result: null,
+      moment: null,
+      overlay: p.overlay,
+      chat: this.chat.slice(-VIEW_CHAT_LIMIT),
+      tutorAttached: this.tutorAttached,
+      engineBusy: this.engineState !== "ready" || this.busy > 0 || p.checking,
+      problem: {
+        id: problem.id,
+        prompt: problem.prompt,
+        ...(problem.source && { source: { gameId: problem.source.gameId, moveNumber: problem.source.moveNumber } }),
+        attempts: p.attempts,
+        solved: p.solved,
+        kind: problem.kind,
+        category: problem.category,
+        toPlay: problem.toPlay,
+        maxAttempts: MAX_ATTEMPTS,
+        revealed: p.revealed,
+        box: p.box,
+        ...(p.lastAttempt && { lastAttempt: { ...p.lastAttempt } }),
+        ...(p.answer && { answer: { move: p.answer.move, pv: [...p.answer.pv] } }),
+      },
+    };
   }
 
   // --- persistence -----------------------------------------------------------------
@@ -1005,6 +1630,7 @@ export class GameController {
       summary: this.summary,
       chat: this.chat.filter((m) => m.ts >= this.createdAt),
       tags: this.tags,
+      heuristics: this.heuristics,
       moment: this.moment,
     };
     try {
@@ -1041,18 +1667,26 @@ export class GameController {
     };
   }
 
-  /** Cached analysis of the position after `moves` (ownership queries are cached separately). */
-  private analysisOf(moves: Move[], extra: AnalyzeOptions = {}): Promise<Analysis> {
+  /**
+   * Cached analysis of the position after `moves`. Only scoring and classifying a mistake need
+   * KataGo's ownership, so only they ask for it; an entry without ownership doesn't satisfy them,
+   * and the analysis with ownership then replaces it (it serves every other purpose too).
+   */
+  private analysisOf(moves: Move[], ownership = false): Promise<Analysis> {
     const pos = this.position(moves);
-    const key = `${extra.includeOwnership ? "own:" : ""}${pos.moves.map((m) => m[1]).join(" ")}`;
-    let pending = this.analyses.get(key);
-    if (!pending) {
-      const opts: AnalyzeOptions = { ...extra, ...(this.analysisVisits !== undefined && { maxVisits: this.analysisVisits }) };
-      pending = this.engine.analyze(pos, opts);
-      this.analyses.set(key, pending);
-      pending.catch(() => this.analyses.delete(key));
-    }
-    return pending;
+    const key = pos.moves.map((m) => m[1]).join(" ");
+    const cached = this.analyses.get(key);
+    if (cached && (cached.ownership || !ownership)) return cached.pending;
+    const opts: AnalyzeOptions = {
+      ...(ownership && { includeOwnership: true }),
+      ...(this.analysisVisits !== undefined && { maxVisits: this.analysisVisits }),
+    };
+    const entry = { pending: this.engine.analyze(pos, opts), ownership };
+    this.analyses.set(key, entry);
+    entry.pending.catch(() => {
+      if (this.analyses.get(key) === entry) this.analyses.delete(key);
+    });
+    return entry.pending;
   }
 
   /** Analyze the current position in the background, so the next human move's "before" is ready. */

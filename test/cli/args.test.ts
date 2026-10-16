@@ -22,6 +22,8 @@ describe("parseInvocation", () => {
     expect(parseInvocation(["state", "--json"])).toEqual({ kind: "state", json: true });
     expect(parseInvocation(["review"])).toEqual({ kind: "review", gameId: "last", json: false });
     expect(parseInvocation(["review", "g12"])).toEqual({ kind: "review", gameId: "g12", json: false });
+    expect(parseInvocation(["problems", "--json"])).toEqual({ kind: "problems", json: true });
+    expect(() => parseInvocation(["problems", "p4"])).toThrow(/takes no arguments/);
   });
 
   it("joins say/rethink text and takes --moment", () => {

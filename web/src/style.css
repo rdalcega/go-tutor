@@ -227,6 +227,17 @@ select, input[type="text"] {
 .moment-head { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; }
 .countdown { font-variant-numeric: tabular-nums; color: var(--muted); font-size: 0.85rem; }
 
+/* --- practice problems ----------------------------------------------- */
+
+.problem {
+  border-color: color-mix(in srgb, var(--accent) 50%, var(--border));
+  background: color-mix(in srgb, var(--accent) 7%, var(--surface));
+}
+.problem .attempts { color: var(--muted); font-size: 0.85rem; white-space: nowrap; }
+.problem-result { margin: 0; padding: 6px 8px; border-radius: 6px; border-left: 3px solid var(--border); }
+.problem-result.good { border-left-color: var(--good); background: color-mix(in srgb, var(--good) 10%, transparent); }
+.problem-result.bad { border-left-color: var(--bad); background: color-mix(in srgb, var(--bad) 9%, transparent); }
+
 /* --- eval strip ------------------------------------------------------ */
 
 .eval-head { display: flex; justify-content: space-between; align-items: baseline; }
@@ -242,6 +253,15 @@ select, input[type="text"] {
 .spark .good { fill: var(--good); }
 .spark .inaccuracy { fill: var(--warn); }
 .spark .mistake { fill: var(--bad); }
+
+/* --- progress -------------------------------------------------------- */
+
+.progress .rank { font-weight: 700; font-size: 1.15rem; font-variant-numeric: tabular-nums; }
+.progress .facts dd { font-size: 0.9rem; }
+.rating-spark { height: 32px; }
+.rating-spark .line { stroke: var(--accent); }
+.rating-spark .dot-won { fill: var(--good); }
+.rating-spark .dot-lost { fill: var(--bad); }
 
 /* --- chat ------------------------------------------------------------ */
 
@@ -298,6 +318,9 @@ select, input[type="text"] {
 .result::backdrop { background: rgba(10, 10, 10, 0.35); }
 .result h2 { margin-bottom: 6px; }
 .result ul { padding-left: 1.1rem; color: var(--muted); font-size: 0.9rem; }
+.result-rating { margin-top: 8px; font-size: 0.9rem; font-variant-numeric: tabular-nums; }
+.result-rating .up { color: var(--good); font-weight: 600; }
+.result-rating .down { color: var(--bad); font-weight: 600; }
 .result ul:empty { display: none; }
 .result .row { margin-top: 16px; justify-content: flex-end; }
 

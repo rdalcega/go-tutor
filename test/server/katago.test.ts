@@ -8,6 +8,7 @@ import {
   KATAGO_RULES,
   KataGo,
   chooseBotMove,
+  TRUSTED_CANDIDATE_VISITS,
   moveEvalFrom,
   policyIndexToGtp,
   sideToMove,
@@ -113,6 +114,26 @@ describe("moveEvalFrom", () => {
     expect(ev.bestPv).toEqual(["E5", "D4"]);
     expect(ev.candidates).toHaveLength(5);
     expect(ev.candidates[1]).toEqual({ move: "D5", lead: 0.5, winrate: 0.59, visits: 49, pv: ["D5", "D4"] });
+  });
+
+  it("judges a well-searched played move against the best candidate of the same search, not two noisy roots", () => {
+    const before = analysis("B", 1.5, 0.6, ["E5", "D5", "C5"]);
+    for (const m of before.moveInfos) m.visits = 300;
+    const noisyAfter = analysis("W", 2, 0.5); // a separate search says the move lost 3.5
+    expect(moveEvalFrom(before, noisyAfter, "E5").pointLoss).toBe(0); // KataGo's own best loses nothing
+    const ev = moveEvalFrom(before, noisyAfter, "C5"); // two points below E5 in the same search
+    expect(ev.pointLoss).toBe(2);
+    expect(ev.leadAfter).toBe(-0.5);
+    expect(ev.winrateAfter).toBeCloseTo(0.58);
+    expect(moveEvalFrom(before, noisyAfter, "A1").pointLoss).toBe(3.5); // not searched: roots
+    expect(moveEvalFrom(before, noisyAfter).pointLoss).toBe(3.5);
+  });
+
+  it("falls back to the roots for a candidate KataGo barely searched", () => {
+    const before = analysis("B", 1.5, 0.6, ["E5", "D5"]);
+    before.moveInfos[0]!.visits = 300;
+    before.moveInfos[1]!.visits = TRUSTED_CANDIDATE_VISITS - 1;
+    expect(moveEvalFrom(before, analysis("W", 2, 0.5), "D5").pointLoss).toBe(3.5);
   });
 
   it("clamps gains to zero point loss", () => {

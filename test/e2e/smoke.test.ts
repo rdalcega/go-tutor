@@ -9,7 +9,7 @@ import { createInterface } from "node:readline";
 import { promisify } from "node:util";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { resolveKataGoPaths } from "../../src/server/katago.ts";
-import type { GameView } from "../../src/shared/types.ts";
+import type { GameView, ProblemsResponse } from "../../src/shared/types.ts";
 
 const ROOT = resolve(import.meta.dirname, "../..");
 const TSX = join(ROOT, "node_modules", ".bin", "tsx");
@@ -148,4 +148,35 @@ describe.skipIf(!hasKataGo())("end to end with real KataGo", () => {
     expect(saved.result).toEqual(v.result);
     expect(await tutor("summary")).toMatch(/games 1/);
   }, 420_000);
+
+  it("turns the game's mistake into a practice problem the tutor starts and KataGo judges", async () => {
+    const watch = lines(watcher!);
+    // Problems are made after the game ends, with a deeper analysis when the stored candidates are thin.
+    const end = Date.now() + 60_000;
+    let problems: ProblemsResponse;
+    for (;;) {
+      problems = (await (await fetch(`${base}/api/problems`)).json()) as ProblemsResponse;
+      if (problems.counts.fromGames > 0 || Date.now() > end) break;
+      await sleep(250);
+    }
+    const own = problems.problems.filter((p) => p.kind === "game");
+    expect(own.length).toBeGreaterThan(0);
+    const problem = own.find((p) => p.source?.moveNumber === 3) ?? own[0]!;
+    expect(problem.answers.length).toBeGreaterThan(0);
+    expect(await tutor("summary")).toMatch(/practice problems: \d+ \(\d+ from the learner's games/);
+    expect(await tutor("problems")).toContain(`${problem.id} ${problem.category} from `);
+
+    expect(await tutor("problem", problem.id)).toMatch(new RegExp(`^ok problem=${problem.id} mode=problem status=playing`));
+    await watch.waitFor(new RegExp(`^PROBLEM_START ${problem.id} `), 10_000);
+    const answer = problem.answers[0]!;
+    const cols = "ABCDEFGHJ";
+    expect((await act({ type: "play", point: { x: cols.indexOf(answer[0]!), y: 9 - Number(answer.slice(1)) } })).ok).toBe(true);
+    const solved = await until((s) => !!s.problem?.revealed, 60_000);
+    expect(solved.problem).toMatchObject({ solved: true, attempts: 1, lastAttempt: { move: answer, correct: true } });
+    await watch.waitFor(new RegExp(`^PROBLEM ${problem.id} attempt 1 ${answer} correct, first try`), 10_000);
+    const after = (await (await fetch(`${base}/api/problems`)).json()) as ProblemsResponse;
+    expect(after.problems.find((p) => p.id === problem.id)).toMatchObject({ box: 2, seen: 1, solves: 1, isDue: false });
+
+    expect((await act({ type: "leave_problem" })).view?.mode).toBe("game");
+  }, 180_000);
 });

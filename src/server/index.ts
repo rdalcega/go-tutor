@@ -8,7 +8,10 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { TutorBridge, parseClientAction, parseTutorCommand } from "./bridge.ts";
 import { GameController, UserError, type GameEngine } from "./game.ts";
 import { KataGo } from "./katago.ts";
+import { problemsResponse } from "./problems.ts";
+import { recommendFocus } from "./profile.ts";
 import { Store, isValidGameId } from "./store.ts";
+import type { ProblemsResponse, ProfileResponse } from "../shared/types.ts";
 
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 const MAX_BODY = 64 * 1024;
@@ -137,7 +140,15 @@ export function createApp({ controller, bridge, store, distDir = join(REPO_ROOT,
       await controller.handleTutor(parseTutorCommand(await readJson(req)));
       return sendJson(res, 200, { ok: true, view: controller.view() });
     }
-    if (path === "/api/profile" && method === "GET") return sendJson(res, 200, store.loadProfile());
+    if (path === "/api/profile" && method === "GET") {
+      const profile = store.loadProfile();
+      const body: ProfileResponse = { profile, focus: recommendFocus(profile) };
+      return sendJson(res, 200, body);
+    }
+    if (path === "/api/problems" && method === "GET") {
+      const body: ProblemsResponse = problemsResponse(store.loadProblems(), Date.now(), recommendFocus(store.loadProfile()));
+      return sendJson(res, 200, body);
+    }
     const gameMatch = /^\/api\/game\/([^/]+)$/.exec(path);
     if (gameMatch && method === "GET") {
       const id = decodeURIComponent(gameMatch[1]!);
@@ -198,6 +209,10 @@ function startEngine(engine: KataGo, controller: GameController): void {
 }
 
 async function main(): Promise<void> {
+  // A background task that fails unexpectedly is a bug to log, not a reason to stop the game.
+  process.on("unhandledRejection", (reason) => {
+    console.error("Unhandled rejection:", reason instanceof Error ? (reason.stack ?? reason.message) : reason);
+  });
   const port = Number(process.env.PORT ?? 4747);
   const timeout = Number(process.env.TUTOR_TIMEOUT_MS);
   const tutorTimeoutMs = Number.isFinite(timeout) && timeout >= 0 ? timeout : 30_000;

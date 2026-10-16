@@ -130,6 +130,28 @@ export interface ProblemView {
   source?: { gameId: string; moveNumber: number };
   attempts: number;
   solved: boolean;
+  /** "game" = built from the learner's own mistake; "builtin" = one of the classic starter problems. */
+  kind: "game" | "builtin";
+  category: MistakeCategory;
+  /** The learner's color in this problem (the side to move). */
+  toPlay: Color;
+  /** Attempts allowed before the answer is shown. */
+  maxAttempts: number;
+  /** True once the problem is over: solved, or out of attempts (the answer is then on the board). */
+  revealed: boolean;
+  /** Spaced-repetition box (1–5) the problem was in when it started. */
+  box: number;
+  /** The latest attempt as KataGo judged it. */
+  lastAttempt?: ProblemAttempt;
+  /** KataGo's best move and its line, once the problem is over. */
+  answer?: { move: Gtp; pv: Gtp[] };
+}
+
+export interface ProblemAttempt {
+  move: Gtp;
+  correct: boolean;
+  /** Points the move loses against KataGo's best, when KataGo checked it (null when it was a known answer and KataGo wasn't asked). */
+  pointLoss: number | null;
 }
 
 // ---------------------------------------------------------------------------
@@ -145,7 +167,8 @@ export type ClientAction =
   | { type: "retry" } // take back the last human move (and bot reply) and try again
   | { type: "chat"; text: string }
   | { type: "ask_tutor"; text?: string } // explicit "hint please" button
-  | { type: "next_problem" };
+  | { type: "next_problem" } // enter problem mode, or go on to the next problem
+  | { type: "leave_problem" }; // back to the game (or the idle board)
 
 // ---------------------------------------------------------------------------
 // Tutor → server (the `tutor` CLI posts these to POST /api/tutor)
@@ -187,19 +210,74 @@ export type TutorEvent =
       /** ASCII rendering AFTER the move. */
       boardAfter: string;
     }
-  | { seq: number; ts: number; type: "user_message"; text: string; momentId?: string; gameId: string | null }
+  /** `problemId` is set when the learner wrote while a practice problem was on the board (the message is about it). */
+  | { seq: number; ts: number; type: "user_message"; text: string; momentId?: string; gameId: string | null; problemId?: string }
   | { seq: number; ts: number; type: "hint_request"; text?: string; gameId: string; board: string; toPlay: Color }
   | { seq: number; ts: number; type: "fallback"; momentId: string }
   /** Moves were taken back (browser Try again, or the tutor's rethink). `moves` is how many remain. */
   | { seq: number; ts: number; type: "undo"; gameId: string; moves: number; toPlay: Color; by: "human" | "tutor" }
   | { seq: number; ts: number; type: "game_end"; gameId: string; result: GameResult; summary: GameSummary }
-  | { seq: number; ts: number; type: "problem_attempt"; problemId: string; move: Gtp; correct: boolean };
+  /** A practice problem is on the board. `answers` are the accepted moves (for the tutor; the learner doesn't see them). */
+  | {
+      seq: number;
+      ts: number;
+      type: "problem_start";
+      problemId: string;
+      kind: "game" | "builtin";
+      category: MistakeCategory;
+      toPlay: Color;
+      prompt: string;
+      answers: Gtp[];
+      box: number;
+      source?: { gameId: string; moveNumber: number };
+      /** ASCII rendering of the problem position. */
+      board: string;
+    }
+  | {
+      seq: number;
+      ts: number;
+      type: "problem_attempt";
+      problemId: string;
+      move: Gtp;
+      correct: boolean;
+      category: MistakeCategory;
+      /** 1-based attempt number within this showing of the problem. */
+      attempt: number;
+      /** Solved on the first attempt. */
+      firstTry: boolean;
+      pointLoss: number | null;
+      /** The problem is over (solved or out of attempts) and KataGo's answer is on the board. */
+      revealed: boolean;
+      bestMove: Gtp;
+      bestPv: Gtp[];
+    };
 
 export interface GameSummary {
   moves: number;
   /** Human moves with pointLoss >= the mistake threshold, worst first. */
-  mistakes: { moveNumber: number; move: Gtp; pointLoss: number; bestMove: Gtp; category?: MistakeCategory }[];
+  mistakes: {
+    moveNumber: number;
+    move: Gtp;
+    pointLoss: number;
+    bestMove: Gtp;
+    category?: MistakeCategory;
+    /** Who chose the category: the tutor's `tag` (always wins) or the server's heuristic at game end. */
+    categorySource?: "tutor" | "heuristic";
+  }[];
   totalPointLoss: number;
+  /** How the game moved the learner's rating. Present once the game finished (not abandoned). */
+  rating?: RatingChange;
+}
+
+/** The effect of one finished game on the profile's rating and on the next game's bot. */
+export interface RatingChange {
+  before: number;
+  after: number;
+  /** False when the game was too short to count (under 10 human moves). */
+  rated: boolean;
+  /** Bot rank and handicap stones (for the learner) that the next game defaults to. */
+  nextBotRank: string;
+  nextHandicap: number;
 }
 
 // ---------------------------------------------------------------------------
@@ -221,15 +299,88 @@ export interface Profile {
   botRank: string;
   /** Estimated human rank on the RANK_SCALE below (fractional; 10.5 ≈ 19-20k). */
   rating: number;
-  ratingHistory: { ts: number; gameId: string; rating: number; botRank: string; won: boolean }[];
-  /** Mistake threshold in points for pausing a game (default 4). */
+  /**
+   * Handicap stones the learner takes (as Black, on 9×9) by default: 0, or 2–4 while the rating is
+   * below the weakest bot (20k), as a strength reducer for the bot.
+   */
+  handicap: number;
+  /** One entry per rated game, oldest first. `rating` is after the game, `delta` the change it made. */
+  ratingHistory: { ts: number; gameId: string; rating: number; botRank: string; won: boolean; handicap?: number; delta?: number }[];
+  /** Mistake threshold in points for pausing a game (default 4; adapts between 2 and 6). */
   mistakeThreshold: number;
-  /** Running tally of tagged mistakes by category. */
+  /** Changes of mistakeThreshold, oldest first. */
+  thresholdHistory: { ts: number; gameId: string; from: number; to: number; reason: string }[];
+  /** Running tally of mistakes by category (the tutor's tag, else the heuristic category). */
   mistakeCounts: Record<MistakeCategory, number>;
-  /** Most recent tagged mistakes, newest first, capped. */
+  /** Most recent categorized mistakes, newest first, capped at 50. */
   recentMistakes: { ts: number; gameId: string; moveNumber: number; category: MistakeCategory; pointLoss: number; note?: string }[];
+  /**
+   * Finished games, oldest first, capped at 20: evaluated human moves, average point loss per
+   * move, mistakes (point loss >= `threshold`, the threshold the game was played with).
+   */
+  recentGames: { ts: number; gameId: string; size: number; humanMoves: number; avgPointLoss: number; mistakes: number; threshold: number }[];
+  /** `gamesPlayed` when each category was last worked on (the tutor tagged it, or a practice problem). */
+  practiced: Partial<Record<MistakeCategory, number>>;
   gamesPlayed: number;
   problemsSolved: number;
+}
+
+/** What to teach next (`recommendFocus` in src/server/profile.ts). */
+export interface FocusRecommendation {
+  category: MistakeCategory;
+  reason: string;
+  suggestion: "problems" | "game";
+}
+
+/** GET /api/profile. */
+export interface ProfileResponse {
+  profile: Profile;
+  focus: FocusRecommendation;
+}
+
+// ---------------------------------------------------------------------------
+// Practice problems (data/problems.json, src/server/problems.ts)
+// ---------------------------------------------------------------------------
+
+/** One practice problem as GET /api/problems lists it. */
+export interface ProblemListItem {
+  id: string;
+  kind: "game" | "builtin";
+  category: MistakeCategory;
+  toPlay: Color;
+  prompt: string;
+  /** Accepted answers (KataGo's moves within 1 point of its best). */
+  answers: Gtp[];
+  /** Spaced-repetition (Leitner) box, 1–5: solving on the first try moves it up, failing sends it to 1. */
+  box: number;
+  /** When it is next due (ms epoch), and whether that is now. */
+  due: number;
+  isDue: boolean;
+  /** Times it was shown to a result, and times solved. */
+  seen: number;
+  solves: number;
+  lastResult?: "first_try" | "solved" | "failed";
+  /** The learner's game and move it came from (kind "game"), and the points that move lost. */
+  source?: { gameId: string; moveNumber: number };
+  difficulty?: number;
+}
+
+/** GET /api/problems. */
+export interface ProblemsResponse {
+  /** Due first (in the order next_problem would pick them), then the rest by due time. */
+  problems: ProblemListItem[];
+  counts: {
+    total: number;
+    due: number;
+    fromGames: number;
+    builtin: number;
+    /** Problems per box; index 0 is box 1. */
+    byBox: number[];
+    /** Due problems per category. */
+    dueByCategory: Partial<Record<MistakeCategory, number>>;
+  };
+  /** The profile's recommended focus, which next_problem prefers. */
+  focus: FocusRecommendation;
 }
 
 /**

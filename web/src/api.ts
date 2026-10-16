@@ -1,6 +1,6 @@
 // Talking to the server: state fetch, actions, and the SSE stream of GameViews.
 
-import type { ClientAction, GameView } from "../../src/shared/types.ts";
+import type { ClientAction, GameView, ProfileResponse } from "../../src/shared/types.ts";
 import { backoffDelay } from "./geometry.ts";
 
 export interface ActionResponse {
@@ -16,9 +16,22 @@ export interface Transport {
   send(action: ClientAction): Promise<ActionResponse>;
   /** Streams views until the returned function is called. */
   subscribe(onView: (v: GameView) => void, onConnection: (s: ConnectionState) => void): () => void;
+  /** The learner profile and recommended focus; null when the server can't provide it. */
+  getProfile(): Promise<ProfileResponse | null>;
 }
 
 export const httpTransport: Transport = {
+  async getProfile() {
+    try {
+      const res = await fetch("/api/profile");
+      if (!res.ok) return null;
+      const body = (await res.json()) as Partial<ProfileResponse>;
+      return body.profile ? (body as ProfileResponse) : null;
+    } catch {
+      return null;
+    }
+  },
+
   async getState() {
     const res = await fetch("/api/state");
     if (!res.ok) throw new Error(`GET /api/state failed: ${res.status}`);

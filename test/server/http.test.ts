@@ -5,10 +5,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { TutorBridge, parseClientAction, parseTutorCommand, type StreamHello } from "../../src/server/bridge.ts";
+import { BUILTIN_PROBLEMS } from "../../src/server/builtin-problems.ts";
 import { GameController } from "../../src/server/game.ts";
 import { crashLimiter, createApp, isAllowedOrigin } from "../../src/server/index.ts";
 import { Store, defaultProfile } from "../../src/server/store.ts";
-import type { GameView, TutorEvent } from "../../src/shared/types.ts";
+import type { GameView, ProblemsResponse, ProfileResponse, TutorEvent } from "../../src/shared/types.ts";
 import { SseParser } from "../../src/cli/sse.ts";
 import { FakeEngine, flush, tempStore } from "./fakes.ts";
 
@@ -20,6 +21,8 @@ describe("request validation", () => {
       settings: { size: 13, humanColor: "W" },
     });
     expect(parseTutorCommand({ type: "show", moves: ["C3", "pass"], start: "W" })).toEqual({ type: "show", moves: ["C3", "pass"], start: "W" });
+    expect(parseClientAction({ type: "leave_problem", extra: 1 })).toEqual({ type: "leave_problem" });
+    expect(parseTutorCommand({ type: "start_problem", problemId: "p3" })).toEqual({ type: "start_problem", problemId: "p3" });
     expect(parseTutorCommand({ type: "tag", gameId: "g", moveNumber: 3, category: "shape" })).toEqual({
       type: "tag",
       gameId: "g",
@@ -51,6 +54,17 @@ describe("Store", () => {
     expect(p.mistakeCounts.opening).toBe(0);
     writeFileSync(join(store.dir, "profile.json"), "{not json");
     expect(store.loadProfile()).toEqual(defaultProfile());
+  });
+
+  it("keeps practice problems with built-in progress, and sets a corrupt problems file aside", () => {
+    const store = tempStore();
+    const problems = store.loadProblems();
+    expect(problems.map((p) => p.id)).toEqual(BUILTIN_PROBLEMS.map((p) => p.id));
+    problems[0]!.box = 3;
+    store.saveProblems(problems);
+    expect(store.loadProblems()[0]!.box).toBe(3);
+    writeFileSync(join(store.dir, "problems.json"), "{not json");
+    expect(store.loadProblems()[0]!.box).toBe(1);
   });
 
   it("creates the data dir on demand and reads events since a seq", () => {
@@ -158,7 +172,11 @@ describe("HTTP server", () => {
     // The game in progress is saved after every change, so "last" finds it until one finishes.
     expect(((await (await fetch(`${base}/api/game/last`)).json()) as { id: string }).id).toBe(created.body.view?.gameId);
     expect((await fetch(`${base}/api/game/nope`)).status).toBe(404);
-    expect((await fetch(`${base}/api/profile`)).status).toBe(200);
+    const profileRes = await fetch(`${base}/api/profile`);
+    expect(profileRes.status).toBe(200);
+    const body = (await profileRes.json()) as ProfileResponse;
+    expect(body.profile.rating).toBe(10);
+    expect(body.focus).toMatchObject({ category: "life_and_death", suggestion: "game" });
     expect((await fetch(`${base}/`)).status).toBe(503); // no dist/
   });
 
@@ -267,6 +285,56 @@ describe("HTTP server", () => {
     const moment = tutor.frames.map((f) => JSON.parse(f) as TutorEvent).find((e) => e.type === "teaching_moment");
     expect(moment).toMatchObject({ moment: { state: "fallback" } });
     expect(moment?.type === "teaching_moment" && moment.moment.deadline).toBeUndefined();
+  });
+
+  it("replays a teaching moment waiting under a practice problem as still open", async () => {
+    const { base, post, controller } = await start();
+    const first = await stream(`${base}/api/tutor/events`);
+    await flush();
+    await post("/api/action", { type: "new_game" });
+    const engine = (controller as unknown as { engine: FakeEngine }).engine;
+    engine.lossAfter(["C7"], 8);
+    await post("/api/action", { type: "play", point: { x: 2, y: 2 } });
+    await flush();
+    expect(controller.view().moment?.state).toBe("waiting"); // the tutor is attached
+    await post("/api/action", { type: "next_problem" });
+    expect(controller.view().moment).toBeNull(); // the problem's view shows no moment
+
+    const late = await stream(`${base}/api/tutor/events`);
+    await flush();
+    const events = late.frames.map((f) => JSON.parse(f) as TutorEvent);
+    expect(events.map((e) => e.type)).toEqual(["teaching_moment", "problem_start"]);
+    expect(events[0]).toMatchObject({ moment: { state: "waiting" } });
+    const replay = (await stream(`${base}/api/tutor/events?since=0`)).frames;
+    await flush();
+    const moment = replay.map((f) => JSON.parse(f) as TutorEvent).find((e) => e.type === "teaching_moment");
+    expect(moment).toMatchObject({ moment: { state: "waiting" } });
+    first.abort.abort();
+  });
+
+  it("lists practice problems and plays one through the API", async () => {
+    const { base, post, controller } = await start();
+    const res = await fetch(`${base}/api/problems`);
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as ProblemsResponse;
+    expect(body.counts).toMatchObject({ total: BUILTIN_PROBLEMS.length, due: BUILTIN_PROBLEMS.length, fromGames: 0, builtin: BUILTIN_PROBLEMS.length });
+    expect(body.counts.byBox[0]).toBe(BUILTIN_PROBLEMS.length);
+    expect(body.focus.category).toBe("life_and_death");
+    // Due first, the focus category first among them.
+    expect(body.problems[0]).toMatchObject({ kind: "builtin", category: "life_and_death", box: 1, isDue: true });
+    // A cross-site page can't read it.
+    expect((await fetch(`${base}/api/problems`, { headers: { origin: "https://evil.example" } })).status).toBe(403);
+
+    const started = await post("/api/action", { type: "next_problem" });
+    expect(started.status).toBe(200);
+    expect(started.body.view).toMatchObject({ mode: "problem", problem: { id: body.problems[0]!.id } });
+    // A tutor that attaches now still hears which problem is on the board.
+    const tutor = await stream(`${base}/api/tutor/events`);
+    await flush();
+    expect(tutor.frames.map((f) => JSON.parse(f) as TutorEvent)).toEqual([expect.objectContaining({ type: "problem_start", problemId: body.problems[0]!.id })]);
+    const left = await post("/api/action", { type: "leave_problem" });
+    expect(left.body.view?.mode).toBe("idle");
+    expect(controller.view().problem).toBeNull();
   });
 
   it("rejects cross-site requests and POSTs that aren't JSON", async () => {

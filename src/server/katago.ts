@@ -92,6 +92,8 @@ export interface Engine {
   start(): Promise<void>;
   stop(): Promise<void>;
   readonly ready: boolean;
+  /** Queries KataGo runs at once; more wait in the queue. */
+  readonly concurrency: number;
   analyze(pos: Position, opts?: AnalyzeOptions): Promise<Analysis>;
   /** `rank` like "20k", "1d" or "rank_20k". */
   botMove(pos: Position, rank: string, opts?: BotMoveOptions): Promise<Gtp>;
@@ -190,20 +192,37 @@ export function chooseBotMove(
   return policyIndexToGtp(candidates.at(-1)!.index, size);
 }
 
-/** Combines analyses of the position before and after a move into a MoveEval (mover's perspective). */
-export function moveEvalFrom(before: Analysis, after: Analysis): MoveEval {
+/**
+ * A candidate with at least this many visits in the "before" search is judged against KataGo's best
+ * within that one search: two separate searches' root values differ by a point or more run to run.
+ */
+export const TRUSTED_CANDIDATE_VISITS = 50;
+
+/**
+ * Combines analyses of the position before and after a move into a MoveEval (mover's perspective).
+ * With `played`, a move KataGo searched well in the "before" position loses its candidate's
+ * shortfall against the best candidate of that same search (far less noisy than comparing two
+ * searches); any other move loses the root lead before minus the root lead after.
+ */
+export function moveEvalFrom(before: Analysis, after: Analysis, played?: Gtp): MoveEval {
   if (after.toPlay !== other(before.toPlay)) {
     throw new Error("moveEvalFrom: 'after' must be the position right after one move from 'before'");
   }
   const leadBefore = before.rootInfo.scoreLead;
-  const leadAfter = -after.rootInfo.scoreLead;
   const best = before.moveInfos[0];
+  const candidate = played && best ? before.moveInfos.find((m) => m.move === played && m.visits >= TRUSTED_CANDIDATE_VISITS) : undefined;
+  let leadAfter = -after.rootInfo.scoreLead;
+  let winrateAfter = 1 - after.rootInfo.winrate;
+  if (candidate && best) {
+    leadAfter = leadBefore - Math.max(0, best.scoreLead - candidate.scoreLead);
+    winrateAfter = Math.min(1, Math.max(0, before.rootInfo.winrate - Math.max(0, best.winrate - candidate.winrate)));
+  }
   return {
     leadBefore,
     leadAfter,
     pointLoss: Math.max(0, leadBefore - leadAfter),
     winrateBefore: before.rootInfo.winrate,
-    winrateAfter: 1 - after.rootInfo.winrate,
+    winrateAfter,
     bestMove: best?.move ?? "pass",
     bestPv: best?.pv ?? [],
     candidates: before.moveInfos.slice(0, 5).map((m) => ({
@@ -433,7 +452,7 @@ export class KataGo implements Engine {
     return this.opts.startTimeoutMs ?? 10 * 60_000;
   }
 
-  private get concurrency(): number {
+  get concurrency(): number {
     return Math.max(1, this.opts.concurrency ?? 2);
   }
 

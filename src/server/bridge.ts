@@ -149,19 +149,29 @@ export class TutorBridge {
    */
   private replayed(e: TutorEvent): TutorEvent {
     if (e.type !== "teaching_moment") return e;
-    const current = this.controller.view().moment;
+    // The game's moment, not the view's: a practice problem's view shows none while the game waits.
+    const current = this.controller.gameMoment();
     const moment = current?.id === e.moment.id ? current : { ...e.moment, state: "resolved" as const };
     if (moment.state !== "waiting") delete moment.deadline;
     return { ...e, moment };
   }
 
-  /** A fresh `watch` (no since) gets the open teaching moment, so a late tutor can still pick it up. */
+  /**
+   * A fresh `watch` (no since) gets the open teaching moment and the practice problem on the board
+   * (a moment can wait under a problem), so a late tutor can still pick them up.
+   */
   private currentMomentEvents(): TutorEvent[] {
     const view = this.controller.view();
-    const moment = view.moment;
-    if (!moment || moment.state === "resolved" || view.status === "finished") return [];
-    const event = [...this.ring].reverse().find((e) => e.type === "teaching_moment" && e.moment.id === moment.id);
-    return event ? [event] : [];
+    // The game's moment (null once the game is over), which stays open under a practice problem.
+    const moment = this.controller.gameMoment();
+    const open = moment && moment.state !== "resolved" ? moment.id : undefined;
+    const problemId = view.mode === "problem" ? view.problem?.id : undefined;
+    const newest = [...this.ring].reverse();
+    const events = [
+      open && newest.find((e) => e.type === "teaching_moment" && e.moment.id === open),
+      problemId && newest.find((e) => e.type === "problem_start" && e.problemId === problemId),
+    ];
+    return events.filter((e): e is TutorEvent => !!e).sort((a, b) => a.seq - b.seq);
   }
 
   private keepAlive(req: IncomingMessage, res: ServerResponse, onClose: () => void): void {
@@ -300,6 +310,7 @@ export function parseClientAction(body: unknown): ClientAction {
     case "continue":
     case "retry":
     case "next_problem":
+    case "leave_problem":
       return { type: o.type };
     case "chat":
       return { type: "chat", text: str(o, "text", true) };

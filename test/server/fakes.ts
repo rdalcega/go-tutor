@@ -57,10 +57,18 @@ export class FakeEngine implements GameEngine {
   /** KataGo's preferred move in every position, and its PV. */
   best: Gtp = "E5";
   pv: Gtp[] = ["E5", "D4", "D5"];
+  /** Best move and PV for particular positions (moves as GTP list), overriding `best` and `pv`. */
+  readonly lines = new Map<string, { best: Gtp; pv: Gtp[] }>();
+  /** More candidates after the best for particular positions (moves as GTP list), with their own lead and visits. */
+  readonly candidates = new Map<string, { move: Gtp; scoreLead: number; visits: number }[]>();
+  /** Queries KataGo would run at once (unset: the controller's default). */
+  concurrency?: number;
+  /** Analyses fail while true. */
+  failAnalyze = false;
   /** Bot moves to play, in order; when empty the bot picks the first empty point from the top-left. */
   botMoves: Gtp[] = [];
-  /** Ownership for includeOwnership queries (Black's view); default all zero. */
-  ownership: ((size: number) => number[]) | null = null;
+  /** Ownership for includeOwnership queries (Black's view), by board size and position (moves as GTP list); default all zero. */
+  ownership: ((size: number, moves: string) => number[]) | null = null;
   /** When true, replies wait for release(). */
   hold = false;
   readonly held: Held[] = [];
@@ -94,15 +102,20 @@ export class FakeEngine implements GameEngine {
   analyze(pos: Position, opts?: AnalyzeOptions): Promise<Analysis> {
     this.analyzeCalls.push({ pos, opts });
     return this.reply(() => {
+      if (this.failAnalyze) throw new Error("fake analysis failure");
       const key = pos.moves.map((m) => m[1]).join(" ");
       const lead = this.leads.get(key) ?? 0;
+      const line = this.lines.get(key) ?? { best: this.best, pv: this.pv };
       const analysis: Analysis = {
         id: `fake${this.analyzeCalls.length}`,
         toPlay: sideToMove(pos),
         rootInfo: { scoreLead: lead, winrate: 0.5, visits: 400 },
-        moveInfos: [{ move: this.best, scoreLead: lead, winrate: 0.5, visits: 300, order: 0, prior: 0.4, pv: this.pv }],
+        moveInfos: [
+          { move: line.best, scoreLead: lead, winrate: 0.5, visits: 300, order: 0, prior: 0.4, pv: line.pv },
+          ...(this.candidates.get(key) ?? []).map((c, i) => ({ ...c, winrate: 0.5, order: i + 1, prior: 0.1, pv: [c.move] })),
+        ],
       };
-      if (opts?.includeOwnership) analysis.ownership = this.ownership?.(pos.size) ?? new Array(pos.size * pos.size).fill(0);
+      if (opts?.includeOwnership) analysis.ownership = this.ownership?.(pos.size, key) ?? new Array(pos.size * pos.size).fill(0);
       return analysis;
     });
   }

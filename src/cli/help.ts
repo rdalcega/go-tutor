@@ -1,7 +1,7 @@
 // Help text. The reader is a Claude Code session acting as the Go teacher.
 
 export const USAGE = `usage: npm run -s tutor -- <command> [args] [--json]
-commands: watch, state, say, rethink, show, mark, clear, resume, claim, new-game, problem, tag, summary, review, help
+commands: watch, state, say, rethink, show, mark, clear, resume, claim, new-game, problem, problems, tag, summary, review, help
 run "npm run -s tutor -- help" for details and examples`;
 
 export const HELP = `Go Tutor CLI: you (Claude) are the teacher. The learner plays Go in a browser against KataGo;
@@ -12,14 +12,16 @@ Coordinates are GTP: column letters A-T without I, row 1 at the bottom (e.g. D4)
 Exit codes: 0 ok, 1 server error (message on stderr), 2 usage error. Add --json to any command for raw JSON.
 
 SESSION FLOW
-  1. summary                 learner's rank, weak categories, open problems: decide what to do
+  1. summary                 learner's rank, weak categories, recommended focus: decide what to do
   2. watch                   start under the Monitor tool; prints one line per event, forever
   3. on MOMENT:  claim <id> within the deadline, run state, then teach with say/show/mark/rethink,
                  and finish with resume (or let the learner press Continue). If you don't claim in time
                  a FALLBACK line appears: KataGo's answer is already shown; you can still add a say.
   4. on HINT:    run state, then say/show/mark. Don't give the answer outright unless asked.
   5. on USER:    answer with say (pass --moment <id> when the line names one).
-  6. on GAME_END: review <gameId>, tag the mistakes, discuss, maybe new-game.
+  6. on GAME_END: review last, discuss the top 1-2 mistakes, tag categories, maybe new-game.
+  7. on PROBLEM_START / PROBLEM: the learner is on a practice problem. Let them try; after a wrong
+                 first attempt ask what they see (say); after the answer is shown, explain it with show.
 
 COMMANDS
   watch [--since N]
@@ -35,8 +37,10 @@ COMMANDS
         USER "why was that bad?" (moment m3) game=g12
         FALLBACK m3 (tutor too slow; KataGo answer shown)
         UNDO game=g12 by human: back to move 13, B to play   (the position you were discussing is gone)
-        GAME_END g12 W+3.5 — 3 mistakes, worst move 14 (6.2), total loss 15 over 61 moves — run: review g12
-        PROBLEM p4 attempt C7 wrong
+        GAME_END g12 W+3.5 — 3 mistakes, worst move 14 (6.2), total loss 15 over 61 moves, rating 10 -> 10.8 — run: review g12
+        PROBLEM_START p4 life_and_death B to play (from g12 move 14, box 1) answers D5 — "Black to play. ..." — run: state; ...
+        PROBLEM p4 attempt 1 C7 wrong, lost 5.2 (life_and_death; another attempt left) — ask what they see, ...
+        PROBLEM p4 attempt 2 D5 correct (life_and_death) — best D5, pv D5 E4 C6 — say why it works
       Example: npm run -s tutor -- watch
 
   state
@@ -80,13 +84,26 @@ COMMANDS
       End the pause so play continues. Example: npm run -s tutor -- resume
 
   new-game [--size 9|13|19] [--rank 20k] [--color B|W] [--komi 7] [--handicap N]
-      Start a new game. Unset options use defaults (9x9, komi 7, human black, bot rank from profile).
+      Start a new game. Unset options use defaults (9x9, komi 7, human black, bot rank from the profile;
+      while the learner rates below 20k, a 9x9 game as Black also gets the profile's handicap stones
+      and komi 0.5 unless --rank or --handicap is given).
       Bot ranks run from 20k to 9d (KataGo's human-style profiles).
       Example: npm run -s tutor -- new-game --size 9 --rank 18k
 
   problem [id]
-      Start a practice problem (the next open one when no id is given).
+      Put a practice problem on the learner's board (problem mode; any game waits underneath). With
+      no id, the next due one: the recommended focus category first, then problems from the learner's
+      own mistakes, then the built-in classics. The learner gets 2 attempts; KataGo judges each move
+      (within 1 point of its best counts as correct) and shows its line when the problem is over.
+      In problem mode, show and mark draw on the problem position (show starts with the learner's
+      color); the learner presses Next problem or Back to playing, or you run new-game.
       Example: npm run -s tutor -- problem p4
+
+  problems
+      Every practice problem in the order "problem" picks them: id, category, source game and move
+      (or built-in), Leitner box (1-5; first-try solves move up, failures go back to 1), when it is
+      due, results so far, and the accepted answers.
+      Example: npm run -s tutor -- problems
 
   tag <gameId> <move#> <category> [note]
       Record why a mistake happened; feeds the learner profile. Categories: life_and_death,
@@ -94,11 +111,16 @@ COMMANDS
       Example: npm run -s tutor -- tag g12 14 direction "played toward thickness"
 
   summary
-      Learner profile: rank estimate, bot rank, mistake counts by category, recent mistakes, open problems.
+      Learner profile: rank estimate and rating trend, the bot's rank (and handicap stones while the
+      learner is below 20k), the mistake threshold, mistake counts by category with the last 3 games,
+      recent mistakes, the recommended focus with its reason, and practice problems (how many, how
+      many are due, by category, and the next few due).
       Example: npm run -s tutor -- summary
 
   review [gameId|last]
-      A saved game's moves with point loss, best moves for mistakes, and the mistake summary (default last).
+      Compact post-game review (default last): result and rating change, each mistake (move, played,
+      best, loss, category, KataGo's PV), the win-rate swings, the board before each of the 3 worst
+      mistakes, and the move list. Categories marked "heuristic" are the server's guess; tag to correct.
       Example: npm run -s tutor -- review last
 
   help

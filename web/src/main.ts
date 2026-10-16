@@ -1,18 +1,26 @@
 import "./style.css";
-import type { ChatMessage, ClientAction, Color, GameView, GameSettings } from "../../src/shared/types.ts";
+import type { ChatMessage, ClientAction, Color, GameView, GameSettings, ProfileResponse } from "../../src/shared/types.ts";
+import { ratingToRank } from "../../src/shared/rank.ts";
 import { type ConnectionState, type Transport, httpTransport } from "./api.ts";
 import { BoardView } from "./board.ts";
 import { tryFromGtp } from "../../src/shared/coords.ts";
 import {
+  attemptsLeftText,
   canRetry,
   formatLoss,
   humanMoves,
   lastHumanMove,
   lossLevel,
   moveLabel,
+  nextBotText,
   positionBefore,
+  problemHeading,
+  problemResult,
+  ratingChangeFor,
+  ratingSparkPoints,
   secondsLeft,
   sparklinePoints,
+  topCategories,
 } from "./geometry.ts";
 
 const RANKS = [
@@ -38,6 +46,7 @@ const el = {
   tutorText: $("tutor-text"),
   pass: $<HTMLButtonElement>("pass"),
   hint: $<HTMLButtonElement>("hint"),
+  practice: $<HTMLButtonElement>("practice"),
   resign: $<HTMLButtonElement>("resign"),
   newGame: $<HTMLFormElement>("new-game"),
   ngSize: $<HTMLSelectElement>("ng-size"),
@@ -50,14 +59,26 @@ const el = {
   continueBtn: $<HTMLButtonElement>("continue"),
   retry: $<HTMLButtonElement>("retry"),
   problem: $("problem"),
+  problemTitle: $("problem-title"),
+  problemAttempts: $("problem-attempts"),
   problemText: $("problem-text"),
+  problemResult: $("problem-result"),
   nextProblem: $<HTMLButtonElement>("next-problem"),
+  leaveProblem: $<HTMLButtonElement>("leave-problem"),
+  evalCard: $("eval"),
   evalLoss: $("eval-loss"),
   evalDetail: $("eval-detail"),
   spark: $<SVGSVGElement>("spark"),
   chatLog: $<HTMLOListElement>("chat-log"),
   chatForm: $<HTMLFormElement>("chat-form"),
   chatInput: $<HTMLInputElement>("chat-input"),
+  progress: $("progress"),
+  prRank: $("pr-rank"),
+  prBot: $("pr-bot"),
+  prGames: $("pr-games"),
+  prCats: $("pr-cats"),
+  prSpark: $<SVGSVGElement>("pr-spark"),
+  resultRating: $("result-rating"),
   resultDialog: $<HTMLDialogElement>("result-dialog"),
   resultTitle: $("result-title"),
   resultText: $("result-text"),
@@ -76,14 +97,21 @@ let pending = false;
 let shownResultFor: string | null = null;
 let renderedChatKey = "";
 let ngFormTouched = false;
+let profile: ProfileResponse | null = null;
+/** The finished game the profile was last fetched for, so each game end fetches it once. */
+let profileFor: string | null = null;
+/** The profile was fetched for the problem that just ended (problems solved, practiced categories). */
+let profileForProblem = false;
 
 let transport: Transport = httpTransport;
 
 const board = new BoardView(el.canvas, el.boardWrap);
 board.onPlay = (point) => void act({ type: "play", point });
 
-el.ngRank.append(...RANKS.map((r) => new Option(r, r)));
-el.ngRank.value = "18k";
+/** "auto" leaves the bot rank (and any handicap) to the learner's profile. */
+const AUTO_RANK = "auto";
+el.ngRank.append(new Option("Auto", AUTO_RANK), ...RANKS.map((r) => new Option(r, r)));
+el.ngRank.value = AUTO_RANK;
 
 // --- actions -------------------------------------------------------------
 
@@ -117,6 +145,21 @@ function toast(text: string): void {
 
 function setView(v: GameView): void {
   view = v;
+  // The profile changes when a game ends: fetch it once per finished game.
+  if (v.status === "finished" && v.gameId && v.gameId !== profileFor) {
+    profileFor = v.gameId;
+    void refreshProfile();
+  }
+  // So does finishing a problem: fetch it once each time a problem ends.
+  const problemOver = v.mode === "problem" && !!v.problem?.revealed;
+  if (problemOver && !profileForProblem) void refreshProfile();
+  profileForProblem = problemOver;
+  render();
+}
+
+async function refreshProfile(): Promise<void> {
+  const p = await transport.getProfile();
+  if (p) profile = p;
   render();
 }
 
@@ -143,7 +186,9 @@ function render(): void {
   renderProblem(v);
   renderEval(v);
   renderChat(v);
+  renderProgress();
   renderResult(v);
+  renderResultRating();
 }
 
 function renderBoard(v: GameView | null): void {
@@ -176,13 +221,18 @@ function renderStatus(v: GameView | null): void {
   el.turn.textContent = turnText(v);
   el.captures.textContent = `● ${v.captures.B}  ○ ${v.captures.W}`;
   el.captures.title = `Black has captured ${v.captures.B}, White has captured ${v.captures.W}`;
-  el.botRank.textContent = s ? s.botRank : "–";
+  el.botRank.textContent = s && v.mode === "game" ? s.botRank : "–";
   el.tutorDot.classList.toggle("on", v.tutorAttached);
   el.tutorText.textContent = v.tutorAttached ? "connected" : "offline";
 }
 
 function turnText(v: GameView): string {
   const s = v.settings;
+  const p = v.problem;
+  if (v.mode === "problem" && p) {
+    if (p.revealed) return p.solved ? "Problem solved." : "Here's the answer.";
+    return v.engineBusy ? "Checking your move…" : `Problem: ${colorName(p.toPlay)} to play.`;
+  }
   if (v.mode === "idle" || !s) return "Start a new game to begin.";
   if (v.status === "finished") return "Game over.";
   if (v.status === "paused") return "Paused for a teaching moment.";
@@ -193,16 +243,16 @@ function turnText(v: GameView): string {
 function renderControls(v: GameView | null): void {
   const canMove = humanCanMove(v);
   const inGame = !!v?.settings && v.mode === "game" && v.status !== "finished";
-  el.pass.disabled = !canMove;
+  el.pass.disabled = !canMove || v?.mode === "problem";
   // Hints are for the human's move, not while paused or while the bot is to move.
   el.hint.disabled = !inGame || pending || v.status !== "playing" || v.toPlay !== v.settings!.humanColor;
   el.resign.disabled = !inGame || pending;
+  el.practice.disabled = !v || pending || v.mode === "problem";
   el.chatInput.disabled = !v;
 
   // Keep the new-game form in sync with the current game unless the user is editing it.
-  if (v?.settings && !ngFormTouched) {
+  if (v?.settings && v.mode === "game" && !ngFormTouched) {
     el.ngSize.value = String(v.settings.size);
-    el.ngRank.value = v.settings.botRank;
     el.ngColor.value = v.settings.humanColor;
   }
 }
@@ -256,13 +306,20 @@ function renderProblem(v: GameView | null): void {
   const p = v?.mode === "problem" ? v.problem : null;
   el.problem.hidden = !p;
   if (!p) return;
-  el.problemText.textContent = p.solved
-    ? `Solved! ${p.prompt}`
-    : `${p.prompt}${p.attempts ? ` (attempts: ${p.attempts})` : ""}`;
+  el.problemTitle.textContent = problemHeading(p);
+  el.problemAttempts.textContent = attemptsLeftText(p);
+  el.problemText.textContent = p.prompt;
+  const result = problemResult(p);
+  el.problemResult.hidden = !result;
+  el.problemResult.className = `problem-result ${result?.tone ?? ""}`;
+  el.problemResult.textContent = result?.text ?? "";
   el.nextProblem.disabled = pending;
+  el.leaveProblem.disabled = pending;
 }
 
 function renderEval(v: GameView | null): void {
+  // The eval strip is about the game's moves; a problem has its own card.
+  el.evalCard.hidden = v?.mode === "problem";
   const human = v?.settings?.humanColor;
   if (!v || !human) {
     el.evalLoss.textContent = "–";
@@ -357,6 +414,74 @@ function chatItem(m: ChatMessage): HTMLLIElement {
   return li;
 }
 
+function renderProgress(): void {
+  const p = profile?.profile;
+  el.progress.hidden = !p;
+  const auto = el.ngRank.options[0];
+  if (auto) auto.text = p ? `Auto (${nextBotText(p)})` : "Auto";
+  if (!p) return;
+  el.prRank.textContent = ratingToRank(p.rating);
+  el.prRank.title = `Estimated rank (rating ${p.rating.toFixed(1)})`;
+  el.prBot.textContent = nextBotText(p);
+  el.prGames.textContent = String(p.gamesPlayed);
+  const cats = topCategories(p.mistakeCounts);
+  el.prCats.textContent = cats.length ? cats.join(", ") : "–";
+  el.prCats.title = profile?.focus ? `Suggested focus: ${profile.focus.category.replace(/_/g, " ")}. ${profile.focus.reason}` : "";
+  renderRatingSpark(p.ratingHistory.slice(-20));
+}
+
+function renderRatingSpark(history: ProfileResponse["profile"]["ratingHistory"]): void {
+  const W = 300;
+  const H = 32;
+  // Start from the rating before the first shown game, so one game already draws a line.
+  const first = history[0];
+  const values = first ? [first.rating - (first.delta ?? 0), ...history.map((h) => h.rating)] : [];
+  const pts = ratingSparkPoints(values, W, H);
+  const nodes: SVGElement[] = [];
+  if (pts.length > 1) {
+    const line = document.createElementNS(SVG_NS, "polyline");
+    line.setAttribute("class", "line");
+    line.setAttribute("points", pts.map((p) => `${p.x.toFixed(1)},${p.y.toFixed(1)}`).join(" "));
+    nodes.push(line);
+  }
+  pts.slice(1).forEach((p, i) => {
+    const h = history[i]!;
+    const dot = document.createElementNS(SVG_NS, "rect");
+    dot.setAttribute("class", h.won ? "dot-won" : "dot-lost");
+    dot.setAttribute("x", (p.x - 1.5).toFixed(1));
+    dot.setAttribute("y", (p.y - 2.5).toFixed(1));
+    dot.setAttribute("width", "3");
+    dot.setAttribute("height", "5");
+    dot.setAttribute("rx", "1.5");
+    const title = document.createElementNS(SVG_NS, "title");
+    title.textContent = `${h.won ? "Won" : "Lost"} vs ${h.botRank}: ${ratingToRank(h.rating)} (${h.rating.toFixed(1)})`;
+    dot.append(title);
+    nodes.push(dot);
+  });
+  el.prSpark.replaceChildren(...nodes);
+}
+
+/** The result dialog's rating line, once the profile for that game has arrived. */
+function renderResultRating(): void {
+  const gameId = shownResultFor;
+  const p = profile?.profile;
+  if (!gameId || !p || profileFor !== gameId) {
+    el.resultRating.hidden = true;
+    return;
+  }
+  const change = ratingChangeFor(p, gameId);
+  el.resultRating.hidden = false;
+  if (!change) {
+    el.resultRating.textContent = "Rating unchanged: games under 10 moves don't count.";
+    return;
+  }
+  const delta = document.createElement("span");
+  delta.className = change.delta > 0 ? "up" : change.delta < 0 ? "down" : "";
+  delta.textContent = `${change.delta >= 0 ? "+" : "−"}${Math.abs(change.delta).toFixed(1)}`;
+  const rank = change.before === change.after ? `rank ${change.after}` : `rank ${change.before} → ${change.after}`;
+  el.resultRating.replaceChildren("Rating ", delta, ` (${rank}). Next bot: ${nextBotText(p)}.`);
+}
+
 function renderResult(v: GameView | null): void {
   if (!v || v.status !== "finished" || !v.result || !v.gameId) return;
   if (shownResultFor === v.gameId) return;
@@ -400,6 +525,8 @@ el.hint.addEventListener("click", () => void act({ type: "ask_tutor" }));
 el.continueBtn.addEventListener("click", () => void act({ type: "continue" }));
 el.retry.addEventListener("click", () => void act({ type: "retry" }));
 el.nextProblem.addEventListener("click", () => void act({ type: "next_problem" }));
+el.practice.addEventListener("click", () => void act({ type: "next_problem" }));
+el.leaveProblem.addEventListener("click", () => void act({ type: "leave_problem" }));
 
 // Resign needs a second click within a few seconds.
 let resignTimer: ReturnType<typeof setTimeout> | undefined;
@@ -425,11 +552,12 @@ for (const s of [el.ngSize, el.ngRank, el.ngColor]) {
 function startNewGame(): void {
   ngFormTouched = false;
   el.resultDialog.close();
+  const rank = el.ngRank.value;
   void act({
     type: "new_game",
     settings: {
       size: Number(el.ngSize.value) as GameSettings["size"],
-      botRank: el.ngRank.value,
+      ...(rank !== AUTO_RANK && { botRank: rank }),
       humanColor: el.ngColor.value as Color,
     },
   });
@@ -477,6 +605,7 @@ async function start(): Promise<void> {
     transport = (await import("./mock.ts")).createMockTransport();
   }
   transport.subscribe(setView, onConnection);
+  void refreshProfile();
   transport.getState().then(setView, () => {
     if (!view) el.turn.textContent = "Can't reach the server. Retrying…";
   });

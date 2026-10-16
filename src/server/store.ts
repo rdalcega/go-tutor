@@ -16,6 +16,7 @@ import type {
   TeachingMoment,
   TutorEvent,
 } from "../shared/types.ts";
+import { withBuiltins, type StoredProblem } from "./problems.ts";
 
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 
@@ -43,6 +44,11 @@ export interface SavedGame {
   chat: ChatMessage[];
   /** Mistake tags by move number, set with `tutor tag`. */
   tags: Record<number, { category: MistakeCategory; note?: string }>;
+  /**
+   * Heuristic categories by move number, worked out when a mistake's eval arrives and refined with
+   * KataGo's ownership (which isn't saved). Tags win over these.
+   */
+  heuristics?: Record<number, MistakeCategory>;
   /** The teaching moment as of the last save, so a restart can tell an open one from a dismissed one. */
   moment?: TeachingMoment | null;
 }
@@ -51,10 +57,14 @@ export function defaultProfile(): Profile {
   return {
     botRank: "20k",
     rating: 10,
+    handicap: 0,
     ratingHistory: [],
     mistakeThreshold: 4,
+    thresholdHistory: [],
     mistakeCounts: Object.fromEntries(MISTAKE_CATEGORIES.map((c) => [c, 0])) as Record<MistakeCategory, number>,
     recentMistakes: [],
+    recentGames: [],
+    practiced: {},
     gamesPlayed: 0,
     problemsSolved: 0,
   };
@@ -173,6 +183,10 @@ export class Store {
     return join(this.gamesDir, "index.json");
   }
 
+  private get problemsPath(): string {
+    return join(this.dir, "problems.json");
+  }
+
   // --- profile -------------------------------------------------------------
 
   /** The profile, with defaults for anything missing. A corrupt file is set aside, not lost. */
@@ -190,6 +204,29 @@ export class Store {
 
   saveProfile(profile: Profile): void {
     writeAtomic(this.profilePath, JSON.stringify(profile, null, 2) + "\n");
+  }
+
+  // --- practice problems ---------------------------------------------------
+
+  /**
+   * Every practice problem: the learner's (problems.json) and the built-in set, whose progress is
+   * stored there too. A corrupt file is set aside, not lost.
+   */
+  loadProblems(): StoredProblem[] {
+    let stored: StoredProblem[] = [];
+    if (existsSync(this.problemsPath)) {
+      try {
+        const saved = JSON.parse(readFileSync(this.problemsPath, "utf8")) as { problems?: StoredProblem[] };
+        stored = Array.isArray(saved.problems) ? saved.problems : [];
+      } catch {
+        renameSync(this.problemsPath, `${this.problemsPath}.corrupt-${Date.now()}`);
+      }
+    }
+    return withBuiltins(stored);
+  }
+
+  saveProblems(problems: readonly StoredProblem[]): void {
+    writeAtomic(this.problemsPath, JSON.stringify({ version: 1, problems }, null, 1) + "\n");
   }
 
   // --- games ---------------------------------------------------------------

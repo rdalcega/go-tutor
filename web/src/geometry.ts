@@ -3,7 +3,8 @@
 
 import { GoGame } from "../../src/engine/game.ts";
 import { GTP_COLUMNS, toGtp } from "../../src/shared/coords.ts";
-import type { Board, Color, GameSettings, GameView, MoveRecord, Point } from "../../src/shared/types.ts";
+import { ratingToRank } from "../../src/shared/rank.ts";
+import type { Board, Color, GameSettings, GameView, MistakeCategory, MoveRecord, Point, ProblemView, Profile } from "../../src/shared/types.ts";
 
 export interface BoardLayout {
   size: number;
@@ -138,6 +139,82 @@ export function canRetry(v: GameView): boolean {
 /** Whole seconds remaining until `deadline` (ms epoch), never negative. */
 export function secondsLeft(deadline: number, now: number): number {
   return Math.max(0, Math.ceil((deadline - now) / 1000));
+}
+
+/**
+ * Sparkline coordinates for ratings in a w×h box: higher ratings are drawn higher. The vertical
+ * range is at least `minRange` ranks so small wobbles stay small.
+ */
+export function ratingSparkPoints(values: number[], w: number, h: number, minRange = 2, pad = 4): { x: number; y: number }[] {
+  if (values.length === 0) return [];
+  const lo = Math.min(...values);
+  const hi = Math.max(...values);
+  const range = Math.max(minRange, hi - lo);
+  const mid = (lo + hi) / 2;
+  const step = values.length > 1 ? (w - 2 * pad) / (values.length - 1) : 0;
+  return values.map((v, i) => ({
+    x: values.length > 1 ? pad + i * step : w / 2,
+    y: h / 2 - ((v - mid) / range) * (h - 2 * pad),
+  }));
+}
+
+/** The `n` categories with the most mistakes, most first, as readable labels ("life and death 3"). */
+export function topCategories(counts: Partial<Record<MistakeCategory, number>>, n = 2): string[] {
+  return (Object.entries(counts) as [MistakeCategory, number][])
+    .filter(([, c]) => c > 0)
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, n)
+    .map(([cat, c]) => `${cat.replace(/_/g, " ")} ${c}`);
+}
+
+/** The bot the next game defaults to, e.g. "19k" or "20k +2 stones". */
+export function nextBotText(profile: Pick<Profile, "botRank" | "handicap">): string {
+  return profile.handicap >= 2 ? `${profile.botRank} +${profile.handicap} stones` : profile.botRank;
+}
+
+/** What a finished game did to the rating, from the profile's history; null when it didn't count. */
+export function ratingChangeFor(profile: Profile, gameId: string): { before: string; after: string; delta: number } | null {
+  const entry = profile.ratingHistory.find((h) => h.gameId === gameId);
+  if (!entry) return null;
+  const delta = entry.delta ?? 0;
+  return { before: ratingToRank(entry.rating - delta), after: ratingToRank(entry.rating), delta };
+}
+
+/** "Life and death", "Capturing race", … */
+export function categoryName(c: MistakeCategory): string {
+  const words = c.replace(/_/g, " ");
+  return words.charAt(0).toUpperCase() + words.slice(1);
+}
+
+/** The problem card's title: category, and where the problem comes from. */
+export function problemHeading(p: ProblemView): string {
+  const from = p.source ? `from your game, move ${p.source.moveNumber}` : "classic problem";
+  return `${categoryName(p.category)} · ${from}`;
+}
+
+/** "2 attempts left", "1 attempt left", or "" once the problem is over. */
+export function attemptsLeftText(p: ProblemView): string {
+  if (p.revealed) return "";
+  const left = Math.max(0, p.maxAttempts - p.attempts);
+  return `${left} attempt${left === 1 ? "" : "s"} left`;
+}
+
+/**
+ * What the problem card says about the latest attempt, from KataGo's verdict: correct (and what
+ * the board shows), wrong with tries left, or the answer once out of attempts. Null before any attempt.
+ */
+export function problemResult(p: ProblemView): { text: string; tone: "good" | "bad" } | null {
+  const a = p.lastAttempt;
+  if (!a) return null;
+  const loss = a.pointLoss !== null ? ` loses about ${a.pointLoss.toFixed(1)} points` : " isn't it";
+  if (a.correct) {
+    const first = p.attempts === 1 ? " on the first try" : "";
+    const also = p.answer && p.answer.move !== a.move ? ` KataGo's favorite is ${p.answer.move}, and yours is about as good.` : "";
+    return { text: `Correct${first}: ${a.move}.${also} The numbered stones show how play goes on.`, tone: "good" };
+  }
+  if (!p.revealed) return { text: `${a.move}${loss}. Look again and try another move.`, tone: "bad" };
+  const answer = p.answer ? ` The answer is ${p.answer.move}; the numbered stones show KataGo's line.` : "";
+  return { text: `${a.move}${loss}.${answer}`, tone: "bad" };
 }
 
 /** Exponential reconnect delay: 500ms, 1s, 2s … capped at `max`. */

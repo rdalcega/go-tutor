@@ -2,10 +2,13 @@
 // compact, explicit labels, coordinates in GTP, no decoration.
 
 import { toAscii } from "../engine/ascii.ts";
+import { GoGame } from "../engine/game.ts";
 import { toGtp } from "../shared/coords.ts";
 import { ratingToRank } from "../shared/rank.ts";
 import type {
   ChatMessage,
+  Color,
+  FocusRecommendation,
   GameResult,
   GameSettings,
   GameSummary,
@@ -14,6 +17,9 @@ import type {
   MoveRecord,
   Overlay,
   Point,
+  ProblemListItem,
+  ProblemsResponse,
+  ProblemView,
   Profile,
   TeachingMoment,
   TutorEvent,
@@ -101,6 +107,8 @@ export function formatEvent(e: TutorEvent, ctx: EventContext): string {
       return `${head}${reply}${wait}`;
     }
     case "user_message":
+      // On a practice problem the message is about the problem; the game id would point at the wrong board.
+      if (e.problemId) return `USER ${quote(e.text)} (problem ${e.problemId})`;
       return `USER ${quote(e.text)}${e.momentId ? ` (moment ${e.momentId})` : ""}${e.gameId ? ` game=${e.gameId}` : ""}`;
     case "hint_request":
       return `HINT game=${e.gameId} ${e.toPlay} to play — user asks: ${quote(e.text ?? "hint please")} — run: state, then say/show/mark`;
@@ -111,10 +119,25 @@ export function formatEvent(e: TutorEvent, ctx: EventContext): string {
     case "game_end":
       return (
         `GAME_END ${e.gameId} ${resultText(e.result)} — ${mistakesText(e.summary)}, ` +
-        `total loss ${num(e.summary.totalPointLoss)} over ${e.summary.moves} moves — run: review ${e.gameId}`
+        `total loss ${num(e.summary.totalPointLoss)} over ${e.summary.moves} moves` +
+        (e.summary.rating?.rated ? `, rating ${num(e.summary.rating.before)} -> ${num(e.summary.rating.after)}` : "") +
+        ` — run: review ${e.gameId}`
       );
-    case "problem_attempt":
-      return `PROBLEM ${e.problemId} attempt ${e.move} ${e.correct ? "correct" : "wrong"}`;
+    case "problem_start": {
+      const from = e.source ? `from ${e.source.gameId} move ${e.source.moveNumber}` : "built-in";
+      return (
+        `PROBLEM_START ${e.problemId} ${e.category} ${e.toPlay} to play (${from}, box ${e.box}) answers ${e.answers.join(",")} — ` +
+        `${quote(e.prompt)} — run: state; let them try, don't give the answer`
+      );
+    }
+    case "problem_attempt": {
+      const head = `PROBLEM ${e.problemId} attempt ${e.attempt} ${e.move}`;
+      const loss = e.pointLoss !== null ? `, lost ${num(e.pointLoss)}` : "";
+      const line = `best ${e.bestMove}, pv ${pv(e.bestPv)}`;
+      if (e.correct) return `${head} correct${e.firstTry ? ", first try" : ""} (${e.category}) — ${line} — say why it works`;
+      if (!e.revealed) return `${head} wrong${loss} (${e.category}; another attempt left) — ask what they see, don't give the answer (${line})`;
+      return `${head} wrong${loss} (${e.category}; out of attempts, answer shown) — ${line} — explain it; show the refutation of ${e.move}`;
+    }
     default: {
       const unknown = e as { type?: string; seq?: number };
       return `EVENT ${unknown.type ?? "unknown"} seq=${unknown.seq ?? "?"} ${JSON.stringify(e)}`;
@@ -169,13 +192,31 @@ function chatLine(c: ChatMessage): string {
   return `[${c.from}${c.momentId ? ` ${c.momentId}` : ""}] ${c.text.replace(/\s*\n\s*/g, " / ")}`;
 }
 
+/** The problem on the board in problem mode: what it is, where the learner is, and the answer once shown. */
+export function problemLines(p: ProblemView): string[] {
+  const from = p.source ? `from ${p.source.gameId} move ${p.source.moveNumber}` : "built-in";
+  const state = p.revealed ? (p.solved ? "solved" : "answer shown") : `attempt ${p.attempts + 1} of ${p.maxAttempts}`;
+  const lines = [`problem ${p.id} ${p.category} (${from}, box ${p.box}) ${p.toPlay} to play, ${state}: ${p.prompt}`];
+  const a = p.lastAttempt;
+  if (a) lines.push(`last attempt ${a.move} ${a.correct ? "correct" : "wrong"}${a.pointLoss !== null ? `, lost ${num(a.pointLoss)}` : ""}`);
+  if (p.answer) lines.push(`answer ${p.answer.move} (pv ${pv(p.answer.pv)})`);
+  return lines;
+}
+
 /** One-line status of the view, printed after every successful tutor command. */
 export function statusLine(v: GameView, now = Date.now()): string {
   const parts: string[] = [];
   if (v.gameId) parts.push(`game=${v.gameId}`);
+  if (v.problem) parts.push(`problem=${v.problem.id}`);
   parts.push(`mode=${v.mode}`, `status=${v.status}`);
   if (v.status !== "finished" && v.mode !== "idle") parts.push(`toPlay=${v.toPlay}`);
-  parts.push(`moves=${v.moves.length}`);
+  if (v.problem) {
+    const p = v.problem;
+    parts.push(`attempts=${p.attempts}/${p.maxAttempts}`);
+    if (p.revealed) parts.push(p.solved ? "solved" : `answer shown (${p.answer?.move ?? "?"})`);
+  } else {
+    parts.push(`moves=${v.moves.length}`);
+  }
   if (v.moment && v.moment.state !== "resolved") parts.push(momentText(v.moment, now));
   if (v.result) parts.push(`result=${resultText(v.result)}`);
   return parts.join(" ");
@@ -197,11 +238,7 @@ export function formatState(v: GameView, now = Date.now(), chatTail = 8): string
     ].join(" "),
   );
   if (v.result) out.push(`result ${resultText(v.result)}`);
-  if (v.problem) {
-    const p = v.problem;
-    const src = p.source ? ` from ${p.source.gameId} move ${p.source.moveNumber}` : "";
-    out.push(`problem ${p.id}${src} attempts=${p.attempts} solved=${p.solved}: ${p.prompt}`);
-  }
+  if (v.problem) out.push(...problemLines(v.problem));
   if (v.board.length > 0) {
     out.push("", toAscii(v.board, lastPlacedPoint(v.moves)), "");
   }
@@ -229,30 +266,65 @@ export function formatState(v: GameView, now = Date.now(), chatTail = 8): string
 // Summary and review
 // ---------------------------------------------------------------------------
 
-/** Loose shape of a practice problem from GET /api/problems (owned by Milestone 5). */
-export interface ProblemInfo {
-  id: string;
-  prompt?: string;
-  solved?: boolean;
-  attempts?: number;
-  category?: string;
-  source?: { gameId: string; moveNumber: number };
+const signed = (n: number) => `${n >= 0 ? "+" : ""}${num(n)}`;
+
+/** Category counts in the last 3 games, and whether they are rising or falling against older games. */
+function categoryTrends(p: Profile): Map<string, { recent: number; trend: string }> {
+  const games = (p.recentGames ?? []).map((g) => g.gameId);
+  if (games.length === 0) {
+    // Fall back to the games the recent mistakes come from (newest first).
+    for (const m of p.recentMistakes) if (!games.includes(m.gameId)) games.unshift(m.gameId);
+  }
+  const last = new Set(games.slice(-3));
+  const older = new Set(games.slice(0, -3));
+  const out = new Map<string, { recent: number; trend: string }>();
+  for (const c of Object.keys(p.mistakeCounts)) {
+    const recent = p.recentMistakes.filter((m) => m.category === c && last.has(m.gameId)).length;
+    const old = p.recentMistakes.filter((m) => m.category === c && older.has(m.gameId)).length;
+    let trend = "";
+    if (older.size > 0 && last.size > 0) {
+      const diff = recent / last.size - old / older.size;
+      trend = diff > 0.34 ? "rising" : diff < -0.34 ? "falling" : "steady";
+    }
+    out.set(c, { recent, trend });
+  }
+  return out;
 }
 
-export function formatProfile(p: Profile): string {
+export function formatProfile(p: Profile, focus?: FocusRecommendation | null): string {
   const out: string[] = [];
+  const history = p.ratingHistory.slice(-5);
+  const first = history[0];
+  const trend =
+    first && history.length > 1
+      ? `, trend ${signed(p.rating - (first.rating - (first.delta ?? 0)))} over the last ${history.length} rated games`
+      : "";
+  out.push(`rank estimate ${ratingToRank(p.rating)} (rating ${num(p.rating)}${trend}), games ${p.gamesPlayed}, problems solved ${p.problemsSolved}`);
+  const handicap = p.handicap >= 2 ? `, learner takes ${p.handicap} handicap stones on 9x9 (rating below 20k, the weakest bot)` : "";
+  out.push(`bot plays ${p.botRank}${handicap}`);
+  const change = p.thresholdHistory?.at(-1);
   out.push(
-    `rank estimate ${ratingToRank(p.rating)} (rating ${num(p.rating)}), bot plays ${p.botRank}, ` +
-      `games ${p.gamesPlayed}, problems solved ${p.problemsSolved}, mistake threshold ${num(p.mistakeThreshold)} pts`,
+    `mistake threshold ${num(p.mistakeThreshold)} pts` +
+      (change ? ` (last changed ${num(change.from)} -> ${num(change.to)} after ${change.gameId}: ${change.reason})` : ""),
   );
-  const recentGames = p.ratingHistory.slice(-5);
-  if (recentGames.length > 0) {
-    out.push(`recent games: ${recentGames.map((h) => `${h.gameId} ${h.won ? "won" : "lost"} vs ${h.botRank}`).join(", ")}`);
+  if (history.length > 0) {
+    const games = history.map((h) => `${h.gameId} ${h.won ? "won" : "lost"} vs ${h.botRank}${h.handicap ? ` H${h.handicap}` : ""}${h.delta !== undefined ? ` (${signed(h.delta)})` : ""}`);
+    out.push(`recent rated games: ${games.join(", ")}`);
   }
+  const trends = categoryTrends(p);
   const counts = Object.entries(p.mistakeCounts)
     .filter(([, n]) => n > 0)
     .sort((a, b) => b[1] - a[1]);
-  out.push(counts.length > 0 ? `mistakes by category: ${counts.map(([c, n]) => `${c} ${n}`).join(", ")}` : "mistakes by category: none tagged");
+  out.push(
+    counts.length > 0
+      ? `mistakes by category (total, in the last 3 games): ${counts
+          .map(([c, n]) => {
+            const t = trends.get(c);
+            return `${c} ${n} (${t?.recent ?? 0}${t?.trend ? `, ${t.trend}` : ""})`;
+          })
+          .join(", ")}`
+      : "mistakes by category: none yet",
+  );
   const recent = p.recentMistakes.slice(0, 8);
   if (recent.length > 0) {
     out.push("recent mistakes:");
@@ -260,20 +332,49 @@ export function formatProfile(p: Profile): string {
       out.push(`  ${m.gameId} move ${m.moveNumber} ${m.category} -${num(m.pointLoss)}${m.note ? ` ${quote(m.note)}` : ""}`);
     }
   }
+  if (focus) out.push(`recommended focus: ${focus.category}, as ${focus.suggestion === "problems" ? "practice problems" : "a game"} — ${focus.reason}`);
   return out.join("\n");
 }
 
-export function formatProblems(problems: ProblemInfo[]): string {
-  const open = problems.filter((p) => !p.solved);
-  if (open.length === 0) return `open problems: none (${problems.length} total)`;
-  const lines = open.map((p) => {
-    const bits = [p.id];
-    if (p.category) bits.push(p.category);
-    if (p.source) bits.push(`from ${p.source.gameId} move ${p.source.moveNumber}`);
-    if (p.attempts) bits.push(`attempts=${p.attempts}`);
-    return `  ${bits.join(" ")}${p.prompt ? `: ${p.prompt}` : ""}`;
-  });
-  return [`open problems (${open.length} of ${problems.length}) — start one with: problem <id>`, ...lines].join("\n");
+/** "now", "in 9m", "in 5h", "in 3d": when a problem is due. */
+export function dueText(due: number, now: number): string {
+  const ms = due - now;
+  if (ms <= 0) return "now";
+  const minutes = Math.ceil(ms / 60_000);
+  if (minutes < 60) return `in ${minutes}m`;
+  const hours = Math.round(minutes / 60);
+  return hours < 24 ? `in ${hours}h` : `in ${Math.round(hours / 24)}d`;
+}
+
+function problemItemText(p: ProblemListItem, now: number, withAnswers: boolean): string {
+  const bits = [p.id, p.category, p.source ? `from ${p.source.gameId} move ${p.source.moveNumber}` : "built-in"];
+  if (p.difficulty !== undefined) bits.push(`(lost ${num(p.difficulty)})`);
+  bits.push(`box ${p.box}`, `due ${dueText(p.due, now)}`);
+  if (p.seen) bits.push(`solved ${p.solves}/${p.seen}${p.lastResult ? ` last ${p.lastResult}` : ""}`);
+  if (withAnswers) bits.push(`answers ${p.answers.join(",")}`);
+  return bits.join(" ");
+}
+
+/** The practice-problem part of `summary`: counts, and the next few that are due. */
+export function formatProblems(r: ProblemsResponse, now = Date.now(), show = 5): string {
+  const c = r.counts;
+  const dueCats = Object.entries(c.dueByCategory)
+    .sort((a, b) => b[1] - a[1])
+    .map(([cat, n]) => `${cat} ${n}`);
+  const head =
+    `practice problems: ${c.total} (${c.fromGames} from the learner's games, ${c.builtin} built-in), ` +
+    `${c.due} due now${dueCats.length ? ` (${dueCats.join(", ")})` : ""}; boxes ${c.byBox.map((n, i) => `${i + 1}:${n}`).join(" ")}`;
+  const due = r.problems.filter((p) => p.isDue).slice(0, show);
+  if (due.length === 0) return `${head}\nnothing is due; "problem" still starts the one due soonest`;
+  return [`${head}`, `next due (the first is what "problem" starts):`, ...due.map((p) => `  ${problemItemText(p, now, false)}`)].join("\n");
+}
+
+/** `tutor problems`: every problem in the order next_problem picks them, with the accepted answers. */
+export function formatProblemList(r: ProblemsResponse, now = Date.now()): string {
+  const out = [`problems: ${r.counts.total}, ${r.counts.due} due; focus ${r.focus.category} (next_problem prefers it, then the learner's own, then built-ins)`];
+  for (const p of r.problems) out.push(`  ${problemItemText(p, now, true)}`);
+  out.push("start one with: problem <id> (or problem for the next due)");
+  return out.join("\n");
 }
 
 /** Loose shape of a saved game from GET /api/game/:id (games/<id>.json). */
@@ -287,32 +388,105 @@ export interface SavedGame {
   chat?: ChatMessage[];
 }
 
+/** Win-rate swings of at least this much (0..1, the learner's view) are listed in a review. */
+const SWING_MIN = 0.15;
+const REVIEW_BOARDS = 3;
+
+/**
+ * Moves that swung the learner's win rate: their own moves (from the eval), and bot moves (the
+ * change between the learner's previous move and their next one). Biggest first, at most `max`.
+ */
+export function winrateSwings(moves: MoveRecord[], human: Color, max = 5): { record: MoveRecord; from: number; to: number }[] {
+  const swings: { record: MoveRecord; from: number; to: number }[] = [];
+  let lastAfter: number | null = null;
+  for (let i = 0; i < moves.length; i++) {
+    const r = moves[i]!;
+    if (r.move.color !== human) continue;
+    const e = r.eval;
+    if (!e) {
+      lastAfter = null;
+      continue;
+    }
+    const bot = moves[i - 1];
+    if (bot && lastAfter !== null && bot.move.color !== human) swings.push({ record: bot, from: lastAfter, to: e.winrateBefore });
+    swings.push({ record: r, from: e.winrateBefore, to: e.winrateAfter });
+    lastAfter = e.winrateAfter;
+  }
+  return swings
+    .filter((s) => Math.abs(s.to - s.from) >= SWING_MIN)
+    .sort((a, b) => Math.abs(b.to - b.from) - Math.abs(a.to - a.from))
+    .slice(0, max)
+    .sort((a, b) => a.record.number - b.record.number);
+}
+
+const pct = (n: number) => `${Math.round(n * 100)}%`;
+
+/** The board before move `n`, or null when the moves don't replay. */
+function boardBefore(g: SavedGame, n: number): string | null {
+  try {
+    const game = GoGame.fromMoves(g.settings.size, g.settings.komi, g.settings.handicap, g.moves.slice(0, n - 1).map((r) => r.move));
+    const last = game.lastMove;
+    return toAscii(game.board, last && "point" in last.move ? last.move.point : null);
+  } catch {
+    return null;
+  }
+}
+
+/** A compact post-game review: result, rating change, mistakes with PVs, win-rate swings, boards before the worst mistakes, move list. */
 export function formatReview(g: SavedGame, threshold = 4): string {
   const id = g.id ?? g.gameId ?? "?";
   const size = g.settings.size;
+  const human = g.settings.humanColor;
   const out: string[] = [];
   out.push(`game ${id} ${settingsText(g.settings)} result ${g.result ? resultText(g.result) : "unfinished"} moves ${g.moves.length}`);
-  out.push("moves (human: loss, best move, pv; bot moves bare):");
-  for (const r of g.moves) {
-    let s = `${r.number} ${r.move.color} ${moveToGtp(r.move, size)}`;
-    if (r.captures.length > 0) s += ` x${r.captures.length}`;
-    if (r.eval) {
-      const e = r.eval;
-      s += ` -${num(e.pointLoss)}`;
-      if (e.pointLoss >= threshold) s += ` MISTAKE best ${e.bestMove} pv ${pv(e.bestPv)}`;
-      else if (e.pointLoss >= 1) s += ` best ${e.bestMove}`;
-    }
-    out.push(s);
+  const rating = g.summary?.rating;
+  if (rating) {
+    const next = `next bot ${rating.nextBotRank}${rating.nextHandicap ? ` with ${rating.nextHandicap} handicap stones` : ""}`;
+    out.push(
+      rating.rated
+        ? `rating ${num(rating.before)} -> ${num(rating.after)} (${signed(rating.after - rating.before)}, rank ${ratingToRank(rating.after)}); ${next}`
+        : `rating unchanged at ${num(rating.after)} (games under 10 moves don't count); ${next}`,
+    );
   }
-  const summary = g.summary;
-  if (summary) {
-    out.push(`summary: ${mistakesText(summary)}, total loss ${num(summary.totalPointLoss)}`);
-    for (const m of summary.mistakes) {
-      out.push(`  move ${m.moveNumber} ${m.move} -${num(m.pointLoss)} best ${m.bestMove}${m.category ? ` [${m.category}]` : " [untagged]"}`);
+
+  const mistakes =
+    g.summary?.mistakes ??
+    g.moves
+      .filter((r) => r.move.color === human && r.eval && r.eval.pointLoss >= threshold)
+      .sort((a, b) => b.eval!.pointLoss - a.eval!.pointLoss)
+      .map((r) => ({ moveNumber: r.number, move: moveToGtp(r.move, size), pointLoss: r.eval!.pointLoss, bestMove: r.eval!.bestMove, category: undefined, categorySource: undefined }));
+  if (mistakes.length === 0) {
+    out.push("mistakes: none");
+  } else {
+    const total = g.summary ? `, total loss ${num(g.summary.totalPointLoss)}` : "";
+    out.push(`mistakes (${mistakes.length}, worst first${total}):`);
+    for (const m of mistakes) {
+      const record = g.moves[m.moveNumber - 1];
+      const category = m.category ? `[${m.category}${m.categorySource === "heuristic" ? ", heuristic" : ""}]` : "[untagged]";
+      const line = record?.eval?.bestPv.length ? ` pv ${pv(record.eval.bestPv)}` : "";
+      out.push(`  move ${m.moveNumber} ${record?.move.color ?? human} ${m.move} -${num(m.pointLoss)} best ${m.bestMove} ${category}${line}`);
     }
-    if (summary.mistakes.some((m) => !m.category)) {
-      out.push(`tag untagged mistakes with: tag ${id} <move#> <category> [note]`);
+    if (mistakes.some((m) => m.categorySource !== "tutor")) {
+      out.push(`  confirm or correct categories with: tag ${id} <move#> <category> [note]`);
     }
   }
+
+  const swings = winrateSwings(g.moves, human);
+  if (swings.length > 0) {
+    out.push(`win-rate swings (learner's win rate):`);
+    for (const s of swings) {
+      const r = s.record;
+      const who = r.move.color === human ? "" : " (bot)";
+      out.push(`  move ${r.number} ${r.move.color} ${moveToGtp(r.move, size)}${who} ${pct(s.from)} -> ${pct(s.to)} (${signed(Math.round((s.to - s.from) * 100))})`);
+    }
+  }
+
+  for (const m of mistakes.slice(0, REVIEW_BOARDS)) {
+    const board = boardBefore(g, m.moveNumber);
+    if (!board) continue;
+    out.push(`board before move ${m.moveNumber} (${g.moves[m.moveNumber - 1]?.move.color ?? human} played ${m.move}, best ${m.bestMove}):`, board);
+  }
+
+  out.push(g.moves.length > 0 ? `moves (human loss in pts, ! = mistake):\n${moveListText(g.moves, size, threshold)}` : "moves: none");
   return out.join("\n");
 }
