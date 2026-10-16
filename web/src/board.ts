@@ -1,16 +1,12 @@
 // Canvas Go board: wood, grid, stones, overlays, hover ghost. Knows nothing about the network.
+//
+// Everything but the hover ghost is drawn once per scene (or resize) into an offscreen layer;
+// moving the mouse copies that layer and draws only the ghost stone on top.
 
 import { starPoints } from "../../src/engine/board.ts";
+import { samePoint } from "../../src/shared/coords.ts";
 import type { Board, Color, Overlay, Point } from "../../src/shared/types.ts";
-import {
-  type BoardLayout,
-  columnLabel,
-  computeLayout,
-  pixelToPoint,
-  pointToPixel,
-  rowLabel,
-  samePoint,
-} from "./geometry.ts";
+import { type BoardLayout, columnLabel, computeLayout, pixelToPoint, pointToPixel, rowLabel } from "./geometry.ts";
 
 export interface BoardScene {
   board: Board;
@@ -34,12 +30,17 @@ interface Palette {
 
 const STONE_RADIUS = 0.48; // in cells
 
+type Ctx = CanvasRenderingContext2D;
+
 export class BoardView {
-  private readonly ctx: CanvasRenderingContext2D;
+  private readonly ctx: Ctx;
   private scene: BoardScene | null = null;
   private layout: BoardLayout = computeLayout(400, 9);
   private hover: Point | null = null;
   private wood: { key: string; canvas: HTMLCanvasElement } | null = null;
+  /** The scene without the hover ghost, in device pixels; null when it needs drawing again. */
+  private layer: HTMLCanvasElement | null = null;
+  private readonly layerCanvas = document.createElement("canvas");
   private palette: Palette;
 
   /** Called with the point the user clicked, only while hoverColor is set. */
@@ -60,6 +61,7 @@ export class BoardView {
       .addEventListener("change", () => {
         this.palette = readPalette(canvas);
         this.wood = null;
+        this.layer = null;
         this.draw();
       });
 
@@ -81,6 +83,7 @@ export class BoardView {
       this.layout = computeLayout(this.layout.cssSize, scene.board.length);
       this.wood = null;
     }
+    this.layer = null;
     this.draw();
   }
 
@@ -110,38 +113,54 @@ export class BoardView {
     this.canvas.height = Math.round(css * dpr);
     this.layout = computeLayout(css, this.scene?.board.length ?? this.layout.size);
     this.wood = null;
+    this.layer = null;
     this.draw();
   }
 
   draw(): void {
     const { ctx, layout } = this;
     const dpr = this.canvas.width / layout.cssSize;
-    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-    ctx.clearRect(0, 0, layout.cssSize, layout.cssSize);
-    ctx.drawImage(this.woodCanvas(dpr), 0, 0, layout.cssSize, layout.cssSize);
-    this.drawGrid();
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.clearRect(0, 0, this.canvas.width, this.canvas.height);
+    ctx.drawImage(this.staticLayer(dpr), 0, 0);
+    const s = this.scene;
+    if (this.hover && s?.hoverColor && this.canPlayAt(this.hover)) {
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      this.drawStone(ctx, this.hover, s.hoverColor, layout.cell * STONE_RADIUS, 0.45);
+    }
+  }
+
+  /** Wood, grid, labels, stones and overlays: everything but the hover ghost. */
+  private staticLayer(dpr: number): HTMLCanvasElement {
+    if (this.layer) return this.layer;
+    const c = this.layerCanvas;
+    c.width = this.canvas.width;
+    c.height = this.canvas.height;
+    const g = c.getContext("2d")!;
+    const { layout } = this;
+    g.setTransform(dpr, 0, 0, dpr, 0, 0);
+    g.clearRect(0, 0, layout.cssSize, layout.cssSize);
+    g.drawImage(this.woodCanvas(dpr), 0, 0, layout.cssSize, layout.cssSize);
+    this.drawGrid(g, dpr);
 
     const s = this.scene;
-    if (!s) return;
-    const r = layout.cell * STONE_RADIUS;
-
-    s.board.forEach((row, y) =>
-      row.forEach((c, x) => {
-        if (c) this.drawStone({ x, y }, c, r, 1);
-      }),
-    );
-
-    if (s.bestMove) this.drawBestMove(s.bestMove, r);
-    if (s.lastMove) {
-      const c = s.board[s.lastMove.y]?.[s.lastMove.x];
-      if (c) this.drawLastMove(s.lastMove, c, r);
+    if (s) {
+      const r = layout.cell * STONE_RADIUS;
+      s.board.forEach((row, y) =>
+        row.forEach((c, x) => {
+          if (c) this.drawStone(g, { x, y }, c, r, 1);
+        }),
+      );
+      if (s.bestMove) this.drawBestMove(g, s.bestMove, r);
+      if (s.lastMove) {
+        const c = s.board[s.lastMove.y]?.[s.lastMove.x];
+        if (c) this.drawLastMove(g, s.lastMove, c, r);
+      }
+      if (s.overlay?.variation) this.drawVariation(g, s.overlay.variation.moves, s.board, r);
+      for (const m of s.overlay?.marks ?? []) this.drawMark(g, m, s.board, r);
     }
-    if (s.overlay?.variation) this.drawVariation(s.overlay.variation.moves, s.board, r);
-    for (const m of s.overlay?.marks ?? []) this.drawMark(m, s.board, r);
-
-    if (this.hover && s.hoverColor && this.canPlayAt(this.hover)) {
-      this.drawStone(this.hover, s.hoverColor, r, 0.45);
-    }
+    this.layer = c;
+    return c;
   }
 
   // --- wood -------------------------------------------------------------
@@ -193,12 +212,11 @@ export class BoardView {
 
   // --- grid -------------------------------------------------------------
 
-  private drawGrid(): void {
-    const { ctx, layout, palette } = this;
+  private drawGrid(ctx: Ctx, dpr: number): void {
+    const { layout, palette } = this;
     const { size, cell, margin } = layout;
     const end = margin + (size - 1) * cell;
     // Snap 1px lines to the device pixel grid so they stay sharp.
-    const dpr = this.canvas.width / layout.cssSize;
     const half = Math.round(dpr) % 2 === 1 ? 0.5 : 0;
     const crisp = (v: number) => (Math.round(v * dpr) + half) / dpr;
 
@@ -242,8 +260,7 @@ export class BoardView {
 
   // --- stones and overlays ---------------------------------------------
 
-  private drawStone(p: Point, color: Color, r: number, alpha: number): void {
-    const { ctx } = this;
+  private drawStone(ctx: Ctx, p: Point, color: Color, r: number, alpha: number): void {
     const { x, y } = pointToPixel(this.layout, p);
     ctx.save();
     ctx.globalAlpha = alpha;
@@ -270,8 +287,7 @@ export class BoardView {
     ctx.restore();
   }
 
-  private drawLastMove(p: Point, color: Color, r: number): void {
-    const { ctx } = this;
+  private drawLastMove(ctx: Ctx, p: Point, color: Color, r: number): void {
     const { x, y } = pointToPixel(this.layout, p);
     ctx.strokeStyle = color === "B" ? "rgba(255,255,255,0.9)" : "rgba(0,0,0,0.75)";
     ctx.lineWidth = Math.max(1.5, r * 0.12);
@@ -280,8 +296,7 @@ export class BoardView {
     ctx.stroke();
   }
 
-  private drawBestMove(p: Point, r: number): void {
-    const { ctx } = this;
+  private drawBestMove(ctx: Ctx, p: Point, r: number): void {
     const { x, y } = pointToPixel(this.layout, p);
     ctx.save();
     ctx.strokeStyle = this.palette.best;
@@ -296,11 +311,10 @@ export class BoardView {
     ctx.restore();
   }
 
-  private drawVariation(moves: { color: Color; point: Point }[], board: Board, r: number): void {
-    const { ctx } = this;
+  private drawVariation(ctx: Ctx, moves: { color: Color; point: Point }[], board: Board, r: number): void {
     moves.forEach((m, i) => {
       const occupied = board[m.point.y]?.[m.point.x] != null;
-      if (!occupied) this.drawStone(m.point, m.color, r, 0.62);
+      if (!occupied) this.drawStone(ctx, m.point, m.color, r, 0.62);
       const { x, y } = pointToPixel(this.layout, m.point);
       const under = board[m.point.y]?.[m.point.x] ?? m.color;
       ctx.fillStyle = under === "B" ? "#fff" : "#111";
@@ -311,8 +325,7 @@ export class BoardView {
     });
   }
 
-  private drawMark(m: NonNullable<Overlay["marks"]>[number], board: Board, r: number): void {
-    const { ctx } = this;
+  private drawMark(ctx: Ctx, m: NonNullable<Overlay["marks"]>[number], board: Board, r: number): void {
     const { x, y } = pointToPixel(this.layout, m.point);
     const stone = board[m.point.y]?.[m.point.x] ?? null;
     const color = stone === "B" ? "#fff" : stone === "W" ? "#111" : this.palette.accent;

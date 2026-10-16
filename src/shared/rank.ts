@@ -29,10 +29,6 @@ export function clampRating(rating: number): number {
   return Math.min(MAX_RATING, Math.max(MIN_RATING, rating));
 }
 
-/** Normalize a rank string ("20K" → "20k"). Throws on invalid input. */
-export function normalizeRank(rank: string): string {
-  return ratingToRank(rankToRating(rank));
-}
 
 /**
  * KataGo human-SL profile name for a bot rank: "20k" → "rank_20k", "1D" → "rank_1d"; "rank_5k" is

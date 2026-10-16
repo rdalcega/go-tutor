@@ -8,21 +8,12 @@ import { join, resolve } from "node:path";
 import { createInterface } from "node:readline";
 import { promisify } from "node:util";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { resolveKataGoPaths } from "../../src/server/katago.ts";
 import type { GameView, ProblemsResponse } from "../../src/shared/types.ts";
+import { hasKataGo } from "../server/fakes.ts";
 
 const ROOT = resolve(import.meta.dirname, "../..");
 const TSX = join(ROOT, "node_modules", ".bin", "tsx");
 const run = promisify(execFile);
-
-function hasKataGo(): boolean {
-  try {
-    resolveKataGoPaths();
-    return true;
-  } catch {
-    return false;
-  }
-}
 
 /** Collects a child's stdout lines and lets a test wait for one matching a pattern. */
 function lines(child: ChildProcess) {

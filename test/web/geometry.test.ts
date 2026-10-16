@@ -1,8 +1,7 @@
 import { describe, expect, it } from "vitest";
-import type { GameSettings, GameView, MoveRecord } from "../../src/shared/types.ts";
+import type { GameSettings, MoveRecord } from "../../src/shared/types.ts";
 import {
   backoffDelay,
-  canRetry,
   columnLabel,
   computeLayout,
   formatLoss,
@@ -107,30 +106,6 @@ describe("teaching moments", () => {
     expect(positionBefore(moves, settings, 4)).toBeNull(); // taken back already
   });
 
-  it("offers Try again only while the moment's move is on the board", () => {
-    const view = (over: Partial<GameView>): GameView => ({
-      gameId: "g",
-      mode: "game",
-      settings,
-      status: "paused",
-      board: [],
-      toPlay: "W",
-      moves,
-      captures: { B: 0, W: 0 },
-      result: null,
-      moment: { id: "m", moveNumber: 3, pointLoss: 6, state: "fallback" },
-      overlay: null,
-      chat: [],
-      tutorAttached: false,
-      engineBusy: false,
-      ...over,
-    });
-    expect(canRetry(view({}))).toBe(true);
-    // After the tutor's rethink the move is gone and the server would refuse.
-    expect(canRetry(view({ status: "playing", toPlay: "B", moves: moves.slice(0, 2), moment: { id: "m", moveNumber: 3, pointLoss: 6, state: "tutor" } }))).toBe(false);
-    expect(canRetry(view({ status: "finished" }))).toBe(false);
-    expect(canRetry(view({ moves: [], moment: null }))).toBe(false);
-  });
 });
 
 describe("timing", () => {

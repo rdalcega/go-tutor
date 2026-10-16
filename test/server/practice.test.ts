@@ -1,7 +1,8 @@
 // Problem mode in the GameController: starting problems, judging attempts, spaced repetition,
 // the profile, problem generation at game end, and returning to the game.
 import { beforeEach, describe, expect, it } from "vitest";
-import { GameController, type TutorEventInput } from "../../src/server/game.ts";
+import type { TutorEventInput } from "../../src/server/common.ts";
+import { GameController } from "../../src/server/game.ts";
 import { BOX_INTERVALS, DEEP_VISITS } from "../../src/server/problems.ts";
 import type { Store } from "../../src/server/store.ts";
 import { fromGtp } from "../../src/shared/coords.ts";

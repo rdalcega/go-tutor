@@ -20,13 +20,17 @@ The contract for every boundary is `src/shared/types.ts`.
 | Path | Owns |
 |---|---|
 | `src/shared/types.ts` | All cross-boundary types. |
-| `src/shared/coords.ts` | `toGtp(point, size)`, `fromGtp(gtp, size)`, (columns `A`–`T` skipping `I`; row 1 at the bottom). |
+| `src/shared/coords.ts` | `toGtp(point, size)`, `fromGtp(gtp, size)` (columns `A`–`T` skipping `I`; row 1 at the bottom), `movePoint(move)`, `moveGtp(move, size)`, `samePoint`. |
+| `src/shared/allowed.ts` | `allowedActions(state)`: the browser actions the server accepts in a given state (mode, status, result, moment, turn, engine, tutor, problem), used by the controller and the UI mock. |
+| `src/shared/text.ts` | Wording shared by server, CLI and UI: `colorName`, `categoryLabel`, `round1`, `formatScore`. |
 | `src/shared/rank.ts` | `rankToRating("20k") → 10`, `ratingToRank(10) → "20k"` on the scale 30k=0 … 1k=29, 1d=30 … 9d=38. |
-| `src/engine/` | Pure Go rules: `GoGame` class (play/pass/undo, captures, suicide illegal, positional superko), area scoring with komi, dead-stone input from KataGo ownership, `toAscii(board)`, SGF read/write. No I/O. |
+| `src/engine/` | Pure Go rules: `GoGame` class (play/pass/undo, captures, suicide illegal, positional superko; `before(n)` copies the game before move n from its history, `fromBoard` sets up a position), `gameBefore(settings, moves, n)` (replays a saved move list), `boardFromDiagram`, area scoring with komi, dead-stone input from KataGo ownership, `toAscii(board)`, SGF read/write. No I/O. |
 | `src/server/katago.ts` | Long-lived `katago analysis` child process speaking the JSON analysis protocol; query queue with ids; `analyze(position, opts)`, `botMove(position, rank)`, `ownership`. |
-| `src/server/game.ts` | `GameController`: owns the current game, turns, bot replies, per-move evals, teaching-moment detection, pause + fallback timer, chat log, producing `GameView` and `TutorEvent`s. Takes an engine interface so tests can use a fake. |
+| `src/server/game.ts` | `GameController`: owns the current game, turns, bot replies, per-move evals, teaching-moment detection, pause + fallback timer, chat log, the profile and problem writes, producing `GameView` (with the actions it accepts) and `TutorEvent`s. Takes an engine interface so tests can use a fake. |
+| `src/server/practice.ts` | `PracticeSession`: the practice problem on the board (attempts, judging against KataGo, its overlay and view) while the game waits underneath; the controller delegates to it in problem mode and writes the problem's progress. |
+| `src/server/common.ts` | What the controller and the session share: `UserError`, the clock, and turning GTP into ghost stones and marks. |
 | `src/server/bridge.ts` | Tutor bridge: event sequence numbers, `data/events.jsonl` append log, SSE fan-out to `tutor watch` connections, `tutorAttached` tracking, applying `TutorCommand`s to the controller. |
-| `src/server/store.ts` | Persistence under `data/` (path overridable with `GO_TUTOR_DATA`): `games/<id>.sgf` + `games/<id>.json` (settings, moves with evals, result, summary), `games/index.json` (creation time and finished flag per game, so finding the last game reads one file), `profile.json`, `problems.json`. The controller coalesces game saves to one write per tick and flushes on shutdown and at game end. |
+| `src/server/store.ts` | Persistence under `data/` (path overridable with `GO_TUTOR_DATA`): `games/<id>.sgf` + `games/<id>.json` (settings, moves with evals, result, summary), `games/index.json` (creation time and finished flag per game, so finding the last game reads one file; read and checked against the files once at startup, then kept in memory), `profile.json`, `problems.json`. The controller writes a game at the end of the tick that changed it (one action's burst of changes is one write), and at once for a new game, at game end and on shutdown (SIGINT, SIGTERM, SIGHUP, beforeExit). |
 | `src/server/profile.ts` | Learner memory, pure functions over `Profile`: rank adaptation (`applyGame`), heuristic mistake categories (`classifyMistake`), tutor tags (`applyTag`), the adaptive mistake threshold, and `recommendFocus`. See "Learner profile". |
 | `src/server/problems.ts` | Practice problems, pure functions over `StoredProblem`: problems from a finished game's mistakes, the built-in merge, position hashes, Leitner scheduling, which problem comes next, the `GET /api/problems` body. See "Practice problems". |
 | `src/server/builtin-problems.ts` | The built-in starter set: a dozen classic 9×9 problems as readable board diagrams with their answers (verified against real KataGo in `test/server/katago.integration.test.ts`). |
@@ -43,7 +47,7 @@ The contract for every boundary is `src/shared/types.ts`.
 - Launch: `katago analysis -config katago/analysis.cfg -model <main> -human-model <human>`.
   The config is derived from the bundled `analysis_example.cfg` with modest settings for an M1
   (`numAnalysisThreads = 2`, `numSearchThreadsPerAnalysisThread = 8`, `maxVisits = 400`).
-- Analysis: one query per position, with `includeOwnership` only where ownership is used; read
+- Analysis: one query per position, always with `includeOwnership` (it adds only network output, not search); read
   `rootInfo.scoreLead`/`winrate` (from the perspective of `rootInfo.currentPlayer` — check
   `reportAnalysisWinratesAs` in the config and normalize) and `moveInfos` (`move`, `scoreLead`,
   `winrate`, `visits`, `pv`, `order`).
@@ -80,13 +84,12 @@ KataGo searched well (50+ visits) in the position before: that one loses its can
 the best candidate of the same search, since two separate searches disagree by a point or more run
 to run (so KataGo's own best move never shows a loss).
 
-One cached query per position serves move evals, the bot's pass check, hints and scoring. Only
-scoring and classifying a mistake ask for ownership; a cached analysis without ownership doesn't
-satisfy them, and the one with ownership replaces it. When a human move's eval reaches the mistake
-threshold the controller classifies it right away without ownership, then, in the background (the
-teaching moment doesn't wait), again with the ownership before and after it, and keeps the category
-in the saved game's `heuristics` (the ownership itself isn't saved). A mistake without one (evaluated
-before a restart) is classified at game end without ownership.
+One cached query per position, with ownership, serves move evals, mistake categories, the bot's
+pass check, hints and scoring (the cache keeps the 16 most recently used positions). When a human
+move's eval reaches the mistake threshold the controller classifies it right away with the ownership
+before and after it, and keeps the category in the saved game's `heuristics` (the ownership itself
+isn't saved). A mistake without one (evaluated before a restart) is classified at game end without
+ownership.
 
 Bot moves are never evaluated as teaching moments. Only the human's moves are.
 
@@ -101,7 +104,8 @@ tutor attached, the server adds a system reply saying the tutor isn't connected.
 
 - `GET /api/tutor/events?since=<seq>&epoch=<id>` is an SSE stream of `TutorEvent`s. While at least one such
   connection is open, `tutorAttached` is true. Events are also appended to `data/events.jsonl` (rotated
-  to `events.1.jsonl` past 8 MB). The first frame is `event: hello` with `{ epoch, since }`: `epoch`
+  to `events.1.jsonl` past 8 MB; a replay older than the in-memory ring reads the log from its end
+  back to `since`). The first frame is `event: hello` with `{ epoch, since }`: `epoch`
   identifies the server boot; a cursor from another epoch is clamped to this boot's first seq (seqs
   that never reached the log can be reused after a restart), and `since` is where the replay starts.
   Replayed teaching moments carry the moment's current state (the game's, also while a practice
@@ -112,10 +116,18 @@ tutor attached, the server adds a system reply saying the tutor isn't connected.
   listens on 127.0.0.1 only.
 - `POST /api/tutor` takes a `TutorCommand` JSON body and returns `{ ok: true, view: GameView }` or
   `{ ok: false, error }` with a message a person can act on.
-- `GET /api/state` returns the `GameView`. `GET /api/game/:id` (or `last`) returns a saved game
+- `GET /api/state` returns the `GameView`. Besides the position, it lists `allowed`: the browser
+  actions `POST /api/action` accepts right now (the same checks it makes; the rules are the pure
+  `allowedActions` in `src/shared/allowed.ts`, shared with the UI's `?mock` server), which the UI uses for its
+  buttons, board input and keys; and `profileVersion`, bumped by every profile change (a game or
+  problem ends, a tag), so the UI knows when to fetch the profile again. Move, teaching-moment and
+  hint events carry the board `size`, so `tutor watch` names points in GTP without a lookup. For an
+  older logged event without `size`, `watch` uses the size from that game's `game_start` if it saw
+  one, else prints the move as `(coords unavailable)`; it never fails on an event it can't read.
+  `GET /api/game/:id` (or `last`) returns a saved game
   (`games/<id>.json`: settings, moves with evals and PVs, result, summary with categories and rating
   change, chat, tags, heuristics). `GET /api/profile` returns `ProfileResponse`: `{ profile, focus }`.
-  `GET /api/problems` returns `ProblemsResponse`: every problem (`ProblemListItem`: category, source,
+  `GET /api/problems` returns `ProblemsResponse` (both use the controller's profile in memory): every problem (`ProblemListItem`: category, source,
   box, due, results, accepted answers) in the order `next_problem` picks them, counts (total, due, from
   games, built-in, per box, due per category) and the focus.
 
@@ -170,13 +182,13 @@ which merges in the built-in set) holds every problem with its spaced-repetition
   best, never a pass or the move played; besides the best, only candidates with 50+ visits), source game and move, category (the tutor's tag, else the
   heuristic, read again when the problem is saved; a later tag updates the problem) and difficulty
   (the point loss). Candidates with fewer than 2 moves or 200 visits in total are re-analyzed at 1000
-  visits first (as many at once as KataGo runs queries), and so is a position where a ko ban applied (the problem drops the history, so the
+  visits first (as many at once as KataGo runs queries), and so is a position where a ko ban applied (some empty point illegal only by positional superko, not just the immediate retake; the problem drops the history, so the
   recapture is legal there and the game's answers may not hold); if that analysis fails, a ko
   position gets no problem. No problem when KataGo's best is a pass. One problem per position (`positionHash` of board and side to move) and per source
   move. Ids are `p1`, `p2`, …
 - **Built-ins** (`b-…`): 12 classic 9×9 positions (life and death, snapbacks, a ladder, a net, a
   connection, capturing races) with the rest of the board settled so the local answer decides the
-  game. Their definitions come from the source file on every load; only progress and answers found
+  game. Their definitions come from the source file (parsed once at startup); only progress and answers found
   later are stored. The integration test checks each against real KataGo: KataGo's best is an answer,
   every answer is within 1 point, passing costs ≥ 3 points and the best wrong move ≥ 2.
 - **Spaced repetition** (Leitner, boxes 1–5): new problems are in box 1 and due at once. Solved first
@@ -245,11 +257,14 @@ panel on the right with: game controls (New game, Pass, Hint, Practice, Resign),
 bot rank, tutor connected or not), an eval strip (point loss of the last human move), the teaching-moment
 banner (Continue / Try again buttons, countdown while waiting for the tutor), a Progress card (rank
 estimate, next bot with any handicap, games, top 2 mistake categories, rating sparkline; fetched from
-`GET /api/profile` on load and after each game end), and the chat panel. The result dialog shows the
+`GET /api/profile` on load and whenever the view's `profileVersion` changes), and the chat panel. The result dialog shows the
 game's rating change. The new-game form's bot defaults to "Auto" (the profile's rank and handicap). Mobile
 width stacks the panel under the board. Ghost stones and marks from `overlay` are drawn on the board.
 Practice (or the tutor's `problem`) switches to problem mode: a problem card replaces the eval strip
 with the category and source, the prompt, attempts left, the verdict (correct, or the point loss of
 the attempt and, once out of attempts, the answer), and Next problem / Back to playing buttons. The
 board takes clicks and shows the hover stone as in games; Pass, Hint and Resign are disabled.
-Live updates arrive over `GET /api/events` (SSE of `GameView`).
+Live updates arrive over `GET /api/events` (SSE of `GameView`; each connection starts with the current
+view, and `GET /api/state` is fetched only if the stream never opens). Controls follow the view's
+`allowed` actions. The canvas draws the scene into an offscreen layer once per change; the hover
+stone is drawn over a copy of it.

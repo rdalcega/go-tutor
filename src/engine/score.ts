@@ -1,4 +1,4 @@
-import type { Board, Cell, Color, GameResult, Point } from "../shared/types.ts";
+import type { Board, Cell, Color, Point } from "../shared/types.ts";
 import { pointKey } from "../shared/coords.ts";
 import { cloneBoard, getCell, groupAt, neighbors, setCell } from "./board.ts";
 
@@ -74,15 +74,6 @@ export function scoreArea(board: Board, komi: number, dead: Iterable<Point> = []
   }
   const margin = black - white - komi;
   return { black, white, komi, margin, winner: margin > 0 ? "B" : margin < 0 ? "W" : null, owner, dead: removed };
-}
-
-/** Score using KataGo ownership to decide which stones are dead. */
-export function scoreWithOwnership(board: Board, komi: number, ownership: readonly number[], threshold = 0.5): AreaScore {
-  return scoreArea(board, komi, deadStonesFromOwnership(board, ownership, threshold));
-}
-
-export function toGameResult(score: AreaScore): GameResult {
-  return { winner: score.winner, margin: score.margin, reason: "score" };
 }
 
 function regionBorders(board: Board, region: Point[]): Set<Color> {

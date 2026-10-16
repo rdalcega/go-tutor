@@ -1,5 +1,7 @@
 // Help text. The reader is a Claude Code session acting as the Go teacher.
 
+import { MISTAKE_CATEGORIES } from "../shared/types.ts";
+
 export const USAGE = `usage: npm run -s tutor -- <command> [args] [--json]
 commands: watch, state, say, rethink, show, mark, clear, resume, claim, new-game, problem, problems, tag, summary, review, help
 run "npm run -s tutor -- help" for details and examples`;
@@ -106,8 +108,8 @@ COMMANDS
       Example: npm run -s tutor -- problems
 
   tag <gameId> <move#> <category> [note]
-      Record why a mistake happened; feeds the learner profile. Categories: life_and_death,
-      capturing_race, opening, direction, shape, endgame, tactics, other.
+      Record why a mistake happened; feeds the learner profile. Categories:
+      ${MISTAKE_CATEGORIES.join(", ")}.
       Example: npm run -s tutor -- tag g12 14 direction "played toward thickness"
 
   summary

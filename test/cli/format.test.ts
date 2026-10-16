@@ -27,7 +27,7 @@ import type {
 } from "../../src/shared/types.ts";
 
 const settings: GameSettings = { size: 9, komi: 7, humanColor: "B", botRank: "20k", handicap: 0 };
-const ctx = { sizeOf: (g: string) => (g === "g12" ? 9 : undefined), now: 1_000_000 };
+const ctx = { now: 1_000_000 };
 
 const evalOf = (pointLoss: number): MoveEval => ({
   leadBefore: 2,
@@ -50,6 +50,7 @@ describe("formatEvent", () => {
     const e: TutorEvent = {
       ...base,
       type: "teaching_moment",
+      size: 9,
       gameId: "g12",
       moment: { id: "m3", moveNumber: 14, pointLoss: 6.2, state: "waiting", deadline: 1_030_000 },
       record: humanMove,
@@ -67,6 +68,7 @@ describe("formatEvent", () => {
     const e = (state: "tutor" | "fallback" | "resolved"): TutorEvent => ({
       ...base,
       type: "teaching_moment",
+      size: 9,
       gameId: "g12",
       moment: { id: "m3", moveNumber: 14, pointLoss: 6.2, state },
       record: humanMove,
@@ -83,15 +85,36 @@ describe("formatEvent", () => {
     const bot: TutorEvent = {
       ...base,
       type: "move",
+      size: 9,
       gameId: "g12",
       by: "bot",
       record: { number: 15, move: { color: "W", point: { x: 3, y: 3 } }, captures: [] },
     };
     expect(formatEvent(bot, ctx)).toBe("MOVE 15 W D6 (bot)");
-    const human: TutorEvent = { ...base, type: "move", gameId: "g12", by: "human", record: humanMove };
+    const human: TutorEvent = { ...base, type: "move", gameId: "g12", size: 9, by: "human", record: humanMove };
     expect(formatEvent(human, ctx)).toBe("MOVE 14 B C3 (human) lost 6.2 (best D5)");
-    const pass: TutorEvent = { ...base, type: "move", gameId: "g12", by: "bot", record: { number: 16, move: { color: "W", pass: true }, captures: [] } };
+    const pass: TutorEvent = { ...base, type: "move", gameId: "g12", size: 9, by: "bot", record: { number: 16, move: { color: "W", pass: true }, captures: [] } };
     expect(formatEvent(pass, ctx)).toBe("MOVE 16 W pass (bot)");
+  });
+
+  it("formats events logged before they carried size, without throwing", () => {
+    // Old-format events (events.jsonl from before `size`): no size on the event.
+    const old = { ...base, type: "move", gameId: "g12", by: "bot", record: { number: 12, move: { color: "W", point: { x: 3, y: 3 } }, captures: [] } } as unknown as TutorEvent;
+    expect(formatEvent(old, ctx)).toBe("MOVE 12 W (coords unavailable) (bot)");
+    expect(formatEvent(old, { ...ctx, sizeOf: (g) => (g === "g12" ? 9 : undefined) })).toBe("MOVE 12 W D6 (bot)");
+    const moment = {
+      ...base,
+      type: "teaching_moment",
+      gameId: "g12",
+      moment: { id: "m3", moveNumber: 14, pointLoss: 6.2, state: "resolved" },
+      record: humanMove,
+      boardBefore: "",
+      boardAfter: "",
+    } as unknown as TutorEvent;
+    expect(formatEvent(moment, ctx)).toBe("MOMENT m3 game=g12 move 14 B (coords unavailable) lost 6.2 pts (best D5, pv D5 E4 C6) (replayed; already resolved)");
+    // Even a malformed event prints as a raw line instead of throwing.
+    const broken = { ...base, type: "move", gameId: "g12", size: 9, by: "bot" } as unknown as TutorEvent;
+    expect(formatEvent(broken, ctx)).toMatch(/^EVENT move seq=/);
   });
 
   it("formats chat, hints, fallback, game end and problems", () => {
@@ -101,7 +124,7 @@ describe("formatEvent", () => {
     expect(formatEvent({ ...base, type: "user_message", text: "what is this?", gameId: "g12", problemId: "b-ladder" }, ctx)).toBe(
       'USER "what is this?" (problem b-ladder)',
     );
-    expect(formatEvent({ ...base, type: "hint_request", text: "where now?", gameId: "g12", board: "", toPlay: "B" }, ctx)).toBe(
+    expect(formatEvent({ ...base, type: "hint_request", text: "where now?", gameId: "g12", size: 9, board: "", toPlay: "B" }, ctx)).toBe(
       'HINT game=g12 B to play — user asks: "where now?" — run: state, then say/show/mark',
     );
     expect(formatEvent({ ...base, type: "fallback", momentId: "m3" }, ctx)).toBe("FALLBACK m3 (tutor too slow; KataGo answer shown)");
@@ -214,6 +237,8 @@ const view = (over: Partial<GameView> = {}): GameView => ({
   ],
   tutorAttached: true,
   engineBusy: false,
+  profileVersion: 0,
+  allowed: ["new_game", "chat", "next_problem", "resign", "continue", "retry"],
   ...over,
 });
 

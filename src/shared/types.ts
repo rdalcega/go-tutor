@@ -89,8 +89,12 @@ export interface Overlay {
    */
   variation?: { label?: string; moves: { color: Color; point: Point }[]; fromMove?: number };
   /** Marked points (e.g. "the better move", "this group is weak"). */
-  marks?: { point: Point; kind: "circle" | "triangle" | "square" | "x" | "label"; text?: string }[];
+  marks?: { point: Point; kind: MarkKind | "label"; text?: string }[];
 }
+
+/** Marks the tutor can draw with `mark` (the UI also draws "label" marks). */
+export const MARK_KINDS = ["circle", "triangle", "square", "x"] as const;
+export type MarkKind = (typeof MARK_KINDS)[number];
 
 export interface ChatMessage {
   id: string;
@@ -121,6 +125,17 @@ export interface GameView {
   engineBusy: boolean;
   /** Present in problem mode. */
   problem?: ProblemView | null;
+  /** Bumped whenever the learner profile changes (a game or problem ends, a tag): refetch GET /api/profile. */
+  profileVersion: number;
+  /** The browser actions the server accepts right now (the same checks POST /api/action enforces). */
+  allowed: ClientAction["type"][];
+}
+
+/** POST /api/action and POST /api/tutor. */
+export interface ActionResponse {
+  ok: boolean;
+  view?: GameView;
+  error?: string;
 }
 
 export interface ProblemView {
@@ -180,7 +195,7 @@ export type TutorCommand =
   | { type: "rethink"; text: string; momentId?: string }
   /** Draw a variation as numbered ghost stones. Moves alternate starting with `start` (default: the mover of the moment). */
   | { type: "show"; moves: Gtp[]; start?: Color; label?: string }
-  | { type: "mark"; points: Gtp[]; kind?: "circle" | "triangle" | "square" | "x"; text?: string }
+  | { type: "mark"; points: Gtp[]; kind?: MarkKind; text?: string }
   | { type: "clear" }
   /** End the pause and let play continue. */
   | { type: "resume" }
@@ -196,12 +211,14 @@ export type TutorCommand =
 
 export type TutorEvent =
   | { seq: number; ts: number; type: "game_start"; gameId: string; settings: GameSettings }
-  | { seq: number; ts: number; type: "move"; gameId: string; record: MoveRecord; by: "human" | "bot" }
+  | { seq: number; ts: number; type: "move"; gameId: string; size: number; record: MoveRecord; by: "human" | "bot" }
   | {
       seq: number;
       ts: number;
       type: "teaching_moment";
       gameId: string;
+      /** Board size, for naming the record's point in GTP. */
+      size: number;
       /** "waiting" when live. A replay (reconnect, fresh watch) carries the moment's state at replay time. */
       moment: TeachingMoment;
       record: MoveRecord;
@@ -212,7 +229,7 @@ export type TutorEvent =
     }
   /** `problemId` is set when the learner wrote while a practice problem was on the board (the message is about it). */
   | { seq: number; ts: number; type: "user_message"; text: string; momentId?: string; gameId: string | null; problemId?: string }
-  | { seq: number; ts: number; type: "hint_request"; text?: string; gameId: string; board: string; toPlay: Color }
+  | { seq: number; ts: number; type: "hint_request"; text?: string; gameId: string; size: number; board: string; toPlay: Color }
   | { seq: number; ts: number; type: "fallback"; momentId: string }
   /** Moves were taken back (browser Try again, or the tutor's rethink). `moves` is how many remain. */
   | { seq: number; ts: number; type: "undo"; gameId: string; moves: number; toPlay: Color; by: "human" | "tutor" }
@@ -280,19 +297,32 @@ export interface RatingChange {
   nextHandicap: number;
 }
 
+/** games/<id>.json, as GET /api/game/:id returns it. */
+export interface SavedGame {
+  id: string;
+  settings: GameSettings;
+  createdAt: number;
+  updatedAt: number;
+  moves: MoveRecord[];
+  result: GameResult | null;
+  summary: GameSummary | null;
+  /** Chat messages from this game. */
+  chat: ChatMessage[];
+  /** Mistake tags by move number, set with `tutor tag`. */
+  tags: Record<number, { category: MistakeCategory; note?: string }>;
+  /** Heuristic categories by move number, worked out when a mistake's eval arrives. Tags win over these. */
+  heuristics?: Record<number, MistakeCategory>;
+  /** The teaching moment as of the last save, so a restart can tell an open one from a dismissed one. */
+  moment?: TeachingMoment | null;
+}
+
 // ---------------------------------------------------------------------------
 // Learner profile (data/profile.json)
 // ---------------------------------------------------------------------------
 
-export type MistakeCategory =
-  | "life_and_death"
-  | "capturing_race"
-  | "opening"
-  | "direction"
-  | "shape"
-  | "endgame"
-  | "tactics"
-  | "other";
+/** Mistake categories, in the order the tutor CLI's help lists them. */
+export const MISTAKE_CATEGORIES = ["life_and_death", "capturing_race", "opening", "direction", "shape", "endgame", "tactics", "other"] as const;
+export type MistakeCategory = (typeof MISTAKE_CATEGORIES)[number];
 
 export interface Profile {
   /** Rank the bot plays at next game (human-SL profile string, e.g. "18k"). */

@@ -1,16 +1,18 @@
 // GameController: the current game, turns, bot replies, per-move evals, teaching moments with the
 // tutor wait and KataGo fallback, the chat log, and the GameView / TutorEvents the rest of the
-// server publishes. It knows nothing about HTTP or KataGo's process; the engine is injected.
+// server publishes. Practice problems run in a PracticeSession (practice.ts) while the game waits
+// underneath. It knows nothing about HTTP or KataGo's process; the engine is injected.
 //
 // Every async engine call captures `gen` (bumped by new game, undo and game end) and the move
 // count; a reply that no longer matches is dropped, so late answers never touch a newer state.
 
 import { randomBytes } from "node:crypto";
-import { GoGame, emptyBoard, scoreArea, deadStonesFromOwnership, toAscii, writeSgf, type IllegalReason } from "../engine/index.ts";
-import { toGtp, tryFromGtp } from "../shared/coords.ts";
+import { GoGame, deadStonesFromOwnership, emptyBoard, opponent, scoreArea, toAscii, writeSgf } from "../engine/index.ts";
+import { allowedActions, retryBlocked, type ActionState } from "../shared/allowed.ts";
+import { moveGtp, movePoint, samePoint, toGtp, tryFromGtp } from "../shared/coords.ts";
 import { normalizeBotRank } from "../shared/rank.ts";
+import { colorName, formatScore, round1 } from "../shared/text.ts";
 import type {
-  Board,
   ChatMessage,
   ClientAction,
   Color,
@@ -25,53 +27,28 @@ import type {
   MoveRecord,
   Overlay,
   Point,
-  ProblemAttempt,
   Profile,
+  SavedGame,
   TeachingMoment,
   TutorCommand,
-  TutorEvent,
 } from "../shared/types.ts";
-import { TRUSTED_CANDIDATE_VISITS, moveEvalFrom, type Analysis, type AnalyzeOptions, type Engine, type Position } from "./katago.ts";
 import {
-  ANSWER_MARGIN,
-  DEEP_VISITS,
-  MAX_ATTEMPTS,
-  addProblems,
-  candidatesFromAnalysis,
-  candidatesThin,
-  nextProblemId,
-  pickNextProblem,
-  problemFromMistake,
-  problemGame,
-  problemPosition,
-  promptFor,
-  resultOf,
-  schedule,
-  stonesOf,
-  type MistakeSnapshot,
-  type StoredProblem,
-} from "./problems.ts";
+  ILLEGAL_TEXT,
+  PV_STONES,
+  UserError,
+  alternatingStones,
+  lineStones,
+  markPoints,
+  plural,
+  systemClock,
+  type Clock,
+  type TutorEventInput,
+} from "./common.ts";
+import { moveEvalFrom, type Analysis, type Engine, type Position } from "./katago.ts";
+import { PracticeSession, type PracticeDeps } from "./practice.ts";
+import { generateProblems, pickNextProblem, promptFor, resultOf, schedule, type StoredProblem } from "./problems.ts";
 import { applyGame, applyProblemResult, applyTag, classifyMistake, recommendFocus } from "./profile.ts";
-import type { SavedGame, Store } from "./store.ts";
-
-/** An error whose message is meant for the person (or tutor) who sent the request. */
-export class UserError extends Error {}
-
-export interface Clock {
-  now(): number;
-  setTimeout(fn: () => void, ms: number): unknown;
-  clearTimeout(handle: unknown): void;
-}
-
-export const systemClock: Clock = {
-  now: () => Date.now(),
-  setTimeout: (fn, ms) => setTimeout(fn, ms),
-  clearTimeout: (handle) => clearTimeout(handle as ReturnType<typeof setTimeout>),
-};
-
-type DistributiveOmit<T, K extends PropertyKey> = T extends unknown ? Omit<T, K> : never;
-/** A TutorEvent before the bridge stamps `seq` and `ts`. */
-export type TutorEventInput = DistributiveOmit<TutorEvent, "seq" | "ts">;
+import type { Store } from "./store.ts";
 
 export type GameEngine = Pick<Engine, "analyze" | "botMove"> & Partial<Pick<Engine, "concurrency">>;
 export type EngineState = "starting" | "ready" | "failed";
@@ -93,74 +70,15 @@ export interface ControllerOptions {
   log?: (msg: string) => void;
 }
 
-/** The practice problem on the board in problem mode. The game, if any, waits underneath. */
-interface Practice {
-  problem: StoredProblem;
-  /** The rules engine at the problem position (it never changes; attempts are checked on copies). */
-  game: GoGame;
-  /** The problem's box when it started. */
-  box: number;
-  attempts: number;
-  solved: boolean;
-  /** Solved or out of attempts: the answer is shown and the board is locked. */
-  revealed: boolean;
-  /** An attempt is with KataGo. */
-  checking: boolean;
-  lastAttempt?: ProblemAttempt;
-  answer?: { move: Gtp; pv: Gtp[] };
-  overlay: Overlay | null;
-  /** Analyses of the problem position (key "") and after each attempt (key = the move). */
-  analyses: Map<string, Promise<Analysis>>;
-}
-
 export const DEFAULT_SETTINGS: Omit<GameSettings, "botRank"> = { size: 9, komi: 7, humanColor: "B", handicap: 0 };
 const CHAT_LIMIT = 200;
 const VIEW_CHAT_LIMIT = 100;
-const FALLBACK_PV_LENGTH = 6;
 const BOT_RETRIES = 3;
 const DEFAULT_PROBLEM_VISITS = 600;
-/** Moves of the follow-up drawn after a correct answer: the answer, the opponent's best reply, the next move. */
-const ANSWER_LINE_LENGTH = 3;
 /** Komi when the profile gives the learner handicap stones. */
 const HANDICAP_KOMI = 0.5;
-
-const ILLEGAL_TEXT: Record<IllegalReason, string> = {
-  occupied: "That point is already taken.",
-  suicide: "That move would leave your stones without liberties (suicide is not allowed).",
-  ko: "That move would repeat an earlier position (ko). Play elsewhere first.",
-  not_your_turn: "It's not your turn.",
-  game_over: "The game is over.",
-  off_board: "That point is off the board.",
-};
-
-const other = (c: Color): Color => (c === "B" ? "W" : "B");
-const round1 = (n: number) => Math.round(n * 10) / 10;
-
-function moveGtp(move: Move, size: number): Gtp {
-  return "pass" in move ? "pass" : toGtp(move.point, size);
-}
-
-/** KataGo searched `move` well enough in `analysis` to judge it within that one search. */
-function searchedWell(analysis: Analysis, move: Gtp): boolean {
-  return analysis.moveInfos.some((m) => m.move === move && m.visits >= TRUSTED_CANDIDATE_VISITS);
-}
-
-/** Some empty point is illegal only because of ko (superko): the position depends on its history. */
-function hasKoBan(game: GoGame): boolean {
-  return game.board.some((row, y) => row.some((cell, x) => cell === null && game.illegalReason({ x, y }) === "ko"));
-}
-
-function plural(n: number, word: string): string {
-  return `${n} ${word}${n === 1 ? "" : "s"}`;
-}
-
-export function formatScore(result: GameResult, humanColor?: Color): string {
-  const who = (c: Color) => (c === "B" ? "Black" : "White") + (humanColor ? (c === humanColor ? " (you)" : " (bot)") : "");
-  if (result.reason === "abandon") return "game abandoned";
-  if (!result.winner) return "a draw";
-  if (result.reason === "resign") return `${who(result.winner)} wins by resignation`;
-  return `${who(result.winner)} wins by ${Math.abs(result.margin)} points`;
-}
+/** Analyses kept: the recent positions, which cover an open moment and a Try again. */
+const ANALYSIS_CACHE_SIZE = 16;
 
 /** Points a pass may cost the bot, in KataGo's judgment, for it to answer a pass with a pass. */
 export const PASS_TOLERANCE = 1.5;
@@ -181,13 +99,15 @@ export class GameController {
   private readonly botDelayMs: number;
   private readonly botRetryMs: number;
   private readonly analysisVisits: number | undefined;
-  private readonly problemVisits: number;
   private readonly log: (msg: string) => void;
+  private readonly practiceDeps: PracticeDeps;
 
   private readonly eventListeners: ((e: TutorEventInput) => void)[] = [];
   private readonly changeListeners: (() => void)[] = [];
 
   private profile: Profile;
+  /** Bumped by every profile change, so the browser knows to fetch it again. */
+  private profileVersion = 0;
   private game: GoGame | null = null;
   private gameId: string | null = null;
   private settings: GameSettings | null = null;
@@ -199,18 +119,18 @@ export class GameController {
   private overlay: Overlay | null = null;
   private chat: ChatMessage[] = [];
   private tags: SavedGame["tags"] = {};
-  /** Heuristic mistake categories by move number, from the eval of each mistake (refined with ownership). */
+  /** Heuristic mistake categories by move number, from the eval of each mistake. */
   private heuristics: Record<number, MistakeCategory> = {};
   private tutorAttached = false;
   private engineState: EngineState = "starting";
   /** Problem mode: the problem on the board. */
-  private practice: Practice | null = null;
+  private practice: PracticeSession | null = null;
   /** The problem shown last, so Next problem moves on to a different one. */
   private lastProblemId: string | undefined;
 
   /** Bumped whenever a pending engine reply could become stale. */
   private gen = 0;
-  /** Engine calls the human is waiting on (move eval, bot move, scoring, hint). */
+  /** Engine calls the human is waiting on (move eval, bot move, scoring, hint, problem check). */
   private busy = 0;
   /** `gen` for which a bot move is in flight, if any. */
   private botFor: number | null = null;
@@ -218,12 +138,10 @@ export class GameController {
   /** The human move whose evaluation is in flight. The bot waits for it, so a moment can't be skipped. */
   private evaluating: MoveRecord | null = null;
   private momentTimer: unknown = null;
-  /** A mistake evaluated while the learner was on a practice problem: its moment opens on Back to playing. */
-  private deferredMoment: MoveRecord | null = null;
-  /** The fallback came due while the learner was on a practice problem: it is applied on Back to playing. */
-  private fallbackDeferred = false;
-  /** Analyses by position (moves as a GTP list), and whether they include ownership. */
-  private readonly analyses = new Map<string, { pending: Promise<Analysis>; ownership: boolean }>();
+  /** Mistakes whose teaching moment has opened (or was dismissed before a restart). */
+  private readonly momentShown = new WeakSet<MoveRecord>();
+  /** Analyses by position (moves as a GTP list), least recently used first. */
+  private readonly analyses = new Map<string, Promise<Analysis>>();
   private nextChatId = 1;
   /** A save is scheduled for the end of this tick. */
   private saveQueued = false;
@@ -236,9 +154,23 @@ export class GameController {
     this.botDelayMs = opts.botDelayMs ?? 500;
     this.botRetryMs = opts.botRetryMs ?? 2000;
     this.analysisVisits = opts.analysisVisits;
-    this.problemVisits = opts.problemVisits ?? DEFAULT_PROBLEM_VISITS;
     this.log = opts.log ?? (() => {});
     this.profile = this.store.loadProfile();
+    this.practiceDeps = {
+      engine: this.engine,
+      problemVisits: opts.problemVisits ?? DEFAULT_PROBLEM_VISITS,
+      engineNotReady: () => (this.engineState === "ready" ? null : this.engineNotReadyText()),
+      system: (text) => this.system(text),
+      say: (text, momentId) => {
+        this.addChat("tutor", text, momentId);
+        this.changed();
+      },
+      emit: (e) => this.emit(e),
+      changed: () => this.changed(),
+      busyWhile: (p) => this.busyWhile(p),
+      addAnswer: (id, move) => this.addProblemAnswer(id, move),
+      recordResult: (problem, solved, attempts) => this.recordProblemResult(problem, solved, attempts),
+    };
   }
 
   onEvent(fn: (e: TutorEventInput) => void): void {
@@ -252,7 +184,14 @@ export class GameController {
   // --- view ------------------------------------------------------------------
 
   view(): GameView {
-    if (this.practice) return this.problemView(this.practice);
+    const common = {
+      chat: this.chat.slice(-VIEW_CHAT_LIMIT),
+      tutorAttached: this.tutorAttached,
+      engineBusy: this.engineState !== "ready" || this.busy > 0,
+      profileVersion: this.profileVersion,
+      allowed: this.allowed(),
+    };
+    if (this.practice) return this.practice.view(common, this.settings?.botRank ?? this.profile.botRank);
     const game = this.game;
     return {
       gameId: this.gameId,
@@ -266,9 +205,7 @@ export class GameController {
       result: this.result,
       moment: this.moment ? { ...this.moment } : null,
       overlay: this.overlay,
-      chat: this.chat.slice(-VIEW_CHAT_LIMIT),
-      tutorAttached: this.tutorAttached,
-      engineBusy: this.engineState !== "ready" || this.busy > 0,
+      ...common,
       problem: null,
     };
   }
@@ -282,16 +219,40 @@ export class GameController {
     return this.profile;
   }
 
+  /** The browser actions handleAction accepts right now: the same checks it makes (src/shared/allowed.ts). */
+  private allowed(): ClientAction["type"][] {
+    return allowedActions(this.actionState());
+  }
+
+  /** What the shared allowed-actions rules read of the controller. */
+  private actionState(): ActionState {
+    const { game, settings } = this;
+    return {
+      mode: this.practice ? "problem" : game ? "game" : "idle",
+      status: this.status,
+      finished: this.result !== null,
+      humanColor: game && settings ? settings.humanColor : null,
+      toPlay: game ? game.toPlay : "B",
+      moves: game ? game.moves : [],
+      moment: this.moment,
+      engineReady: this.engineState === "ready",
+      tutorAttached: this.tutorAttached,
+      problem: this.practice ? this.practice.actionState : null,
+    };
+  }
+
   // --- wiring from the bridge / index ------------------------------------------
 
   setTutorAttached(attached: boolean): void {
     if (attached === this.tutorAttached) return;
     this.tutorAttached = attached;
-    // Nobody is left to answer a waiting moment.
-    if (!attached && this.moment?.state === "waiting") this.applyFallback();
-    // A tutor is back while the fallback waits under a practice problem: the moment is theirs to
-    // answer again, with a fresh wait, instead of KataGo's answer on Back to playing.
-    else if (attached && this.fallbackDeferred && this.moment?.state === "waiting") this.waitForTutor();
+    // Nobody is left to answer a waiting moment: its wait is off (KataGo answers, or a tutor who
+    // comes back gets a fresh one).
+    if (!attached && this.moment?.state === "waiting") {
+      this.cancelMomentTimer();
+      this.setMomentState("waiting");
+    }
+    this.settleWaitingMoment();
     this.changed();
   }
 
@@ -306,20 +267,30 @@ export class GameController {
   }
 
   /**
-   * After a restore or an engine (re)start, finish what the last move still needs: score a game
-   * that ended, evaluate a human move that never got its eval, or let the bot reply.
+   * Do what the game's state calls for next, after a restore, KataGo becoming ready, a mistake's
+   * eval or Back to playing: settle a waiting moment whose wait isn't running, open the moment of a
+   * mistake that has none, score a game that ended, evaluate a human move that never got its eval,
+   * or let the bot reply. While a practice problem is on the board the game waits.
    */
   private resumeTurn(): void {
     const { game, settings } = this;
-    if (!game || !settings || this.result || this.engineState !== "ready") return;
+    if (!game || !settings || this.result) return;
+    if (this.settleWaitingMoment() || this.practice) return;
+    const last = game.lastMove;
+    const human = last && last.move.color === settings.humanColor ? last : null;
+    const loss = human?.eval?.pointLoss;
+    if (human && loss !== undefined && loss >= this.profile.mistakeThreshold && !game.isOver && !this.momentShown.has(human)) {
+      this.startMoment(human);
+      return;
+    }
+    if (this.engineState !== "ready") return;
     if (game.isOver) {
       void this.finishByScore();
       return;
     }
     if (this.status !== "playing") return;
-    const last = game.lastMove;
-    if (last && last.move.color === settings.humanColor && !last.eval && !this.evaluating) {
-      void this.evaluateHumanMove(last);
+    if (human && !human.eval && !this.evaluating) {
+      void this.evaluateHumanMove(human);
       return;
     }
     void this.prefetch();
@@ -352,16 +323,10 @@ export class GameController {
     const maxChatId = Math.max(0, ...this.chat.map((m) => Number(/^c(\d+)$/.exec(m.id)?.[1] ?? 0)));
     this.nextChatId = Math.max(this.nextChatId, maxChatId + 1);
     this.system(`Picked up where you left off: game ${saved.id}, move ${game.moves.length}.`);
-
-    // A mistake the learner hadn't dealt with yet: open its teaching moment again.
+    // A mistake the learner dismissed stays dismissed; one they hadn't dealt with opens again.
     const last = game.lastMove;
-    const evaluation = last?.eval;
-    const dismissed = saved.moment?.moveNumber === last?.number && saved.moment?.state === "resolved";
-    if (last && evaluation && last.move.color === saved.settings.humanColor && !game.isOver && !dismissed && evaluation.pointLoss >= this.profile.mistakeThreshold) {
-      this.startMoment(last);
-    } else {
-      this.resumeTurn();
-    }
+    if (last && saved.moment?.moveNumber === last.number && saved.moment.state === "resolved") this.momentShown.add(last);
+    this.resumeTurn();
     this.changed();
     return true;
   }
@@ -369,86 +334,38 @@ export class GameController {
   // --- browser actions -------------------------------------------------------
 
   async handleAction(action: ClientAction): Promise<void> {
-    // In problem mode the game waits underneath: only a stone on the board counts as an answer.
-    const practicing = !!this.practice;
     switch (action.type) {
       case "new_game":
         return this.newGame(action.settings);
-      case "play":
-        return practicing ? this.problemPlay(action.point) : this.play(action.point);
-      case "pass":
-        if (practicing) throw new UserError("In a problem, answer by playing a stone on the board.");
-        return this.play(null);
-      case "resign":
-        if (practicing) throw new UserError("You're on a practice problem. Press Back to playing to return to your game first.");
-        return this.resign();
-      case "continue":
-        if (practicing) return; // Enter on the problem screen: nothing to continue
-        return this.continueGame();
-      case "retry":
-        if (practicing) throw new UserError("Try again is for games. In a problem, just play another move while you have attempts left.");
-        return this.retry(null);
       case "chat":
         return this.userChat(action.text);
-      case "ask_tutor":
-        if (practicing) throw new UserError("Hints are for games. In a problem, ask your tutor in the chat.");
-        return this.hint(action.text);
       case "next_problem":
         return this.startProblem();
       case "leave_problem":
         return this.leaveProblem();
+    }
+    // In problem mode the game waits underneath: the problem answers the game's actions.
+    if (this.practice) return this.practice.handleAction(action);
+    switch (action.type) {
+      case "play":
+        return this.play(action.point);
+      case "pass":
+        return this.play(null);
+      case "resign":
+        return this.resign();
+      case "continue":
+        return this.continueGame();
+      case "retry":
+        return this.retry(null);
+      case "ask_tutor":
+        return this.hint(action.text);
     }
   }
 
   // --- tutor commands -----------------------------------------------------------
 
   async handleTutor(cmd: TutorCommand): Promise<void> {
-    const practice = this.practice;
     switch (cmd.type) {
-      case "say":
-        if (practice) {
-          this.addChat("tutor", cmd.text, cmd.momentId);
-          return this.changed();
-        }
-        this.engage(cmd.momentId);
-        this.addChat("tutor", cmd.text, cmd.momentId ?? this.activeMomentId());
-        return this.changed();
-      case "rethink": {
-        if (practice) throw new UserError("The learner is on a practice problem; rethink is for games. Use say, show or mark.");
-        const moment = this.rethinkMoment(cmd.momentId);
-        this.engage(moment.id);
-        this.retry(cmd.text, moment.id);
-        return;
-      }
-      // Validate the drawing before engaging, so a typo doesn't cancel the fallback.
-      case "show": {
-        if (practice) {
-          practice.overlay = { ...practice.overlay, variation: this.problemVariation(practice, cmd.moves, cmd.start, cmd.label) };
-          return this.changed();
-        }
-        const variation = this.variationFrom(cmd.moves, cmd.start, cmd.label);
-        this.engage();
-        this.overlay = { ...this.overlay, variation };
-        return this.changed();
-      }
-      case "mark": {
-        if (practice) {
-          const marks = this.markPoints(cmd.points, practice.problem.size, cmd.kind ?? "circle", cmd.text);
-          practice.overlay = { ...practice.overlay, marks: [...(practice.overlay?.marks ?? []), ...marks] };
-          return this.changed();
-        }
-        const marks = this.marksFrom(cmd.points, cmd.kind ?? "circle", cmd.text);
-        this.engage();
-        this.overlay = { ...this.overlay, marks: [...(this.overlay?.marks ?? []), ...marks] };
-        return this.changed();
-      }
-      case "clear":
-        if (practice) practice.overlay = null;
-        else this.overlay = null;
-        return this.changed();
-      case "resume":
-        if (practice) return; // the game stays paused underneath until the learner goes back to it
-        return this.continueGame();
       case "claim":
         return this.claim(cmd.momentId);
       case "new_game":
@@ -457,7 +374,50 @@ export class GameController {
         return this.startProblem(cmd.problemId);
       case "tag":
         return this.tag(cmd.gameId, cmd.moveNumber, cmd.category, cmd.note);
+      // Drawings go on the problem in problem mode, else on the game. They are checked before the
+      // tutor engages a moment, so a typo doesn't cancel the fallback.
+      case "show": {
+        const variation = this.practice ? this.practice.variation(cmd.moves, cmd.start, cmd.label) : this.variationFrom(cmd.moves, cmd.start, cmd.label);
+        if (!this.practice) this.engage();
+        this.activeOverlay = { ...this.activeOverlay, variation };
+        return this.changed();
+      }
+      case "mark": {
+        const size = this.practice ? this.practice.problem.size : this.requireGame().settings.size;
+        const marks = markPoints(cmd.points, size, cmd.kind ?? "circle", cmd.text);
+        if (!this.practice) this.engage();
+        this.activeOverlay = { ...this.activeOverlay, marks: [...(this.activeOverlay?.marks ?? []), ...marks] };
+        return this.changed();
+      }
+      case "clear":
+        this.activeOverlay = null;
+        return this.changed();
     }
+    if (this.practice) return this.practice.handleTutor(cmd);
+    switch (cmd.type) {
+      case "say":
+        this.engage(cmd.momentId);
+        this.addChat("tutor", cmd.text, cmd.momentId ?? this.activeMoment()?.id);
+        return this.changed();
+      case "rethink": {
+        const moment = this.rethinkMoment(cmd.momentId);
+        this.engage(moment.id);
+        this.retry(cmd.text, moment.id);
+        return;
+      }
+      case "resume":
+        return this.continueGame();
+    }
+  }
+
+  /** The overlay on the board: the problem's in problem mode, else the game's. */
+  private get activeOverlay(): Overlay | null {
+    return this.practice ? this.practice.overlay : this.overlay;
+  }
+
+  private set activeOverlay(overlay: Overlay | null) {
+    if (this.practice) this.practice.overlay = overlay;
+    else this.overlay = overlay;
   }
 
   // --- game lifecycle ----------------------------------------------------------
@@ -484,17 +444,16 @@ export class GameController {
         ? ` The handicap stands in for a bot weaker than ${settings.botRank}, the weakest one KataGo has; it goes away as your rating rises.`
         : "";
     this.system(
-      `New game: ${settings.size}×${settings.size}, you play ${settings.humanColor === "B" ? "Black" : "White"} against a ${settings.botRank} bot (komi ${settings.komi}${handicap}).${why}`,
+      `New game: ${settings.size}×${settings.size}, you play ${colorName(settings.humanColor)} against a ${settings.botRank} bot (komi ${settings.komi}${handicap}).${why}`,
     );
-    this.save();
+    this.saveNow(); // on disk at once, so `last` finds it and the next game's id can't collide
     if (this.engineState === "ready") void this.prefetch();
     this.maybeBotMove();
     this.changed();
   }
 
   private resetGameState(): void {
-    this.gen++;
-    this.cancelMomentTimer();
+    this.invalidatePending();
     this.analyses.clear();
     this.game = null;
     this.result = null;
@@ -505,9 +464,13 @@ export class GameController {
     this.heuristics = {};
     this.status = "playing";
     this.botFailures = 0;
+  }
+
+  /** Drop what is in flight for the current position: stale engine replies, the eval the bot waits for, the moment's wait. */
+  private invalidatePending(): void {
+    this.gen++;
     this.evaluating = null;
-    this.deferredMoment = null;
-    this.fallbackDeferred = false;
+    this.cancelMomentTimer();
   }
 
   /** A new game's settings, and whether its handicap came from the profile (the learner is below the weakest bot). */
@@ -564,10 +527,10 @@ export class GameController {
     const record = result.record;
 
     // Playing again after a rethink ends that moment; any leftover overlay is about the old position.
-    if (this.moment) this.moment = { ...this.moment, state: "resolved" };
+    if (this.moment) this.setMomentState("resolved");
     this.cancelMomentTimer();
     this.overlay = null;
-    this.emit({ type: "move", gameId: this.gameId!, record, by: "human" });
+    this.emit({ type: "move", gameId: this.gameId!, size: game.size, record, by: "human" });
     this.save();
 
     if (game.isOver) {
@@ -579,27 +542,25 @@ export class GameController {
     this.changed();
   }
 
+  /**
+   * KataGo's verdict on a human move, from the analyses of the positions before and after it
+   * (with ownership, so a mistake is categorized at once). A mistake opens a teaching moment;
+   * otherwise the bot replies.
+   */
   private async evaluateHumanMove(record: MoveRecord): Promise<void> {
     const gen = this.gen;
     const game = this.game!;
     const movesBefore = game.moves.slice(0, record.number - 1).map((r) => r.move);
     this.evaluating = record;
-    this.busy++;
-    this.changed();
     try {
-      const [before, after] = await Promise.all([
-        this.analysisOf(movesBefore),
-        this.analysisOf([...movesBefore, record.move]),
-      ]);
+      const [before, after] = await this.busyWhile(Promise.all([this.analysisOf(movesBefore), this.analysisOf([...movesBefore, record.move])]));
       if (!this.isCurrent(gen, record)) return;
       record.eval = moveEvalFrom(before, after, moveGtp(record.move, game.size));
       if (record.eval.pointLoss >= this.profile.mistakeThreshold) {
         try {
-          // A first category without ownership; KataGo's ownership refines it in the background.
           this.heuristics[record.number] = this.classify(record, before, after);
-          void this.refineCategory(record, movesBefore, gen);
         } catch (err) {
-          // Only the category is lost; game end classifies the move again without ownership.
+          // Only the category is lost; game end classifies the move again.
           this.log(`classifying move ${record.number} failed: ${(err as Error).message}`);
         }
       }
@@ -607,36 +568,14 @@ export class GameController {
       if (!this.isCurrent(gen, record)) return;
       this.system(`KataGo couldn't evaluate that move (${(err as Error).message}). Playing on without feedback.`);
     } finally {
-      this.busy--;
       if (this.evaluating === record) this.evaluating = null;
-      this.changed();
     }
     this.save();
-    const evaluation = record.eval;
-    if (evaluation && evaluation.pointLoss >= this.profile.mistakeThreshold) {
-      // On a practice problem the moment waits until the learner goes back to the game.
-      if (this.practice) this.deferredMoment = record;
-      else this.startMoment(record);
-    } else {
-      this.maybeBotMove();
-    }
+    const loss = record.eval?.pointLoss;
+    // The moment opens now, or once the learner is back from a practice problem.
+    if (loss !== undefined && loss >= this.profile.mistakeThreshold) this.resumeTurn();
+    else this.maybeBotMove();
     this.changed();
-  }
-
-  /**
-   * Classify a mistake again with KataGo's ownership before and after it, which spots groups that
-   * live or die. It doesn't hold up the teaching moment; a game that ends first keeps the category
-   * from the eval.
-   */
-  private async refineCategory(record: MoveRecord, movesBefore: Move[], gen: number): Promise<void> {
-    try {
-      const [before, after] = await Promise.all([this.analysisOf(movesBefore, true), this.analysisOf([...movesBefore, record.move], true)]);
-      if (this.gen !== gen || this.game?.moves[record.number - 1] !== record) return;
-      this.heuristics[record.number] = this.classify(record, before, after);
-      this.save();
-    } catch (err) {
-      this.log(`classifying move ${record.number} with ownership failed: ${(err as Error).message}`);
-    }
   }
 
   private isCurrent(gen: number, record?: MoveRecord): boolean {
@@ -648,28 +587,44 @@ export class GameController {
   private startMoment(record: MoveRecord): void {
     const game = this.game!;
     if (this.result) return;
-    const before = this.positionBefore(record);
-    const waiting = this.tutorAttached;
-    const now = this.clock.now();
+    this.momentShown.add(record);
+    const before = game.before(record.number);
     this.moment = {
       id: `${record.number}-${randomBytes(2).toString("hex")}`,
       moveNumber: record.number,
       pointLoss: round1(record.eval!.pointLoss),
       state: "waiting",
-      ...(waiting && { deadline: now + this.tutorTimeoutMs }),
+      ...(this.tutorAttached && { deadline: this.clock.now() + this.tutorTimeoutMs }),
     };
     this.status = "paused";
     this.emit({
       type: "teaching_moment",
       gameId: this.gameId!,
+      size: game.size,
       moment: { ...this.moment },
       record,
-      boardBefore: toAscii(before.board, before.last),
+      boardBefore: toAscii(before.board, movePoint(before.lastMove?.move)),
       boardAfter: toAscii(game.board, this.lastPoint()),
     });
     this.save();
-    if (waiting) this.waitForTutor();
-    else this.applyFallback();
+    this.settleWaitingMoment();
+  }
+
+  /**
+   * A waiting moment whose wait isn't running: it just opened, the tutor's time ran out, or the
+   * tutor left (or came back). An attached tutor gets a wait unless the time ran out; otherwise
+   * KataGo answers, except on a practice problem, where its "Press Continue" would land on the
+   * problem screen: there it waits for Back to playing. Returns whether there was such a moment.
+   * `timedOut` is set when the wait's own timer fired: that is the expiry, even if the clock reads
+   * a moment before the deadline (Node timers can fire a millisecond early).
+   */
+  private settleWaitingMoment(timedOut = false): boolean {
+    const m = this.moment;
+    if (m?.state !== "waiting" || this.momentTimer !== null) return false;
+    const expired = timedOut || (m.deadline !== undefined && m.deadline <= this.clock.now());
+    if (this.tutorAttached && !expired) this.waitForTutor();
+    else if (!this.practice) this.applyFallback();
+    return true;
   }
 
   /** Give the attached tutor `tutorTimeoutMs` to take the waiting moment before KataGo answers. */
@@ -677,15 +632,12 @@ export class GameController {
     const moment = this.moment;
     if (!moment) return;
     this.cancelMomentTimer();
-    this.fallbackDeferred = false;
-    this.moment = { ...moment, deadline: this.clock.now() + this.tutorTimeoutMs };
-    const id = moment.id;
+    this.setMomentState("waiting", this.clock.now() + this.tutorTimeoutMs);
     this.momentTimer = this.clock.setTimeout(() => {
       this.momentTimer = null;
-      if (this.moment?.id === id && this.moment.state === "waiting") {
-        this.applyFallback();
-        this.changed();
-      }
+      if (this.moment?.id !== moment.id) return;
+      this.settleWaitingMoment(true);
+      this.changed();
     }, this.tutorTimeoutMs);
   }
 
@@ -693,27 +645,18 @@ export class GameController {
   private applyFallback(): void {
     const moment = this.moment;
     const game = this.game;
-    if (!moment || !game || !this.settings) return;
+    if (!moment || !game) return;
     this.cancelMomentTimer();
-    if (this.practice) {
-      // Its "Press Continue" would land on the problem screen; it waits for Back to playing.
-      this.fallbackDeferred = true;
-      return;
-    }
-    this.fallbackDeferred = false;
-    const { deadline: _deadline, ...rest } = moment;
-    this.moment = { ...rest, state: "fallback" };
+    this.setMomentState("fallback");
     const record = game.moves[moment.moveNumber - 1];
     const evaluation = record?.eval;
     if (record && evaluation) {
-      const size = this.settings.size;
-      const played = moveGtp(record.move, size);
+      const played = moveGtp(record.move, game.size);
       // KataGo's line is an alternative to the move, so it is drawn on the board from before it,
       // with the move actually played marked so the learner can find it.
-      const moves = this.pvStones(evaluation.bestPv, record);
-      const playedPoint = "point" in record.move ? record.move.point : null;
-      const marks: NonNullable<Overlay["marks"]> =
-        playedPoint && !moves.some((m) => m.point.x === playedPoint.x && m.point.y === playedPoint.y) ? [{ point: playedPoint, kind: "x" }] : [];
+      const moves = lineStones(game.before(record.number), evaluation.bestPv, PV_STONES);
+      const playedPoint = movePoint(record.move);
+      const marks: NonNullable<Overlay["marks"]> = playedPoint && !moves.some((m) => samePoint(m.point, playedPoint)) ? [{ point: playedPoint, kind: "x" }] : [];
       this.overlay = moves.length
         ? { variation: { label: `KataGo's line instead of ${played}`, moves, fromMove: record.number }, ...(marks.length && { marks }) }
         : null;
@@ -730,24 +673,15 @@ export class GameController {
     this.emit({ type: "fallback", momentId: moment.id });
   }
 
-  /**
-   * Ghost stones for KataGo's line in the position before `record` (where its analysis comes from),
-   * played out by the rules so it stops at a pass or a move that isn't legal there.
-   */
-  private pvStones(pv: Gtp[], record: MoveRecord): { color: Color; point: Point }[] {
-    const replay = this.gameBefore(record.number);
-    const stones: { color: Color; point: Point }[] = [];
-    for (const gtp of pv.slice(0, FALLBACK_PV_LENGTH)) {
-      const point = tryFromGtp(gtp, replay.size);
-      const color = replay.toPlay;
-      if (!point || !replay.play({ color, point }).ok) break;
-      stones.push({ color, point });
-    }
-    return stones;
+  /** The moment's new state. Only a waiting moment has a deadline, and only when one is given. */
+  private setMomentState(state: TeachingMoment["state"], deadline?: number): void {
+    if (!this.moment) return;
+    const { deadline: _old, ...rest } = this.moment;
+    this.moment = { ...rest, state, ...(state === "waiting" && deadline !== undefined && { deadline }) };
   }
 
-  private activeMomentId(): string | undefined {
-    return this.moment && this.moment.state !== "resolved" ? this.moment.id : undefined;
+  private activeMoment(): TeachingMoment | null {
+    return this.moment && this.moment.state !== "resolved" ? this.moment : null;
   }
 
   /** A tutor command about the current moment: the tutor has it, so stop the fallback clock. */
@@ -756,13 +690,12 @@ export class GameController {
     if (!m || (momentId && momentId !== m.id)) return;
     if (m.state !== "waiting" && m.state !== "fallback") return;
     this.cancelMomentTimer();
-    const { deadline: _deadline, ...rest } = m;
-    this.moment = { ...rest, state: "tutor" };
+    this.setMomentState("tutor");
   }
 
   private claim(momentId: string): void {
-    const m = this.moment;
-    if (!m || m.state === "resolved") throw new UserError(`There is no open teaching moment to claim (asked for ${momentId}).`);
+    const m = this.activeMoment();
+    if (!m) throw new UserError(`There is no open teaching moment to claim (asked for ${momentId}).`);
     if (m.id !== momentId) throw new UserError(`Moment ${momentId} is not current; the open moment is ${m.id}.`);
     this.engage(momentId);
     this.changed();
@@ -779,7 +712,7 @@ export class GameController {
    */
   private continueGame(): void {
     if (this.status !== "paused") return;
-    if (this.moment && this.moment.state !== "resolved") this.moment = { ...this.moment, state: "resolved" };
+    if (this.activeMoment()) this.setMomentState("resolved");
     this.cancelMomentTimer();
     this.status = "playing";
     this.overlay = null;
@@ -791,8 +724,8 @@ export class GameController {
   /** The open moment a rethink may take back: its move must still be the last one played. */
   private rethinkMoment(momentId?: string): TeachingMoment {
     const { game } = this.requireGame();
-    const m = this.moment;
-    if (!m || m.state === "resolved" || this.result) {
+    const m = this.activeMoment();
+    if (!m || this.result) {
       throw new UserError("There is no open teaching moment to rethink. Use say to comment on other moves.");
     }
     if (momentId && momentId !== m.id) throw new UserError(`Moment ${momentId} is not current; the open moment is ${m.id}.`);
@@ -802,31 +735,41 @@ export class GameController {
     return m;
   }
 
+  /** Why Try again can't take a move back now, or null when it can. */
+  /** How many of the last moves Try again takes back (the human's last move and any reply), or why it can't. */
+  private movesToTakeBack(): number | string {
+    const { game, settings } = this;
+    switch (retryBlocked(this.actionState())) {
+      case "no_game":
+        return "No game in progress. Start a new game first.";
+      case "finished":
+        return ILLEGAL_TEXT.game_over;
+      case "taken_back":
+        return "That move is already taken back. Play a new one.";
+      case "no_move":
+        return "There is no move of yours to take back.";
+    }
+    const moves = game!.moves;
+    let lastHuman = moves.length - 1;
+    while (moves[lastHuman]!.move.color !== settings!.humanColor) lastHuman--;
+    return moves.length - lastHuman;
+  }
+
   /**
    * Take back the human's last move (and the bot's reply, if it came). From the browser's
    * Try again (text null) the moment is over; from the tutor's rethink the moment stays with the
    * tutor until the human plays again.
    */
   private retry(text: string | null, momentId?: string): void {
-    const { game, settings } = this.requireGame();
-    if (this.result) throw new UserError(ILLEGAL_TEXT.game_over);
-    const open = this.moment && this.moment.state !== "resolved" ? this.moment : null;
-    if (open && open.moveNumber > game.moves.length) throw new UserError("That move is already taken back. Play a new one.");
-    const moves = game.moves;
-    let lastHuman = moves.length - 1;
-    while (lastHuman >= 0 && moves[lastHuman]!.move.color !== settings.humanColor) lastHuman--;
-    if (lastHuman < 0) throw new UserError("There is no move of yours to take back.");
-    this.gen++;
-    this.evaluating = null;
-    this.deferredMoment = null;
-    this.fallbackDeferred = false;
-    this.cancelMomentTimer();
-    game.undo(moves.length - lastHuman);
+    const count = this.movesToTakeBack();
+    if (typeof count === "string") throw new UserError(count);
+    const { game } = this.requireGame();
+    this.invalidatePending();
+    game.undo(count);
     this.dropTagsAfter(game.moves.length);
     this.status = "playing";
     this.overlay = null;
-    if (this.moment) this.moment = { ...this.moment, state: text === null ? "resolved" : "tutor" };
-    if (this.moment?.state === "tutor") delete this.moment.deadline;
+    if (this.moment) this.setMomentState(text === null ? "resolved" : "tutor");
     this.emit({ type: "undo", gameId: this.gameId!, moves: game.moves.length, toPlay: game.toPlay, by: text === null ? "human" : "tutor" });
     if (text !== null) this.addChat("tutor", text, momentId);
     this.save();
@@ -838,15 +781,14 @@ export class GameController {
     for (const n of Object.keys(this.heuristics).map(Number)) if (n > moveCount) delete this.heuristics[n];
     const dropped = Object.keys(this.tags).map(Number).filter((n) => n > moveCount);
     if (dropped.length === 0) return;
-    const profile = this.store.loadProfile();
-    for (const n of dropped) {
-      const { category } = this.tags[n]!;
-      profile.mistakeCounts[category] = Math.max(0, profile.mistakeCounts[category] - 1);
-      delete this.tags[n];
-    }
-    profile.recentMistakes = profile.recentMistakes.filter((m) => m.gameId !== this.gameId || m.moveNumber <= moveCount);
-    this.store.saveProfile(profile);
-    this.profile = profile;
+    this.updateProfile((profile) => {
+      for (const n of dropped) {
+        const { category } = this.tags[n]!;
+        profile.mistakeCounts[category] = Math.max(0, profile.mistakeCounts[category] - 1);
+        delete this.tags[n];
+      }
+      profile.recentMistakes = profile.recentMistakes.filter((m) => m.gameId !== this.gameId || m.moveNumber <= moveCount);
+    });
   }
 
   // --- bot moves ---------------------------------------------------------------------
@@ -865,8 +807,6 @@ export class GameController {
     const gen = this.gen;
     const moveCount = game.moves.length;
     this.botFor = gen;
-    this.busy++;
-    this.changed();
     let gtp: Gtp | null = null;
     let failure: Error | null = null;
     try {
@@ -878,11 +818,10 @@ export class GameController {
         if (last && "pass" in last && passIsFine(await this.analysisOf(moves))) return "pass";
         return this.engine.botMove(this.position(moves), settings.botRank);
       };
-      [gtp] = await Promise.all([choose(), this.sleep(this.botDelayMs)]);
+      [gtp] = await this.busyWhile(Promise.all([choose(), this.sleep(this.botDelayMs)]));
     } catch (err) {
       failure = err as Error;
     } finally {
-      this.busy--;
       if (this.botFor === gen) this.botFor = null;
     }
     if (this.gen !== gen || this.game !== game || game.moves.length !== moveCount || this.status !== "playing" || this.practice) {
@@ -907,7 +846,7 @@ export class GameController {
   }
 
   private playBotMove(game: GoGame, settings: GameSettings, gtp: Gtp): void {
-    const color = other(settings.humanColor);
+    const color = opponent(settings.humanColor);
     let point = gtp === "pass" ? null : tryFromGtp(gtp, settings.size);
     if (point === undefined || (point && !game.isLegal(point, color))) {
       this.log(`bot chose an illegal move ${gtp}; passing instead`);
@@ -915,7 +854,7 @@ export class GameController {
     }
     const result = game.play(point ? { color, point } : { color, pass: true });
     if (!result.ok) return; // only possible if the game state changed under us, which gen rules out
-    this.emit({ type: "move", gameId: this.gameId!, record: result.record, by: "bot" });
+    this.emit({ type: "move", gameId: this.gameId!, size: game.size, record: result.record, by: "bot" });
     this.save();
     if (game.isOver) void this.finishByScore();
     else void this.prefetch();
@@ -931,10 +870,11 @@ export class GameController {
     if (game.toPlay !== settings.humanColor) {
       throw new UserError(this.status === "paused" ? "Press Continue or Try again first, then ask for a hint." : "Wait for the bot to move, then ask for a hint.");
     }
-    if (text?.trim()) this.addChat("user", text.trim(), this.activeMomentId());
+    if (text?.trim()) this.addChat("user", text.trim(), this.activeMoment()?.id);
     this.emit({
       type: "hint_request",
       gameId: this.gameId!,
+      size: game.size,
       board: toAscii(game.board, this.lastPoint()),
       toPlay: game.toPlay,
       ...(text?.trim() && { text: text.trim() }),
@@ -947,10 +887,8 @@ export class GameController {
     if (this.engineState !== "ready") throw new UserError(this.engineNotReadyText());
     const gen = this.gen;
     const moveCount = game.moves.length;
-    this.busy++;
-    this.changed();
     try {
-      const analysis = await this.analysisOf(game.moves.map((r) => r.move));
+      const analysis = await this.busyWhile(this.analysisOf(game.moves.map((r) => r.move)));
       if (!this.isCurrent(gen) || game.moves.length !== moveCount) return;
       const best = analysis.moveInfos[0]?.move ?? "pass";
       const point = best === "pass" ? null : tryFromGtp(best, settings.size);
@@ -962,9 +900,6 @@ export class GameController {
       }
     } catch (err) {
       if (this.isCurrent(gen)) this.system(`KataGo couldn't give a hint (${(err as Error).message}).`);
-    } finally {
-      this.busy--;
-      this.changed();
     }
   }
 
@@ -973,7 +908,7 @@ export class GameController {
     if (!trimmed) throw new UserError("Type a message first.");
     // On a practice problem the message is about the problem, not the game waiting underneath.
     const problemId = this.practice?.problem.id;
-    const momentId = problemId ? undefined : this.activeMomentId();
+    const momentId = problemId ? undefined : this.activeMoment()?.id;
     this.addChat("user", trimmed, momentId);
     this.emit({ type: "user_message", text: trimmed, gameId: this.gameId, ...(momentId && { momentId }), ...(problemId && { problemId }) });
     if (!this.tutorAttached) {
@@ -991,37 +926,12 @@ export class GameController {
    */
   private variationFrom(moves: Gtp[], start: Color | undefined, label: string | undefined): NonNullable<Overlay["variation"]> {
     const { game, settings } = this.requireGame();
-    if (moves.length === 0) throw new UserError("show needs at least one move.");
-    const mover = this.moment ? game.moves[this.moment.moveNumber - 1]?.move.color : undefined;
-    let color = start ?? mover ?? game.toPlay;
     const m = this.moment;
+    const mover = m ? game.moves[m.moveNumber - 1]?.move.color : undefined;
+    const color = start ?? mover ?? game.toPlay;
     const onBoard = m && m.state !== "resolved" && game.lastMove?.number === m.moveNumber;
     const fromMove = onBoard && color === mover ? m.moveNumber : undefined;
-    const stones: { color: Color; point: Point }[] = [];
-    for (const gtp of moves) {
-      const point = this.parsePoint(gtp, settings.size, true);
-      if (point) stones.push({ color, point });
-      color = other(color);
-    }
-    return { moves: stones, ...(label && { label }), ...(fromMove !== undefined && { fromMove }) };
-  }
-
-  private marksFrom(points: Gtp[], kind: "circle" | "triangle" | "square" | "x", text?: string): NonNullable<Overlay["marks"]> {
-    const { settings } = this.requireGame();
-    return this.markPoints(points, settings.size, kind, text);
-  }
-
-  private markPoints(points: Gtp[], size: number, kind: "circle" | "triangle" | "square" | "x", text?: string): NonNullable<Overlay["marks"]> {
-    if (points.length === 0) throw new UserError("mark needs at least one point.");
-    return points.map((gtp) => ({ point: this.parsePoint(gtp, size, false)!, kind, ...(text && { text }) }));
-  }
-
-  private parsePoint(gtp: Gtp, size: number, allowPass: boolean): Point | null {
-    const point = tryFromGtp(gtp, size);
-    if (point === undefined || (point === null && !allowPass)) {
-      throw new UserError(`"${gtp}" is not a point on a ${size}×${size} board (columns skip I, row 1 is the bottom).`);
-    }
-    return point;
+    return { moves: alternatingStones(moves, color, settings.size), ...(label && { label }), ...(fromMove !== undefined && { fromMove }) };
   }
 
   // --- game end ------------------------------------------------------------------------
@@ -1029,7 +939,7 @@ export class GameController {
   private resign(): void {
     const { settings } = this.requireGame();
     if (this.result) throw new UserError("The game is already over.");
-    this.finish({ winner: other(settings.humanColor), margin: 0, reason: "resign" });
+    this.finish({ winner: opponent(settings.humanColor), margin: 0, reason: "resign" });
   }
 
   private async finishByScore(): Promise<void> {
@@ -1040,16 +950,11 @@ export class GameController {
     // KataGo's Chinese rules give White one point per handicap stone.
     const komi = settings.komi + (settings.handicap >= 2 ? settings.handicap : 0);
     let dead: Point[] = [];
-    this.busy++;
-    this.changed();
     try {
-      const analysis = await this.analysisOf(game.moves.map((r) => r.move), true);
+      const analysis = await this.busyWhile(this.analysisOf(game.moves.map((r) => r.move)));
       if (analysis.ownership) dead = deadStonesFromOwnership(board, analysis.ownership);
     } catch (err) {
       if (this.isCurrent(gen)) this.system(`KataGo couldn't judge dead stones (${(err as Error).message}); counting every stone as alive.`);
-    } finally {
-      this.busy--;
-      this.changed();
     }
     if (!this.isCurrent(gen) || this.result) return;
     const score = scoreArea(board, komi, dead);
@@ -1058,111 +963,51 @@ export class GameController {
 
   private finish(result: GameResult, deadCount = 0): void {
     const settings = this.settings!;
-    this.gen++;
-    this.cancelMomentTimer();
-    this.deferredMoment = null;
-    this.fallbackDeferred = false;
+    this.invalidatePending();
     this.result = result;
     this.status = "finished";
     this.moment = null;
     this.overlay = null;
-    this.summary = this.buildSummary();
+    const summary = this.buildSummary();
+    this.summary = summary;
     // The game must still be saved and announced if the profile can't be updated.
     try {
-      this.summary.rating = this.updateProfileAfterGame(result, this.summary);
+      summary.rating = this.updateProfileAfterGame(result, summary);
     } catch (err) {
       this.log(`updating the profile after game ${this.gameId} failed: ${(err as Error).message}`);
     }
     const dead = deadCount ? ` (${plural(deadCount, "dead stone")} removed)` : "";
     this.system(`Game over: ${formatScore(result, settings.humanColor)}${dead}.`);
     this.saveNow();
-    this.emit({ type: "game_end", gameId: this.gameId!, result, summary: this.summary });
-    this.changed();
     const gameId = this.gameId!;
-    this.generateProblems(gameId, settings, this.game!.moves, this.summary).catch((err: unknown) =>
-      this.log(`making practice problems from ${gameId} failed: ${(err as Error).message}`),
-    );
+    this.emit({ type: "game_end", gameId, result, summary });
+    this.changed();
+    this.makeProblems(gameId, settings, this.game!.moves, summary);
   }
 
-  /**
-   * Turns each mistake of a finished game into a practice problem: the position before it, the
-   * learner to play, and KataGo's candidates within ANSWER_MARGIN of its best as the answers. A
-   * mistake whose stored candidates are thin is analyzed again, deeper, first. So is one where a ko
-   * ban applied: the problem position has no move history, so the immediate recapture is legal
-   * there and the game's candidates (a ko threat, say) no longer answer it; without that analysis
-   * there is no problem.
-   */
-  private async generateProblems(gameId: string, settings: GameSettings, moves: MoveRecord[], summary: GameSummary): Promise<void> {
-    const snapshots: MistakeSnapshot[] = [];
-    const koBanned = new Set<MistakeSnapshot>();
-    for (const m of summary.mistakes) {
-      const record = moves[m.moveNumber - 1];
-      const evaluation = record?.eval;
-      if (!record || !evaluation) continue;
-      let before: GoGame;
-      try {
-        before = GoGame.fromMoves(settings.size, settings.komi, settings.handicap, moves.slice(0, m.moveNumber - 1).map((r) => r.move));
-      } catch {
-        continue;
-      }
-      const snapshot: MistakeSnapshot = {
-        gameId,
-        moveNumber: m.moveNumber,
-        played: m.move,
-        pointLoss: evaluation.pointLoss,
-        category: m.category ?? "other",
-        size: settings.size,
-        komi: settings.komi,
-        board: before.board,
-        toPlay: record.move.color,
-        candidates: evaluation.candidates.map((c) => ({ move: c.move, lead: c.lead, visits: c.visits, pv: c.pv })),
-      };
-      snapshots.push(snapshot);
-      if (hasKoBan(before)) koBanned.add(snapshot);
-    }
-    const deepen = async (s: MistakeSnapshot): Promise<void> => {
-      const ko = koBanned.has(s);
-      if (this.engineState === "ready") {
-        try {
-          const position = problemPosition({ size: s.size, komi: s.komi, stones: stonesOf(s.board), toPlay: s.toPlay });
-          s.candidates = candidatesFromAnalysis(await this.engine.analyze(position, { maxVisits: DEEP_VISITS }));
-          return;
-        } catch (err) {
-          this.log(`deeper analysis for a problem from ${gameId} move ${s.moveNumber} failed: ${(err as Error).message}`);
+  /** In the background, each mistake of the finished game becomes a practice problem (problems.ts). */
+  private makeProblems(gameId: string, settings: GameSettings, moves: MoveRecord[], summary: GameSummary): void {
+    generateProblems(
+      { gameId, settings, moves, summary },
+      {
+        analyze: (position, opts) => (this.engineState === "ready" ? this.engine.analyze(position, opts) : null),
+        concurrency: this.engine.concurrency ?? 1,
+        now: () => this.clock.now(),
+        log: (msg) => this.log(msg),
+        // The current game's summary is the object `tag` updates; a saved game's lives on disk.
+        currentSummary: () => (gameId === this.gameId ? this.summary : this.store.loadGame(gameId)?.summary),
+        updateProblems: (change) => this.updateProblems(change),
+      },
+    ).then(
+      (added) => {
+        if (added.length === 0) return;
+        this.log(`practice problems from ${gameId}: ${added.map((p) => p.id).join(", ")}`);
+        if (this.gameId === gameId && !this.practice) {
+          this.system(`${added.length === 1 ? "One of your mistakes is" : `${added.length} of your mistakes are`} now a practice problem. Press Practice to try ${added.length === 1 ? "it" : "them"}.`);
         }
-      }
-      if (ko) s.candidates = []; // the game's answers belong to a position the problem can't show
-    };
-    // As many at once as KataGo runs, so they don't queue up ahead of the next game's analyses.
-    const queue = snapshots.filter((s) => koBanned.has(s) || candidatesThin(s.candidates));
-    const workers = Math.max(1, Math.min(queue.length, this.engine.concurrency ?? 1));
-    await Promise.all(
-      Array.from({ length: workers }, async () => {
-        for (let s = queue.shift(); s; s = queue.shift()) await deepen(s);
-      }),
+      },
+      (err: unknown) => this.log(`making practice problems from ${gameId} failed: ${(err as Error).message}`),
     );
-    try {
-      const problems = this.store.loadProblems();
-      const now = this.clock.now();
-      const fresh: StoredProblem[] = [];
-      // The tutor may have tagged a mistake while KataGo was busy: the problem takes the tag. The
-      // current game's summary is the object `tag` updates; a saved game's lives on disk.
-      const current = (gameId === this.gameId ? this.summary : this.store.loadGame(gameId)?.summary) ?? summary;
-      for (const s of snapshots) {
-        s.category = current.mistakes.find((m) => m.moveNumber === s.moveNumber)?.category ?? s.category;
-        const problem = problemFromMistake(s, nextProblemId([...problems, ...fresh]), now);
-        if (problem) fresh.push(problem);
-      }
-      const added = addProblems(problems, fresh);
-      if (added.length === 0) return;
-      this.store.saveProblems(problems);
-      this.log(`practice problems from ${gameId}: ${added.map((p) => p.id).join(", ")}`);
-      if (this.gameId === gameId && !this.practice) {
-        this.system(`${added.length === 1 ? "One of your mistakes is" : `${added.length} of your mistakes are`} now a practice problem. Press Practice to try ${added.length === 1 ? "it" : "them"}.`);
-      }
-    } catch (err) {
-      this.log(`saving practice problems from ${gameId} failed: ${(err as Error).message}`);
-    }
   }
 
   private buildSummary(): GameSummary {
@@ -1174,7 +1019,7 @@ export class GameController {
       .sort((a, b) => b.eval!.pointLoss - a.eval!.pointLoss)
       .map((r) => {
         const tagged = this.tags[r.number]?.category;
-        // A mistake evaluated before this boot (or below the threshold back then) is classified now.
+        // A mistake evaluated before this boot (or below the threshold back then) is classified now, without ownership.
         const category = tagged ?? (this.heuristics[r.number] ??= this.classifyOrOther(r));
         return {
           moveNumber: r.number,
@@ -1195,7 +1040,7 @@ export class GameController {
    */
   private classify(record: MoveRecord, before?: Analysis, after?: Analysis): MistakeCategory {
     const settings = this.settings!;
-    const replay = this.gameBefore(record.number);
+    const replay = this.game!.before(record.number);
     const boardBefore = replay.board;
     replay.play(record.move);
     return classifyMistake({
@@ -1215,9 +1060,9 @@ export class GameController {
   }
 
   /** `classify`, or "other" (logged) when it fails, so a bad replay can't stop the game from ending. */
-  private classifyOrOther(record: MoveRecord, before?: Analysis, after?: Analysis): MistakeCategory {
+  private classifyOrOther(record: MoveRecord): MistakeCategory {
     try {
-      return this.classify(record, before, after);
+      return this.classify(record);
     } catch (err) {
       this.log(`classifying move ${record.number} failed: ${(err as Error).message}`);
       return "other";
@@ -1226,19 +1071,17 @@ export class GameController {
 
   /** Rating, next bot, heuristic mistake tallies and the threshold, from the finished game. */
   private updateProfileAfterGame(result: GameResult, summary: GameSummary): GameSummary["rating"] {
-    const settings = this.settings!;
-    const profile = this.store.loadProfile();
-    const update = applyGame(profile, {
-      gameId: this.gameId!,
-      ts: this.clock.now(),
-      settings,
-      result,
-      moves: this.game!.moves,
-      summary,
-      threshold: this.profile.mistakeThreshold,
-    });
-    this.store.saveProfile(profile);
-    this.profile = profile;
+    const update = this.updateProfile((profile) =>
+      applyGame(profile, {
+        gameId: this.gameId!,
+        ts: this.clock.now(),
+        settings: this.settings!,
+        result,
+        moves: this.game!.moves,
+        summary,
+        threshold: this.profile.mistakeThreshold,
+      }),
+    );
     if (update.threshold) {
       const { from, to } = update.threshold;
       this.log(`mistake threshold ${from} -> ${to} (${update.threshold.reason})`);
@@ -1258,7 +1101,7 @@ export class GameController {
     const record = moves[moveNumber - 1];
     if (!record) throw new UserError(`Game ${gameId} has no move ${moveNumber}.`);
     if (record.move.color !== humanColor) {
-      throw new UserError(`Move ${moveNumber} was the bot's. Tag the learner's moves (${humanColor === "B" ? "Black" : "White"}).`);
+      throw new UserError(`Move ${moveNumber} was the bot's. Tag the learner's moves (${colorName(humanColor)}).`);
     }
     const tags = saved ? (saved.tags ??= {}) : this.tags;
     const summary = saved ? saved.summary : this.summary;
@@ -1267,11 +1110,8 @@ export class GameController {
     const previous = tags[moveNumber]?.category ?? (entry?.categorySource === "heuristic" ? entry.category : undefined);
     tags[moveNumber] = { category, ...(note && { note }) };
 
-    const profile = this.store.loadProfile();
     const pointLoss = round1(record.eval?.pointLoss ?? 0);
-    applyTag(profile, { ts: this.clock.now(), gameId, moveNumber, category, pointLoss, ...(note && { note }) }, previous);
-    this.store.saveProfile(profile);
-    this.profile = profile;
+    this.updateProfile((profile) => applyTag(profile, { ts: this.clock.now(), gameId, moveNumber, category, pointLoss, ...(note && { note }) }, previous));
 
     if (entry) {
       entry.category = category;
@@ -1288,19 +1128,16 @@ export class GameController {
 
   /** A tag changes what a mistake was about; the practice problem made from it follows. */
   private retagProblem(gameId: string, moveNumber: number, category: MistakeCategory): void {
+    const fromMove = (p: StoredProblem) => p.source?.gameId === gameId && p.source.moveNumber === moveNumber;
     // The problem may be on the board right now: its result and attempts count for the new category.
-    const onBoard = this.practice?.problem;
-    if (onBoard?.source?.gameId === gameId && onBoard.source.moveNumber === moveNumber && onBoard.category !== category) {
-      onBoard.category = category;
-      onBoard.prompt = promptFor(category, onBoard.toPlay);
-    }
+    if (this.practice && fromMove(this.practice.problem)) this.practice.retag(category);
     try {
-      const problems = this.store.loadProblems();
-      const problem = problems.find((p) => p.source?.gameId === gameId && p.source.moveNumber === moveNumber);
-      if (!problem || problem.category === category) return;
-      problem.category = category;
-      problem.prompt = promptFor(category, problem.toPlay);
-      this.store.saveProblems(problems);
+      this.updateProblems((problems) => {
+        const problem = problems.find(fromMove);
+        if (!problem) return;
+        problem.category = category;
+        problem.prompt = promptFor(category, problem.toPlay);
+      });
     } catch (err) {
       this.log(`updating the problem from ${gameId} move ${moveNumber} failed: ${(err as Error).message}`);
     }
@@ -1320,44 +1157,17 @@ export class GameController {
       problem = problems.find((p) => p.id === id);
       if (!problem) throw new UserError(`No practice problem "${id}". List them with: tutor problems`);
     } else {
-      const next = pickNextProblem(problems, {
-        now: this.clock.now(),
-        focus: recommendFocus(this.profile).category,
-        exclude: this.practice?.problem.id ?? this.lastProblemId,
-      });
+      const next = pickNextProblem(problems, { now: this.clock.now(), focus: recommendFocus(this.profile).category, exclude: this.lastProblemId });
       if (!next) throw new UserError("There are no practice problems yet.");
       ({ problem, early } = next);
     }
-    let game: GoGame;
-    try {
-      game = problemGame(problem);
-    } catch (err) {
-      throw new UserError(`Problem ${problem.id} can't be set up: ${(err as Error).message}`);
-    }
-    // Leaving the problem on the board after a wrong attempt reschedules it; the same problem again
-    // then starts from its new box.
-    const previous = this.practice?.problem.id;
-    if (this.closePractice() && problem.id === previous) {
-      problem = this.store.loadProblems().find((p) => p.id === problem!.id) ?? problem;
-    }
-    this.practice = { problem, game, box: problem.box, attempts: 0, solved: false, revealed: false, checking: false, overlay: null, analyses: new Map() };
+    const session = new PracticeSession(problem, this.practiceDeps); // checks the setup before the current problem closes
+    // Leaving a problem after a wrong attempt reschedules it: the same problem again starts from its new box.
+    const rescheduled = this.closePractice();
+    if (rescheduled?.id === problem.id) Object.assign(session.problem, rescheduled);
+    this.practice = session;
     this.lastProblemId = problem.id;
-    const from = problem.source ? ` from your game ${problem.source.gameId} (move ${problem.source.moveNumber})` : "";
-    this.system(`Practice problem${from}: ${problem.prompt}${early ? " (Nothing is due right now, so this is an early review.)" : ""}`);
-    this.emit({
-      type: "problem_start",
-      problemId: problem.id,
-      kind: problem.kind,
-      category: problem.category,
-      toPlay: problem.toPlay,
-      prompt: problem.prompt,
-      answers: [...problem.answers],
-      box: problem.box,
-      ...(problem.source && { source: { gameId: problem.source.gameId, moveNumber: problem.source.moveNumber } }),
-      board: toAscii(game.board, null),
-    });
-    // KataGo reads the position while the learner does.
-    if (this.engineState === "ready") this.problemAnalysis(this.practice, []).catch(() => {});
+    session.start(early);
     this.changed();
   }
 
@@ -1365,239 +1175,68 @@ export class GameController {
   private leaveProblem(): void {
     if (!this.practice) return;
     this.closePractice();
-    const deferred = this.deferredMoment;
-    this.deferredMoment = null;
-    if (deferred && this.isCurrent(this.gen, deferred) && !this.result) {
-      this.startMoment(deferred);
-    } else if (this.fallbackDeferred && this.moment?.state === "waiting") {
-      this.applyFallback();
-    } else {
-      this.fallbackDeferred = false;
-      this.resumeTurn();
-    }
+    this.resumeTurn();
     this.changed();
   }
 
-  /**
-   * End problem mode. A problem left unfinished after a wrong attempt counts as failed (box 1);
-   * one left before any judged attempt keeps its schedule. Returns whether a failure was recorded.
-   */
-  private closePractice(): boolean {
-    const practice = this.practice;
+  /** End problem mode. Returns the problem as rescheduled, when leaving it counted as a failure. */
+  private closePractice(): StoredProblem | undefined {
+    const session = this.practice;
     this.practice = null;
-    // Unrevealed means unsolved, so any judged attempt was wrong.
-    if (!practice || practice.revealed || !practice.lastAttempt) return false;
-    this.finishProblem(practice);
-    return true;
+    return session?.close();
   }
 
-  private problemPlay(point: Point): void {
-    const practice = this.practice!;
-    if (practice.revealed) throw new UserError("This problem is over. Press Next problem, or Back to playing.");
-    if (practice.checking) throw new UserError("KataGo is still checking your last move.");
-    if (this.engineState !== "ready") throw new UserError(this.engineNotReadyText());
-    const reason = practice.game.illegalReason(point);
-    if (reason) throw new UserError(ILLEGAL_TEXT[reason]);
-    practice.attempts++;
-    practice.checking = true;
-    practice.overlay = null;
-    this.changed();
-    void this.checkAttempt(practice, toGtp(point, practice.problem.size), point);
-  }
-
-  /**
-   * Judge an attempt: a known answer is correct; any other move is correct when KataGo finds it
-   * within ANSWER_MARGIN of its best (and becomes an answer). A wrong move with attempts left gets
-   * a ✕ and another try; otherwise the problem ends with KataGo's line on the board.
-   */
-  private async checkAttempt(practice: Practice, move: Gtp, point: Point): Promise<void> {
-    let before: Analysis | null = null;
-    let after: Analysis | null = null;
-    let failure: Error | null = null;
-    this.busy++;
+  /** A problem ended: schedule it (Leitner box) and count it in the profile. Returns it as stored now. */
+  private recordProblemResult(problem: StoredProblem, solved: boolean, attempts: number): StoredProblem | undefined {
+    let stored: StoredProblem | undefined;
     try {
-      [before, after] = await Promise.all([this.problemAnalysis(practice, []), this.problemAnalysis(practice, [move])]);
-    } catch (err) {
-      failure = err as Error;
-    } finally {
-      this.busy--;
-    }
-    if (this.practice !== practice) {
-      this.changed();
-      return;
-    }
-    practice.checking = false;
-    const problem = practice.problem;
-    const known = problem.answers.includes(move);
-    if (!known && (!before || !after)) {
-      practice.attempts--; // KataGo's failure doesn't cost the learner an attempt
-      this.system(`KataGo couldn't check ${move} (${failure?.message ?? "no answer"}). Try the move again.`);
-      this.changed();
-      return;
-    }
-    // The margin is checked on the raw loss; it is rounded only for display.
-    const rawLoss = before && after ? moveEvalFrom(before, after, move).pointLoss : null;
-    const loss = rawLoss === null ? null : round1(rawLoss);
-    const correct = known || (rawLoss !== null && rawLoss <= ANSWER_MARGIN);
-    // A known answer KataGo now rates lower stays correct; its loss would only confuse.
-    const pointLoss = correct && rawLoss !== null && rawLoss > ANSWER_MARGIN ? null : loss;
-    // The attempt is judged either way, but it becomes an answer for good only when KataGo searched
-    // it well in the problem position: otherwise its loss compares two separate searches, which
-    // disagree by a point or more run to run.
-    if (correct && !known && before && searchedWell(before, move)) problem.answers = [...problem.answers, move];
-    const best = before?.moveInfos[0];
-    const bestMove = best && best.move !== "pass" ? best.move : (problem.bestMove ?? problem.answers[0] ?? move);
-    const bestPv = best && best.move !== "pass" ? best.pv : (problem.bestPv ?? [bestMove]);
-    practice.lastAttempt = { move, correct, pointLoss };
-    const left = MAX_ATTEMPTS - practice.attempts;
-
-    if (correct) {
-      practice.solved = true;
-      practice.revealed = true;
-      practice.answer = { move: bestMove, pv: bestPv };
-      // The answer, the opponent's best reply and the next move.
-      const line = this.problemStones(practice, [move, ...(after?.moveInfos[0]?.pv ?? [])].slice(0, ANSWER_LINE_LENGTH));
-      // Even a line of one stone is drawn: the board is the fixed problem position, so without it
-      // the learner's stone would vanish (KataGo's reply on a settled board is usually a pass).
-      practice.overlay = line.length ? { variation: { label: line.length > 1 ? `${move} and how play goes on` : move, moves: line } } : null;
-      const also = bestMove !== move ? ` KataGo's favorite is ${bestMove}, and yours is about as good.` : "";
-      const shown = line.length > 1 ? " The board shows the opponent's best reply." : "";
-      this.system(`Correct${practice.attempts === 1 ? ", first try" : ""}: ${move}.${also}${shown}`);
-    } else if (left > 0) {
-      practice.overlay = { marks: [{ point, kind: "x" }] };
-      this.system(`${move} isn't it: it loses about ${loss} points. Try again (${plural(left, "attempt")} left).`);
-    } else {
-      practice.revealed = true;
-      practice.answer = { move: bestMove, pv: bestPv };
-      const line = this.problemStones(practice, bestPv.slice(0, FALLBACK_PV_LENGTH));
-      const covered = line.some((s) => s.point.x === point.x && s.point.y === point.y);
-      practice.overlay = {
-        ...(line.length && { variation: { label: `KataGo's answer: ${bestMove}`, moves: line } }),
-        ...(!covered && { marks: [{ point, kind: "x" as const }] }),
-      };
-      this.system(`${move} loses about ${loss} points. The answer is ${bestMove}; the board shows KataGo's line (your move is marked ✕).`);
-    }
-    this.emit({
-      type: "problem_attempt",
-      problemId: problem.id,
-      move,
-      correct,
-      category: problem.category,
-      attempt: practice.attempts,
-      firstTry: correct && practice.attempts === 1,
-      pointLoss,
-      revealed: practice.revealed,
-      bestMove,
-      bestPv: bestPv.slice(0, 8),
-    });
-    if (practice.revealed) this.finishProblem(practice);
-    this.changed();
-  }
-
-  /** The problem is over: schedule it (Leitner box), keep any new answer, and update the profile. */
-  private finishProblem(practice: Practice): void {
-    const { problem } = practice;
-    try {
-      const problems = this.store.loadProblems();
-      const stored = problems.find((p) => p.id === problem.id);
-      if (stored) {
-        stored.answers = [...new Set([...stored.answers, ...problem.answers])];
-        schedule(stored, resultOf(practice.solved, practice.attempts), this.clock.now());
-        this.store.saveProblems(problems);
-      }
+      stored = this.updateProblems((problems) => {
+        const p = problems.find((q) => q.id === problem.id);
+        if (p) schedule(p, resultOf(solved, attempts), this.clock.now());
+        return p;
+      });
     } catch (err) {
       this.log(`saving problem ${problem.id} failed: ${(err as Error).message}`);
     }
     try {
-      const profile = this.store.loadProfile();
-      applyProblemResult(profile, problem.category, practice.solved);
-      this.store.saveProfile(profile);
-      this.profile = profile;
+      this.updateProfile((profile) => applyProblemResult(profile, problem.category, solved));
     } catch (err) {
       this.log(`updating the profile after problem ${problem.id} failed: ${(err as Error).message}`);
     }
+    return stored;
   }
 
-  /** Cached analysis of the problem position after `moves` (the learner moving first). */
-  private problemAnalysis(practice: Practice, moves: Gtp[]): Promise<Analysis> {
-    const key = moves.join(" ");
-    let pending = practice.analyses.get(key);
-    if (!pending) {
-      pending = this.engine.analyze(problemPosition(practice.problem, moves), { maxVisits: this.problemVisits });
-      practice.analyses.set(key, pending);
-      pending.catch(() => practice.analyses.delete(key));
+  /** An attempt KataGo found as good as the answers becomes one. */
+  private addProblemAnswer(id: string, move: Gtp): void {
+    try {
+      this.updateProblems((problems) => {
+        const p = problems.find((q) => q.id === id);
+        if (p && !p.answers.includes(move)) p.answers = [...p.answers, move];
+      });
+    } catch (err) {
+      this.log(`saving problem ${id} failed: ${(err as Error).message}`);
     }
-    return pending;
-  }
-
-  /** Ghost stones for a line from the problem position, stopping at a pass or an illegal move. */
-  private problemStones(practice: Practice, line: Gtp[]): { color: Color; point: Point }[] {
-    const replay = problemGame(practice.problem);
-    const stones: { color: Color; point: Point }[] = [];
-    for (const gtp of line) {
-      const point = tryFromGtp(gtp, replay.size);
-      const color = replay.toPlay;
-      if (!point || !replay.play({ color, point }).ok) break;
-      stones.push({ color, point });
-    }
-    return stones;
-  }
-
-  /** A tutor's `show` in problem mode: always from the problem position, the learner's color first by default. */
-  private problemVariation(practice: Practice, moves: Gtp[], start: Color | undefined, label: string | undefined): NonNullable<Overlay["variation"]> {
-    if (moves.length === 0) throw new UserError("show needs at least one move.");
-    let color = start ?? practice.problem.toPlay;
-    const stones: { color: Color; point: Point }[] = [];
-    for (const gtp of moves) {
-      const point = this.parsePoint(gtp, practice.problem.size, true);
-      if (point) stones.push({ color, point });
-      color = other(color);
-    }
-    return { moves: stones, ...(label && { label }) };
-  }
-
-  private problemView(p: Practice): GameView {
-    const { problem } = p;
-    return {
-      gameId: null,
-      mode: "problem",
-      settings: {
-        size: problem.size as GameSettings["size"],
-        komi: problem.komi,
-        humanColor: problem.toPlay,
-        botRank: this.settings?.botRank ?? this.profile.botRank,
-        handicap: 0,
-      },
-      status: p.revealed ? "finished" : "playing",
-      board: p.game.board,
-      toPlay: problem.toPlay,
-      moves: [],
-      captures: { B: 0, W: 0 },
-      result: null,
-      moment: null,
-      overlay: p.overlay,
-      chat: this.chat.slice(-VIEW_CHAT_LIMIT),
-      tutorAttached: this.tutorAttached,
-      engineBusy: this.engineState !== "ready" || this.busy > 0 || p.checking,
-      problem: {
-        id: problem.id,
-        prompt: problem.prompt,
-        ...(problem.source && { source: { gameId: problem.source.gameId, moveNumber: problem.source.moveNumber } }),
-        attempts: p.attempts,
-        solved: p.solved,
-        kind: problem.kind,
-        category: problem.category,
-        toPlay: problem.toPlay,
-        maxAttempts: MAX_ATTEMPTS,
-        revealed: p.revealed,
-        box: p.box,
-        ...(p.lastAttempt && { lastAttempt: { ...p.lastAttempt } }),
-        ...(p.answer && { answer: { move: p.answer.move, pv: [...p.answer.pv] } }),
-      },
-    };
   }
 
   // --- persistence -----------------------------------------------------------------
+
+  /** Load the profile, change it, save it, and make it the current one. Returns what `change` returns. */
+  private updateProfile<T>(change: (profile: Profile) => T): T {
+    const profile = this.store.loadProfile();
+    const result = change(profile);
+    this.store.saveProfile(profile);
+    this.profile = profile;
+    this.profileVersion++;
+    return result;
+  }
+
+  /** Load the stored problems, change them, save them. Returns what `change` returns. */
+  private updateProblems<T>(change: (problems: StoredProblem[]) => T): T {
+    const problems = this.store.loadProblems();
+    const result = change(problems);
+    this.store.saveProblems(problems);
+    return result;
+  }
 
   /**
    * Save the current game at the end of this tick. One action changes the game several times
@@ -1668,25 +1307,26 @@ export class GameController {
   }
 
   /**
-   * Cached analysis of the position after `moves`. Only scoring and classifying a mistake need
-   * KataGo's ownership, so only they ask for it; an entry without ownership doesn't satisfy them,
-   * and the analysis with ownership then replaces it (it serves every other purpose too).
+   * Cached analysis of the position after `moves`, with KataGo's ownership (it costs only network
+   * output, not search), so one query serves move evals and mistake categories, the bot's pass
+   * check, hints and scoring. The cache keeps the ANALYSIS_CACHE_SIZE most recently used positions.
    */
-  private analysisOf(moves: Move[], ownership = false): Promise<Analysis> {
+  private analysisOf(moves: Move[]): Promise<Analysis> {
     const pos = this.position(moves);
     const key = pos.moves.map((m) => m[1]).join(" ");
     const cached = this.analyses.get(key);
-    if (cached && (cached.ownership || !ownership)) return cached.pending;
-    const opts: AnalyzeOptions = {
-      ...(ownership && { includeOwnership: true }),
-      ...(this.analysisVisits !== undefined && { maxVisits: this.analysisVisits }),
-    };
-    const entry = { pending: this.engine.analyze(pos, opts), ownership };
-    this.analyses.set(key, entry);
-    entry.pending.catch(() => {
-      if (this.analyses.get(key) === entry) this.analyses.delete(key);
+    if (cached) {
+      this.analyses.delete(key);
+      this.analyses.set(key, cached);
+      return cached;
+    }
+    const pending = this.engine.analyze(pos, { includeOwnership: true, ...(this.analysisVisits !== undefined && { maxVisits: this.analysisVisits }) });
+    this.analyses.set(key, pending);
+    if (this.analyses.size > ANALYSIS_CACHE_SIZE) this.analyses.delete(this.analyses.keys().next().value!);
+    pending.catch(() => {
+      if (this.analyses.get(key) === pending) this.analyses.delete(key);
     });
-    return entry.pending;
+    return pending;
   }
 
   /** Analyze the current position in the background, so the next human move's "before" is ready. */
@@ -1697,6 +1337,18 @@ export class GameController {
       await this.analysisOf(game.moves.map((r) => r.move));
     } catch (err) {
       this.log(`background analysis failed: ${(err as Error).message}`);
+    }
+  }
+
+  /** Runs `p` with the view showing KataGo as busy. */
+  private async busyWhile<T>(p: Promise<T>): Promise<T> {
+    this.busy++;
+    this.changed();
+    try {
+      return await p;
+    } finally {
+      this.busy--;
+      this.changed();
     }
   }
 
@@ -1718,21 +1370,7 @@ export class GameController {
   }
 
   private lastPoint(): Point | null {
-    const last = this.game?.lastMove;
-    return last && "point" in last.move ? last.move.point : null;
-  }
-
-  /** The game as it was before move `moveNumber` (1-based). */
-  private gameBefore(moveNumber: number): GoGame {
-    const { game, settings } = this.requireGame();
-    return GoGame.fromMoves(settings.size, settings.komi, settings.handicap, game.moves.slice(0, moveNumber - 1).map((r) => r.move));
-  }
-
-  /** The board before `record` was played, and the move before it, for the tutor's ASCII view. */
-  private positionBefore(record: MoveRecord): { board: Board; last: Point | null } {
-    const replay = this.gameBefore(record.number);
-    const prev = replay.lastMove;
-    return { board: replay.board, last: prev && "point" in prev.move ? prev.move.point : null };
+    return movePoint(this.game?.lastMove?.move);
   }
 
   /** Adds a chat message and saves it with the game, so a restart (or a post-game review) keeps it. */
@@ -1756,4 +1394,3 @@ export class GameController {
     for (const fn of this.changeListeners) fn();
   }
 }
-

@@ -1,19 +1,10 @@
 // Runs against the real KataGo. Skipped when `katago` is not on PATH.
 // Prints measured latencies so the server can size its timeouts.
-import { execFileSync } from "node:child_process";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { BUILTIN_PROBLEMS } from "../../src/server/builtin-problems.ts";
 import { KataGo, moveEvalFrom, type Position } from "../../src/server/katago.ts";
 import { ANSWER_MARGIN, builtinProblem, problemPosition } from "../../src/server/problems.ts";
-
-function hasKataGo(): boolean {
-  try {
-    execFileSync("katago", ["version"], { stdio: "ignore" });
-    return true;
-  } catch {
-    return false;
-  }
-}
+import { hasKataGo } from "./fakes.ts";
 
 const empty9: Position = { size: 9, komi: 7, moves: [], rules: "chinese" };
 const opening9: Position = {

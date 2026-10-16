@@ -1,4 +1,4 @@
-import type { Gtp, Point } from "./types.ts";
+import type { Gtp, Move, Point } from "./types.ts";
 
 /** GTP column letters: A–T without I (enough for 19×19; up to 25 with the rest of the alphabet). */
 export const GTP_COLUMNS = "ABCDEFGHJKLMNOPQRSTUVWXYZ";
@@ -48,11 +48,17 @@ export function pointKey(p: Point): string {
   return `${p.x},${p.y}`;
 }
 
-export function parsePointKey(key: string): Point {
-  const [x, y] = key.split(",").map(Number);
-  return { x: x!, y: y! };
+/** Same intersection; false when either is missing. */
+export function samePoint(a: Point | null | undefined, b: Point | null | undefined): boolean {
+  return !!a && !!b && a.x === b.x && a.y === b.y;
 }
 
-export function samePoint(a: Point, b: Point): boolean {
-  return a.x === b.x && a.y === b.y;
+/** The point a move was played at, or null for a pass (or no move). */
+export function movePoint(move: Move | null | undefined): Point | null {
+  return move && "point" in move ? move.point : null;
+}
+
+/** GTP coordinate of a move: its point, or "pass". */
+export function moveGtp(move: Move, size: number): Gtp {
+  return toGtp(movePoint(move), size);
 }

@@ -1,23 +1,25 @@
-// Talking to the server: state fetch, actions, and the SSE stream of GameViews.
+// Talking to the server: actions, the profile, and the SSE stream of GameViews.
 
-import type { ClientAction, GameView, ProfileResponse } from "../../src/shared/types.ts";
+import type { ActionResponse, ClientAction, GameView, ProfileResponse } from "../../src/shared/types.ts";
 import { backoffDelay } from "./geometry.ts";
-
-export interface ActionResponse {
-  ok: boolean;
-  view?: GameView;
-  error?: string;
-}
 
 export type ConnectionState = "connecting" | "open" | "reconnecting";
 
 export interface Transport {
-  getState(): Promise<GameView>;
   send(action: ClientAction): Promise<ActionResponse>;
-  /** Streams views until the returned function is called. */
-  subscribe(onView: (v: GameView) => void, onConnection: (s: ConnectionState) => void): () => void;
+  /**
+   * Streams views (the current one first) until the returned function is called. `raw` is the
+   * view's message text when it came from the stream, so identical frames can be skipped cheaply.
+   */
+  subscribe(onView: (v: GameView, raw?: string) => void, onConnection: (s: ConnectionState) => void): () => void;
   /** The learner profile and recommended focus; null when the server can't provide it. */
   getProfile(): Promise<ProfileResponse | null>;
+}
+
+async function getState(): Promise<GameView> {
+  const res = await fetch("/api/state");
+  if (!res.ok) throw new Error(`GET /api/state failed: ${res.status}`);
+  return (await res.json()) as GameView;
 }
 
 export const httpTransport: Transport = {
@@ -30,12 +32,6 @@ export const httpTransport: Transport = {
     } catch {
       return null;
     }
-  },
-
-  async getState() {
-    const res = await fetch("/api/state");
-    if (!res.ok) throw new Error(`GET /api/state failed: ${res.status}`);
-    return (await res.json()) as GameView;
   },
 
   async send(action) {
@@ -58,19 +54,21 @@ export const httpTransport: Transport = {
     let timer: ReturnType<typeof setTimeout> | undefined;
     let attempt = 0;
     let closed = false;
+    let opened = false;
 
     const connect = () => {
       onConnection(attempt === 0 ? "connecting" : "reconnecting");
       source = new EventSource("/api/events");
       source.onopen = () => {
+        // Every (re)connection starts with the current view, so nothing missed needs fetching.
+        opened = true;
         attempt = 0;
         onConnection("open");
-        // Catch up on anything missed while disconnected.
-        httpTransport.getState().then(onView, () => {});
       };
       source.onmessage = (e) => {
         try {
-          onView(JSON.parse(e.data as string) as GameView);
+          const raw = e.data as string;
+          onView(JSON.parse(raw) as GameView, raw);
         } catch {
           // Ignore malformed frames; the next one carries the full view anyway.
         }
@@ -80,6 +78,8 @@ export const httpTransport: Transport = {
         source?.close();
         source = null;
         if (closed) return;
+        // The stream never opened (a proxy that drops SSE, say): show the state anyway.
+        if (!opened && attempt === 0) getState().then((v) => onView(v), () => {});
         onConnection("reconnecting");
         timer = setTimeout(connect, backoffDelay(attempt++));
       };

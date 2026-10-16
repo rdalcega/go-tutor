@@ -1,10 +1,11 @@
 // Pure helpers for the board UI: layout math, coordinates, eval color coding.
 // No DOM access here so everything can be unit tested.
 
-import { GoGame } from "../../src/engine/game.ts";
-import { GTP_COLUMNS, toGtp } from "../../src/shared/coords.ts";
+import { gameBefore } from "../../src/engine/game.ts";
+import { GTP_COLUMNS, movePoint } from "../../src/shared/coords.ts";
 import { ratingToRank } from "../../src/shared/rank.ts";
-import type { Board, Color, GameSettings, GameView, MistakeCategory, MoveRecord, Point, ProblemView, Profile } from "../../src/shared/types.ts";
+import { categoryLabel } from "../../src/shared/text.ts";
+import type { Board, Color, GameSettings, MistakeCategory, MoveRecord, Point, ProblemView, Profile } from "../../src/shared/types.ts";
 
 export interface BoardLayout {
   size: number;
@@ -50,10 +51,6 @@ export function rowLabel(y: number, size: number): string {
   return String(size - y);
 }
 
-export function samePoint(a: Point | null | undefined, b: Point | null | undefined): boolean {
-  return !!a && !!b && a.x === b.x && a.y === b.y;
-}
-
 export type LossLevel = "good" | "inaccuracy" | "mistake";
 
 /** Color coding for a move's point loss: green < 1, amber < 4, red >= 4. */
@@ -79,10 +76,6 @@ export function lastHumanMove(moves: MoveRecord[], humanColor: Color): MoveRecor
     if (m.move.color === humanColor) return m;
   }
   return null;
-}
-
-export function moveLabel(record: MoveRecord, size: number): string {
-  return "point" in record.move ? toGtp(record.move.point, size) : "pass";
 }
 
 /**
@@ -117,23 +110,11 @@ export function positionBefore(
 ): { board: Board; lastMove: Point | null } | null {
   if (!Number.isInteger(moveNumber) || moveNumber < 1 || moveNumber > moves.length) return null;
   try {
-    const game = GoGame.fromMoves(settings.size, settings.komi, settings.handicap, moves.slice(0, moveNumber - 1).map((r) => r.move));
-    const last = game.lastMove;
-    return { board: game.board, lastMove: last && "point" in last.move ? last.move.point : null };
+    const game = gameBefore(settings, moves, moveNumber);
+    return { board: game.board, lastMove: movePoint(game.lastMove?.move) };
   } catch {
     return null;
   }
-}
-
-/**
- * Whether Try again can take a move back: the game is on, the moment's move is still on the board
- * (a tutor's rethink already took it back), and there is a human move to undo.
- */
-export function canRetry(v: GameView): boolean {
-  const human = v.settings?.humanColor;
-  if (!human || v.status === "finished" || v.result) return false;
-  if (v.moment && v.moment.state !== "resolved" && v.moment.moveNumber > v.moves.length) return false;
-  return lastHumanMove(v.moves, human) !== null;
 }
 
 /** Whole seconds remaining until `deadline` (ms epoch), never negative. */
@@ -164,7 +145,7 @@ export function topCategories(counts: Partial<Record<MistakeCategory, number>>, 
     .filter(([, c]) => c > 0)
     .sort((a, b) => b[1] - a[1])
     .slice(0, n)
-    .map(([cat, c]) => `${cat.replace(/_/g, " ")} ${c}`);
+    .map(([cat, c]) => `${categoryLabel(cat)} ${c}`);
 }
 
 /** The bot the next game defaults to, e.g. "19k" or "20k +2 stones". */
@@ -180,16 +161,10 @@ export function ratingChangeFor(profile: Profile, gameId: string): { before: str
   return { before: ratingToRank(entry.rating - delta), after: ratingToRank(entry.rating), delta };
 }
 
-/** "Life and death", "Capturing race", … */
-export function categoryName(c: MistakeCategory): string {
-  const words = c.replace(/_/g, " ");
-  return words.charAt(0).toUpperCase() + words.slice(1);
-}
-
 /** The problem card's title: category, and where the problem comes from. */
 export function problemHeading(p: ProblemView): string {
   const from = p.source ? `from your game, move ${p.source.moveNumber}` : "classic problem";
-  return `${categoryName(p.category)} · ${from}`;
+  return `${categoryLabel(p.category, { capitalize: true })} · ${from}`;
 }
 
 /** "2 attempts left", "1 attempt left", or "" once the problem is over. */

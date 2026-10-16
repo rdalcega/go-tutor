@@ -2,9 +2,10 @@
 // compact, explicit labels, coordinates in GTP, no decoration.
 
 import { toAscii } from "../engine/ascii.ts";
-import { GoGame } from "../engine/game.ts";
-import { toGtp } from "../shared/coords.ts";
+import { gameBefore } from "../engine/game.ts";
+import { moveGtp, movePoint, toGtp } from "../shared/coords.ts";
 import { ratingToRank } from "../shared/rank.ts";
+import { round1 } from "../shared/text.ts";
 import type {
   ChatMessage,
   Color,
@@ -16,22 +17,18 @@ import type {
   Move,
   MoveRecord,
   Overlay,
-  Point,
   ProblemListItem,
   ProblemsResponse,
   ProblemView,
   Profile,
+  SavedGame,
   TeachingMoment,
   TutorEvent,
 } from "../shared/types.ts";
 
-export function moveToGtp(move: Move, size: number): string {
-  return "pass" in move ? "pass" : toGtp(move.point, size);
-}
-
 /** Formats a number with one decimal, dropping a trailing ".0". */
 export function num(n: number): string {
-  const r = Math.round(n * 10) / 10;
+  const r = round1(n);
   return Number.isInteger(r) ? String(r) : r.toFixed(1);
 }
 
@@ -64,10 +61,13 @@ function mistakesText(summary: GameSummary): string {
 }
 
 export interface EventContext {
-  /** Board size of a game, when known. Needed to turn points into GTP coordinates. */
-  sizeOf(gameId: string): number | undefined;
   /** Current time (ms epoch) for countdowns. Default Date.now(). */
   now?: number;
+  /**
+   * Board size of a game, when known (e.g. from its game_start). Used for events logged before
+   * they carried `size`; without either, a point is printed without coordinates.
+   */
+  sizeOf?: (gameId: string) => number | undefined;
 }
 
 /** Whole seconds from `now` until `deadline`, never negative. */
@@ -75,28 +75,41 @@ function secondsUntil(deadline: number, now: number): number {
   return Math.max(0, Math.round((deadline - now) / 1000));
 }
 
-/** One line per tutor event. Ends without a newline. */
-export function formatEvent(e: TutorEvent, ctx: EventContext): string {
-  // Without the board size a point has no GTP name (rows count from the bottom), so say so.
-  const gtpIn = (gameId: string, move: Move) => {
-    if ("pass" in move) return "pass";
-    const size = ctx.sizeOf(gameId);
-    if (size !== undefined) return toGtp(move.point, size);
-    return `x${move.point.x},y${move.point.y} (board size unknown; 0-based from top-left)`;
-  };
+/** The move in GTP, or a note that its coordinates are unknown (an old event without `size`). */
+function eventMoveGtp(move: Move, size: number | undefined, gameId: string, ctx: EventContext): string {
+  if ("pass" in move) return "pass";
+  const n = typeof size === "number" ? size : ctx.sizeOf?.(gameId);
+  return typeof n === "number" ? moveGtp(move, n) : "(coords unavailable)";
+}
+
+/** One line per tutor event. Ends without a newline. Never throws: an event it can't read is printed raw. */
+export function formatEvent(e: TutorEvent, ctx: EventContext = {}): string {
+  try {
+    return formatKnownEvent(e, ctx);
+  } catch {
+    return rawEvent(e);
+  }
+}
+
+function rawEvent(e: unknown): string {
+  const unknown = e as { type?: string; seq?: number };
+  return `EVENT ${unknown.type ?? "unknown"} seq=${unknown.seq ?? "?"} ${JSON.stringify(e)}`;
+}
+
+function formatKnownEvent(e: TutorEvent, ctx: EventContext): string {
   switch (e.type) {
     case "game_start":
       return `GAME_START ${e.gameId} ${settingsText(e.settings)}`;
     case "move": {
       const r = e.record;
-      let line = `MOVE ${r.number} ${r.move.color} ${gtpIn(e.gameId, r.move)} (${e.by})`;
+      let line = `MOVE ${r.number} ${r.move.color} ${eventMoveGtp(r.move, e.size, e.gameId, ctx)} (${e.by})`;
       if (r.captures.length > 0) line += ` captures ${r.captures.length}`;
       if (r.eval) line += ` lost ${num(r.eval.pointLoss)} (best ${r.eval.bestMove})`;
       return line;
     }
     case "teaching_moment": {
       const { moment: m, record: r } = e;
-      const gtp = gtpIn(e.gameId, r.move);
+      const gtp = eventMoveGtp(r.move, e.size, e.gameId, ctx);
       const best = r.eval ? ` (best ${r.eval.bestMove}, pv ${pv(r.eval.bestPv)})` : "";
       const head = `MOMENT ${m.id} game=${e.gameId} move ${r.number} ${r.move.color} ${gtp} lost ${num(m.pointLoss)} pts${best}`;
       // A live moment is always "waiting"; any other state means a replay that the server brought up to date.
@@ -138,21 +151,14 @@ export function formatEvent(e: TutorEvent, ctx: EventContext): string {
       if (!e.revealed) return `${head} wrong${loss} (${e.category}; another attempt left) — ask what they see, don't give the answer (${line})`;
       return `${head} wrong${loss} (${e.category}; out of attempts, answer shown) — ${line} — explain it; show the refutation of ${e.move}`;
     }
-    default: {
-      const unknown = e as { type?: string; seq?: number };
-      return `EVENT ${unknown.type ?? "unknown"} seq=${unknown.seq ?? "?"} ${JSON.stringify(e)}`;
-    }
+    default:
+      return rawEvent(e);
   }
 }
 
 // ---------------------------------------------------------------------------
 // State
 // ---------------------------------------------------------------------------
-
-function lastPlacedPoint(moves: MoveRecord[]): Point | null {
-  const last = moves[moves.length - 1];
-  return last && "point" in last.move ? last.move.point : null;
-}
 
 export function momentText(m: TeachingMoment, now: number): string {
   let s = `moment ${m.id} move ${m.moveNumber} lost ${num(m.pointLoss)} state=${m.state}`;
@@ -179,7 +185,7 @@ export function overlayText(o: Overlay, size: number): string {
 /** Compact move list: `14 B C3 -6.2!` for human moves with evals; `!` flags a mistake-sized loss. */
 export function moveListText(moves: MoveRecord[], size: number, threshold = 4, perLine = 10): string {
   const items = moves.map((r) => {
-    let s = `${r.number} ${r.move.color} ${moveToGtp(r.move, size)}`;
+    let s = `${r.number} ${r.move.color} ${moveGtp(r.move, size)}`;
     if (r.eval) s += ` -${num(r.eval.pointLoss)}${r.eval.pointLoss >= threshold ? "!" : ""}`;
     return s;
   });
@@ -240,7 +246,7 @@ export function formatState(v: GameView, now = Date.now(), chatTail = 8): string
   if (v.result) out.push(`result ${resultText(v.result)}`);
   if (v.problem) out.push(...problemLines(v.problem));
   if (v.board.length > 0) {
-    out.push("", toAscii(v.board, lastPlacedPoint(v.moves)), "");
+    out.push("", toAscii(v.board, movePoint(v.moves.at(-1)?.move)), "");
   }
   out.push(v.moves.length > 0 ? `moves (human loss in pts, ! = mistake):\n${moveListText(v.moves, size)}` : "moves: none");
 
@@ -248,7 +254,7 @@ export function formatState(v: GameView, now = Date.now(), chatTail = 8): string
   if (last?.eval) {
     const e = last.eval;
     out.push(
-      `last move ${last.number} ${last.move.color} ${moveToGtp(last.move, size)}: lead ${num(e.leadBefore)} -> ${num(e.leadAfter)}, ` +
+      `last move ${last.number} ${last.move.color} ${moveGtp(last.move, size)}: lead ${num(e.leadBefore)} -> ${num(e.leadAfter)}, ` +
         `winrate ${Math.round(e.winrateBefore * 100)}% -> ${Math.round(e.winrateAfter * 100)}%, best ${e.bestMove} (pv ${pv(e.bestPv)})`,
     );
     if (e.candidates.length > 0) {
@@ -377,16 +383,8 @@ export function formatProblemList(r: ProblemsResponse, now = Date.now()): string
   return out.join("\n");
 }
 
-/** Loose shape of a saved game from GET /api/game/:id (games/<id>.json). */
-export interface SavedGame {
-  id?: string;
-  gameId?: string;
-  settings: GameSettings;
-  moves: MoveRecord[];
-  result?: GameResult | null;
-  summary?: GameSummary | null;
-  chat?: ChatMessage[];
-}
+/** What a review reads of a saved game (GET /api/game/:id). */
+export type ReviewedGame = Pick<SavedGame, "id" | "settings" | "moves"> & Partial<Pick<SavedGame, "result" | "summary">>;
 
 /** Win-rate swings of at least this much (0..1, the learner's view) are listed in a review. */
 const SWING_MIN = 0.15;
@@ -422,19 +420,18 @@ export function winrateSwings(moves: MoveRecord[], human: Color, max = 5): { rec
 const pct = (n: number) => `${Math.round(n * 100)}%`;
 
 /** The board before move `n`, or null when the moves don't replay. */
-function boardBefore(g: SavedGame, n: number): string | null {
+function boardBefore(g: ReviewedGame, n: number): string | null {
   try {
-    const game = GoGame.fromMoves(g.settings.size, g.settings.komi, g.settings.handicap, g.moves.slice(0, n - 1).map((r) => r.move));
-    const last = game.lastMove;
-    return toAscii(game.board, last && "point" in last.move ? last.move.point : null);
+    const game = gameBefore(g.settings, g.moves, n);
+    return toAscii(game.board, movePoint(game.lastMove?.move));
   } catch {
     return null;
   }
 }
 
 /** A compact post-game review: result, rating change, mistakes with PVs, win-rate swings, boards before the worst mistakes, move list. */
-export function formatReview(g: SavedGame, threshold = 4): string {
-  const id = g.id ?? g.gameId ?? "?";
+export function formatReview(g: ReviewedGame, threshold = 4): string {
+  const id = g.id;
   const size = g.settings.size;
   const human = g.settings.humanColor;
   const out: string[] = [];
@@ -454,7 +451,7 @@ export function formatReview(g: SavedGame, threshold = 4): string {
     g.moves
       .filter((r) => r.move.color === human && r.eval && r.eval.pointLoss >= threshold)
       .sort((a, b) => b.eval!.pointLoss - a.eval!.pointLoss)
-      .map((r) => ({ moveNumber: r.number, move: moveToGtp(r.move, size), pointLoss: r.eval!.pointLoss, bestMove: r.eval!.bestMove, category: undefined, categorySource: undefined }));
+      .map((r) => ({ moveNumber: r.number, move: moveGtp(r.move, size), pointLoss: r.eval!.pointLoss, bestMove: r.eval!.bestMove, category: undefined, categorySource: undefined }));
   if (mistakes.length === 0) {
     out.push("mistakes: none");
   } else {
@@ -477,7 +474,7 @@ export function formatReview(g: SavedGame, threshold = 4): string {
     for (const s of swings) {
       const r = s.record;
       const who = r.move.color === human ? "" : " (bot)";
-      out.push(`  move ${r.number} ${r.move.color} ${moveToGtp(r.move, size)}${who} ${pct(s.from)} -> ${pct(s.to)} (${signed(Math.round((s.to - s.from) * 100))})`);
+      out.push(`  move ${r.number} ${r.move.color} ${moveGtp(r.move, size)}${who} ${pct(s.from)} -> ${pct(s.to)} (${signed(Math.round((s.to - s.from) * 100))})`);
     }
   }
 

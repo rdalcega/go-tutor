@@ -1,7 +1,8 @@
 // Hand-rolled argument parsing for the tutor CLI. Pure: argv in, a typed Invocation out.
 
+import { toGtp, tryFromGtp } from "../shared/coords.ts";
 import { normalizeBotRank } from "../shared/rank.ts";
-import type { Color, GameSettings, MistakeCategory, TutorCommand } from "../shared/types.ts";
+import { MARK_KINDS, MISTAKE_CATEGORIES, type Color, type GameSettings, type MarkKind, type MistakeCategory, type TutorCommand } from "../shared/types.ts";
 
 export class UsageError extends Error {}
 
@@ -13,20 +14,6 @@ export type Invocation =
   | { kind: "problems"; json: boolean }
   | { kind: "review"; gameId: string; json: boolean }
   | { kind: "command"; command: TutorCommand; json: boolean };
-
-export const MISTAKE_CATEGORIES: readonly MistakeCategory[] = [
-  "life_and_death",
-  "capturing_race",
-  "opening",
-  "direction",
-  "shape",
-  "endgame",
-  "tactics",
-  "other",
-];
-
-const MARK_KINDS = ["circle", "triangle", "square", "x"] as const;
-type MarkKind = (typeof MARK_KINDS)[number];
 
 /** Flags that never take a value. Every other `--flag` consumes the next token (or `=value`). */
 const BOOLEAN_FLAGS = new Set(["json", "help"]);
@@ -70,16 +57,15 @@ export function splitArgs(tokens: string[]): Split {
   return { positional, flags };
 }
 
-const GTP_RE = /^[A-HJ-T](?:[1-9]|1[0-9])$/;
+/** The largest board: coordinates are checked against 19×19 here, and against the actual board by the server. */
+const MAX_SIZE = 19;
 
 /** Uppercases and validates a GTP coordinate ("d4" → "D4"). */
 export function parseGtp(raw: string, allowPass = false): string {
-  const up = raw.toUpperCase();
-  if (allowPass && up === "PASS") return "pass";
-  if (!GTP_RE.test(up)) {
-    throw new UsageError(`not a board coordinate: "${raw}" (expected e.g. D4; columns A-T without I)`);
-  }
-  return up;
+  const point = tryFromGtp(raw, MAX_SIZE);
+  if (point === null && allowPass) return "pass";
+  if (!point) throw new UsageError(`not a board coordinate: "${raw}" (expected e.g. D4; columns A-T without I)`);
+  return toGtp(point, MAX_SIZE);
 }
 
 function parseColor(raw: string, flag: string): Color {

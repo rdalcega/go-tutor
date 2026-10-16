@@ -1,11 +1,11 @@
 // Dev-only in-memory stand-in for the server, enabled with `?mock` in the URL.
 // Serves a realistic paused game and reacts to actions well enough to eyeball the UI.
 
+import { GoGame, boardFromDiagram, opponent } from "../../src/engine/index.ts";
 import type {
-  Board,
+  ActionResponse,
   ChatMessage,
   ClientAction,
-  Color,
   GameSettings,
   GameView,
   MoveEval,
@@ -14,64 +14,11 @@ import type {
   Profile,
   ProfileResponse,
 } from "../../src/shared/types.ts";
-import type { ActionResponse, ConnectionState, Transport } from "./api.ts";
+import type { ConnectionState, Transport } from "./api.ts";
+import { allowedActions } from "../../src/shared/allowed.ts";
 import { fromGtp, toGtp, tryFromGtp } from "../../src/shared/coords.ts";
+import { colorName, round1 } from "../../src/shared/text.ts";
 import { BUILTIN_PROBLEMS, type BuiltinProblem } from "../../src/server/builtin-problems.ts";
-
-const other = (c: Color): Color => (c === "B" ? "W" : "B");
-
-function emptyBoard(size: number): Board {
-  return Array.from({ length: size }, () => Array<Color | null>(size).fill(null));
-}
-
-function neighbors(p: Point, size: number): Point[] {
-  return [
-    { x: p.x - 1, y: p.y },
-    { x: p.x + 1, y: p.y },
-    { x: p.x, y: p.y - 1 },
-    { x: p.x, y: p.y + 1 },
-  ].filter((q) => q.x >= 0 && q.y >= 0 && q.x < size && q.y < size);
-}
-
-/** The group containing `p` and whether it has any liberty. */
-function group(board: Board, p: Point): { stones: Point[]; free: boolean } {
-  const color = board[p.y]![p.x];
-  const seen = new Set<string>();
-  const stones: Point[] = [];
-  let free = false;
-  const stack = [p];
-  while (stack.length) {
-    const q = stack.pop()!;
-    const k = `${q.x},${q.y}`;
-    if (seen.has(k)) continue;
-    seen.add(k);
-    stones.push(q);
-    for (const n of neighbors(q, board.length)) {
-      const c = board[n.y]![n.x];
-      if (c === null) free = true;
-      else if (c === color) stack.push(n);
-    }
-  }
-  return { stones, free };
-}
-
-/** Places a stone and removes captured neighbors. Returns null when the point is taken or suicide. */
-function place(board: Board, p: Point, color: Color): Point[] | null {
-  if (board[p.y]![p.x] !== null) return null;
-  board[p.y]![p.x] = color;
-  const captured: Point[] = [];
-  for (const n of neighbors(p, board.length)) {
-    if (board[n.y]![n.x] !== other(color)) continue;
-    const g = group(board, n);
-    if (!g.free) for (const s of g.stones) captured.push(s);
-  }
-  for (const s of captured) board[s.y]![s.x] = null;
-  if (!group(board, p).free) {
-    board[p.y]![p.x] = null;
-    return null;
-  }
-  return captured;
-}
 
 function fakeEval(size: number, pointLoss: number, bestMove: string, lead: number, line?: string[]): MoveEval {
   const winBefore = 0.5 + Math.tanh(lead / 10) / 2;
@@ -113,10 +60,12 @@ const SAMPLE: { gtp: string; loss?: number; best?: string; pv?: string[] }[] = [
 
 class MockServer implements Transport {
   private view: GameView;
+  /** The rules engine behind the game view (null in problem mode, where the game waits in `gameView`). */
+  private game: GoGame | null = null;
   private listeners = new Set<(v: GameView) => void>();
   private msgId = 0;
   /** In problem mode: the game view underneath, and the problem on the board. */
-  private gameView: GameView | null = null;
+  private gameView: { view: GameView; game: GoGame | null } | null = null;
   private problemDef: BuiltinProblem | null = null;
   private problemIndex = 0;
 
@@ -127,16 +76,12 @@ class MockServer implements Transport {
 
   // --- Transport ---------------------------------------------------------
 
-  async getState(): Promise<GameView> {
-    return structuredClone(this.view);
-  }
-
   async send(action: ClientAction): Promise<ActionResponse> {
     await delay(120);
     const error = this.apply(action);
     if (error) return { ok: false, error };
     this.emit();
-    return { ok: true, view: structuredClone(this.view) };
+    return { ok: true, view: this.snapshot() };
   }
 
   async getProfile(): Promise<ProfileResponse> {
@@ -151,7 +96,7 @@ class MockServer implements Transport {
         rating,
         botRank: "20k",
         won: i === 0 || rating > games[i - 1]!,
-        delta: i === 0 ? 1.2 : Math.round((rating - games[i - 1]!) * 100) / 100,
+        delta: i === 0 ? 1.2 : round1(rating - games[i - 1]!),
       })),
       mistakeThreshold: 4,
       thresholdHistory: [],
@@ -173,15 +118,45 @@ class MockServer implements Transport {
     onConnection("connecting");
     setTimeout(() => {
       onConnection("open");
-      onView(structuredClone(this.view));
+      onView(this.snapshot());
     }, 150);
     return () => this.listeners.delete(onView);
   }
 
   // --- state -------------------------------------------------------------
 
+  /** The view as the server would send it: the game's position and the actions it accepts now. */
+  private snapshot(): GameView {
+    const v = this.view;
+    if (this.game) {
+      v.board = this.game.board;
+      v.moves = this.game.moves;
+      v.captures = this.game.captures;
+      v.toPlay = this.game.toPlay;
+    }
+    v.allowed = this.allowed();
+    return structuredClone(v);
+  }
+
+  /** The server's rules (src/shared/allowed.ts); the mock engine is always ready and checks attempts at once. */
+  private allowed(): GameView["allowed"] {
+    const v = this.view;
+    return allowedActions({
+      mode: v.mode,
+      status: v.status,
+      finished: v.result !== null,
+      humanColor: v.mode === "game" && v.settings ? v.settings.humanColor : null,
+      toPlay: v.toPlay,
+      moves: v.moves,
+      moment: v.moment,
+      engineReady: true,
+      tutorAttached: v.tutorAttached,
+      problem: v.problem ? { revealed: v.problem.revealed, checking: false } : null,
+    });
+  }
+
   private emit(): void {
-    for (const l of this.listeners) l(structuredClone(this.view));
+    for (const l of this.listeners) l(this.snapshot());
   }
 
   private msg(from: ChatMessage["from"], text: string, momentId?: string): void {
@@ -191,19 +166,17 @@ class MockServer implements Transport {
   private sampleView(): GameView {
     const settings: GameSettings = { size: 9, komi: 7, humanColor: "B", botRank: "18k", handicap: 0 };
     const v = this.freshView(settings);
+    const game = new GoGame(9, 7);
     let lead = 3.5;
     for (const s of SAMPLE) {
-      const color = v.toPlay;
-      const point = fromGtp(s.gtp, 9)!;
-      const captures = place(v.board, point, color) ?? [];
-      const rec: MoveRecord = { number: v.moves.length + 1, move: { color, point }, captures };
+      const result = game.playAt(fromGtp(s.gtp, 9)!);
+      if (!result.ok) throw new Error(`mock sample move ${s.gtp} is illegal`);
       if (s.loss !== undefined) {
-        rec.eval = fakeEval(9, s.loss, s.best!, lead, s.pv);
+        result.record.eval = fakeEval(9, s.loss, s.best!, lead, s.pv);
         lead -= s.loss;
       }
-      v.moves.push(rec);
-      v.toPlay = other(color);
     }
+    this.game = game;
     const momentId = "mom-13";
     v.status = "paused";
     v.moment = { id: momentId, moveNumber: 13, pointLoss: 6.2, state: "waiting", deadline: Date.now() + 25_000 };
@@ -239,7 +212,7 @@ class MockServer implements Transport {
       mode: "game",
       settings,
       status: "playing",
-      board: emptyBoard(settings.size),
+      board: [],
       toPlay: "B",
       moves: [],
       captures: { B: 0, W: 0 },
@@ -250,6 +223,8 @@ class MockServer implements Transport {
       tutorAttached: this.view?.tutorAttached ?? true,
       engineBusy: false,
       problem: null,
+      profileVersion: this.view?.profileVersion ?? 0,
+      allowed: [],
     };
   }
 
@@ -258,16 +233,16 @@ class MockServer implements Transport {
     if (m?.state === "waiting" && m.deadline !== undefined && Date.now() >= m.deadline) {
       m.state = "fallback";
       delete m.deadline;
-      const rec = this.view.moves[m.moveNumber - 1];
+      const rec = this.game?.moves[m.moveNumber - 1];
       const best = rec?.eval?.bestMove ?? "pass";
-      const size = this.view.board.length;
+      const size = this.game?.size ?? 9;
       this.view.overlay = {
         variation: {
           label: "KataGo's line",
           fromMove: m.moveNumber,
           moves: (rec?.eval?.bestPv ?? []).flatMap((g, i) => {
             const point = tryFromGtp(g, size);
-            return point ? [{ color: i % 2 === 0 ? rec!.move.color : other(rec!.move.color), point }] : [];
+            return point ? [{ color: i % 2 === 0 ? rec!.move.color : opponent(rec!.move.color), point }] : [];
           }),
         },
       };
@@ -279,13 +254,14 @@ class MockServer implements Transport {
   private apply(a: ClientAction): string | null {
     const v = this.view;
     const s = v.settings;
+    const game = this.game;
     if (v.mode === "problem" && a.type === "play") return this.problemPlay(a.point);
     switch (a.type) {
       case "next_problem":
         this.startProblem();
         return null;
       case "leave_problem":
-        if (this.gameView) this.view = this.gameView;
+        if (this.gameView) ({ view: this.view, game: this.game } = this.gameView);
         this.gameView = null;
         this.problemDef = null;
         return null;
@@ -296,59 +272,48 @@ class MockServer implements Transport {
           size: 9, komi: 7, humanColor: "B", botRank: s?.botRank ?? "18k", handicap: 0, ...a.settings,
         };
         this.view = this.freshView(settings);
-        this.msg("system", `New game: ${settings.size}×${settings.size}. You play ${settings.humanColor === "B" ? "Black" : "White"} against a ${settings.botRank} bot.`);
+        this.game = new GoGame(settings.size, settings.komi);
+        this.msg("system", `New game: ${settings.size}×${settings.size}. You play ${colorName(settings.humanColor)} against a ${settings.botRank} bot.`);
         if (settings.humanColor === "W") this.botReply();
         return null;
       }
       case "play": {
-        if (!s || v.status !== "playing" || v.toPlay !== s.humanColor) return "It isn't your turn.";
-        const captures = place(v.board, a.point, s.humanColor);
-        if (!captures) return "That point is not a legal move.";
-        const rec: MoveRecord = { number: v.moves.length + 1, move: { color: s.humanColor, point: a.point }, captures };
-        v.moves.push(rec);
-        v.captures[s.humanColor] += captures.length;
-        v.toPlay = other(s.humanColor);
+        if (!s || !game || v.status !== "playing" || game.toPlay !== s.humanColor) return "It isn't your turn.";
+        const result = game.playAt(a.point);
+        if (!result.ok) return "That point is not a legal move.";
         v.overlay = null;
         v.engineBusy = true;
-        setTimeout(() => this.evaluate(rec), 500);
+        setTimeout(() => this.evaluate(result.record), 500);
         return null;
       }
       case "pass": {
-        if (!s || v.toPlay !== s.humanColor || v.status !== "playing") return "It isn't your turn.";
-        v.moves.push({ number: v.moves.length + 1, move: { color: s.humanColor, pass: true }, captures: [] });
-        v.toPlay = other(s.humanColor);
+        if (!s || !game || game.toPlay !== s.humanColor || v.status !== "playing") return "It isn't your turn.";
+        game.pass();
         v.engineBusy = true;
         setTimeout(() => {
-          v.moves.push({ number: v.moves.length + 1, move: { color: v.toPlay, pass: true }, captures: [] });
+          game.pass();
           this.finish({ winner: "W", margin: -4.5, reason: "score" });
         }, 700);
         return null;
       }
       case "resign":
         if (!s || v.status === "finished") return "No game in progress.";
-        this.finish({ winner: other(s.humanColor), margin: 0, reason: "resign" });
+        this.finish({ winner: opponent(s.humanColor), margin: 0, reason: "resign" });
         return null;
       case "continue":
         if (v.status !== "paused") return "Nothing to continue.";
         v.status = "playing";
         v.moment = null;
         v.overlay = null;
-        if (s && v.toPlay !== s.humanColor) this.botReply();
+        if (s && game && game.toPlay !== s.humanColor) this.botReply();
         return null;
       case "retry": {
-        if (!s) return "No game in progress.";
-        let idx = v.moves.length - 1;
-        while (idx >= 0 && v.moves[idx]!.move.color !== s.humanColor) idx--;
+        if (!s || !game) return "No game in progress.";
+        const moves = game.moves;
+        let idx = moves.length - 1;
+        while (idx >= 0 && moves[idx]!.move.color !== s.humanColor) idx--;
         if (idx < 0) return "No move to take back.";
-        // Rebuild the board without the last human move and anything after it.
-        const kept = v.moves.slice(0, idx);
-        v.board = emptyBoard(s.size);
-        v.captures = { B: 0, W: 0 };
-        for (const m of kept) {
-          if ("point" in m.move) v.captures[m.move.color] += place(v.board, m.move.point, m.move.color)?.length ?? 0;
-        }
-        v.moves = kept;
-        v.toPlay = s.humanColor;
+        game.undo(moves.length - idx);
         v.status = "playing";
         v.moment = null;
         v.overlay = null;
@@ -376,16 +341,16 @@ class MockServer implements Transport {
   /** Problem mode with the built-in problems in turn; the game view waits underneath. */
   private startProblem(): void {
     const def = BUILTIN_PROBLEMS[this.problemIndex++ % BUILTIN_PROBLEMS.length]!;
-    this.gameView ??= this.view;
+    this.gameView ??= { view: this.view, game: this.game };
+    this.game = null;
     this.problemDef = def;
-    const board = def.board.map((row) => [...row.replace(/\s+/g, "")].map((c) => (c === "X" ? "B" : c === "O" ? "W" : null)) as (Color | null)[]);
     this.view = {
       ...this.freshView({ size: 9, komi: 7, humanColor: def.toPlay, botRank: "20k", handicap: 0 }),
       gameId: null,
       mode: "problem",
-      board,
+      board: boardFromDiagram(def.board),
       toPlay: def.toPlay,
-      chat: this.gameView.chat,
+      chat: this.gameView.view.chat,
       problem: {
         id: def.id,
         prompt: def.prompt,
@@ -408,11 +373,11 @@ class MockServer implements Transport {
     const def = this.problemDef;
     if (!p || !def) return "No problem on the board.";
     if (p.revealed) return "This problem is over. Press Next problem, or Back to playing.";
-    if (v.board[point.y]![point.x] !== null) return "That point is already taken.";
+    if (!GoGame.fromBoard(v.board, def.toPlay).isLegal(point)) return "That point is already taken.";
     const gtp = toGtp(point, 9);
     p.attempts++;
     const correct = def.answers.includes(gtp);
-    p.lastAttempt = { move: gtp, correct, pointLoss: correct ? 0 : Math.round((3 + Math.random() * 5) * 10) / 10 };
+    p.lastAttempt = { move: gtp, correct, pointLoss: correct ? 0 : round1(3 + Math.random() * 5) };
     const answer = def.answers[0]!;
     if (correct || p.attempts >= p.maxAttempts) {
       p.revealed = true;
@@ -432,8 +397,8 @@ class MockServer implements Transport {
 
   private evaluate(rec: MoveRecord): void {
     const v = this.view;
-    const size = v.board.length;
-    const loss = Math.round(-Math.log(1 - Math.random() * 0.97) * 1.8 * 10) / 10;
+    const size = this.game?.size ?? 9;
+    const loss = round1(-Math.log(1 - Math.random() * 0.97) * 1.8);
     const best = this.randomEmpty() ?? { x: 0, y: 0 };
     rec.eval = fakeEval(size, loss, toGtp(best, size), 1);
     v.engineBusy = false;
@@ -451,20 +416,17 @@ class MockServer implements Transport {
 
   private botReply(): void {
     const v = this.view;
+    const game = this.game;
+    if (!game) return;
     v.engineBusy = true;
     this.emit();
     setTimeout(() => {
-      const color = v.toPlay;
       for (let tries = 0; tries < 50; tries++) {
         const p = this.randomEmpty();
         if (!p) break;
-        const captures = place(v.board, p, color);
-        if (!captures) continue;
-        v.moves.push({ number: v.moves.length + 1, move: { color, point: p }, captures });
-        v.captures[color] += captures.length;
-        break;
+        if (game.playAt(p).ok) break;
       }
-      v.toPlay = other(color);
+      if (game.toPlay !== v.settings?.humanColor) game.pass();
       v.engineBusy = false;
       this.emit();
     }, 800);
@@ -476,13 +438,15 @@ class MockServer implements Transport {
     v.result = result;
     v.moment = null;
     v.engineBusy = false;
+    v.profileVersion++;
     this.msg("system", "Game over.");
     this.emit();
   }
 
   private randomEmpty(): Point | null {
     const empty: Point[] = [];
-    this.view.board.forEach((row, y) => row.forEach((c, x) => c === null && empty.push({ x, y })));
+    const board = this.game?.board ?? this.view.board;
+    board.forEach((row, y) => row.forEach((c, x) => c === null && empty.push({ x, y })));
     return empty[Math.floor(Math.random() * empty.length)] ?? null;
   }
 }

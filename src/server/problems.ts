@@ -1,17 +1,21 @@
 // Practice problems: built from the learner's own mistakes when a game ends, plus a built-in
 // starter set (builtin-problems.ts), scheduled with Leitner boxes and judged against KataGo.
-// Pure functions over StoredProblem; the controller (game.ts) makes the KataGo calls and store.ts
-// reads and writes data/problems.json.
+// Mostly pure functions over StoredProblem; `generateProblems` makes the KataGo calls for a
+// finished game through the controller (game.ts), and store.ts reads and writes data/problems.json.
 
 import { createHash } from "node:crypto";
-import { GoGame, emptyBoard, positionKey, setCell } from "../engine/index.ts";
+import { GoGame, boardFromDiagram, emptyBoard, gameBefore, opponent, positionKey, setCell } from "../engine/index.ts";
 import { toGtp, tryFromGtp } from "../shared/coords.ts";
+import { colorName, round1 } from "../shared/text.ts";
 import type {
   Board,
   Color,
   FocusRecommendation,
+  GameSettings,
+  GameSummary,
   Gtp,
   MistakeCategory,
+  MoveRecord,
   ProblemListItem,
   ProblemsResponse,
 } from "../shared/types.ts";
@@ -81,22 +85,6 @@ export interface Candidate {
 // Positions
 // ---------------------------------------------------------------------------
 
-/** A board from a diagram: one string per row, top row first, cells X / O / . (spaces ignored). */
-export function boardFromDiagram(rows: readonly string[]): Board {
-  const size = rows.length;
-  const board = emptyBoard(size);
-  rows.forEach((row, y) => {
-    const cells = row.replace(/\s+/g, "");
-    if (cells.length !== size) throw new Error(`Diagram row ${y + 1} has ${cells.length} cells, expected ${size}: "${row}"`);
-    [...cells].forEach((c, x) => {
-      if (c === "X") setCell(board, { x, y }, "B");
-      else if (c === "O") setCell(board, { x, y }, "W");
-      else if (c !== ".") throw new Error(`Diagram row ${y + 1} has an unknown cell "${c}"`);
-    });
-  });
-  return board;
-}
-
 /** The stones on a board as GTP lists, in a stable order. */
 export function stonesOf(board: Board): { B: Gtp[]; W: Gtp[] } {
   const size = board.length;
@@ -119,15 +107,12 @@ export function problemBoard(p: Pick<StoredProblem, "size" | "stones">): Board {
 
 /** The rules engine at the problem position, with the learner to move. */
 export function problemGame(p: Pick<StoredProblem, "size" | "komi" | "stones" | "toPlay">): GoGame {
-  const board = problemBoard(p);
-  const stones: { color: Color; point: { x: number; y: number } }[] = [];
-  board.forEach((row, y) => row.forEach((c, x) => c && stones.push({ color: c, point: { x, y } })));
-  return new GoGame(p.size, p.komi, 0, { stones, toPlay: p.toPlay });
+  return GoGame.fromBoard(problemBoard(p), p.toPlay, p.komi);
 }
 
 /** The problem position for KataGo, with `moves` played from it (alternating, the learner first). */
 export function problemPosition(p: Pick<StoredProblem, "size" | "komi" | "stones" | "toPlay">, moves: Gtp[] = []): Position {
-  const other: Color = p.toPlay === "B" ? "W" : "B";
+  const other = opponent(p.toPlay);
   return {
     size: p.size,
     komi: p.komi,
@@ -169,16 +154,20 @@ export function builtinProblem(def: BuiltinProblem): StoredProblem {
   };
 }
 
+/** The built-in set as fresh problems, parsed once. */
+const BUILTINS: readonly StoredProblem[] = BUILTIN_PROBLEMS.map(builtinProblem);
+
 /**
  * The stored problems with the built-in set merged in: a built-in's position, prompt and answers
  * come from the source file (plus any answers found since), its progress from the stored copy.
  * Built-ins no longer in the source are dropped.
  */
-export function withBuiltins(stored: readonly StoredProblem[], defs: readonly BuiltinProblem[] = BUILTIN_PROBLEMS): StoredProblem[] {
+export function withBuiltins(stored: readonly StoredProblem[]): StoredProblem[] {
   const byId = new Map(stored.map((p) => [p.id, p]));
-  const builtins = defs.map((def) => {
-    const fresh = builtinProblem(def);
-    const old = byId.get(def.id);
+  const builtins = BUILTINS.map((builtin) => {
+    // A copy: callers change problems in place (scheduling, new answers).
+    const fresh = { ...builtin, answers: [...builtin.answers] };
+    const old = byId.get(builtin.id);
     if (!old) return fresh;
     const { box, due, seen, solves, lastResult, lastSeen } = old;
     return {
@@ -211,7 +200,7 @@ const PROMPTS: Record<MistakeCategory, string> = {
 };
 
 export function promptFor(category: MistakeCategory, toPlay: Color): string {
-  return `${toPlay === "B" ? "Black" : "White"} to play. ${PROMPTS[category]}`;
+  return `${colorName(toPlay)} to play. ${PROMPTS[category]}`;
 }
 
 /** Whether a mistake's stored candidates are too shallow to trust for the answers. */
@@ -270,7 +259,7 @@ export function problemFromMistake(m: MistakeSnapshot, id: string, now: number):
     answers,
     bestMove: best.move,
     bestPv: best.pv.slice(0, 8),
-    difficulty: Math.round(m.pointLoss * 10) / 10,
+    difficulty: round1(m.pointLoss),
     source: { gameId: m.gameId, moveNumber: m.moveNumber, played: m.played },
     hash: positionHash(m.board, m.toPlay),
     createdAt: now,
@@ -301,6 +290,108 @@ export function addProblems(problems: StoredProblem[], fresh: readonly StoredPro
     added.push(p);
   }
   return added;
+}
+
+/**
+ * Some empty point is illegal only because of ko (positional superko): the position depends on its
+ * history, which a problem drops. Not just the immediate single-stone retake: a superko ban can
+ * fall elsewhere. A full scan, but it runs once per mistake at game end.
+ */
+export function hasKoBan(game: GoGame): boolean {
+  return game.board.some((row, y) => row.some((cell, x) => cell === null && game.illegalReason({ x, y }) === "ko"));
+}
+
+/** What `generateProblems` needs from the controller. */
+export interface ProblemMaker {
+  /** A deeper KataGo analysis of a position, or null while KataGo isn't ready. */
+  analyze(position: Position, opts: { maxVisits: number }): Promise<Analysis> | null;
+  /** Queries KataGo runs at once. */
+  concurrency: number;
+  now(): number;
+  log(msg: string): void;
+  /** The game's summary as it is now: the tutor may have tagged a mistake while KataGo was busy. */
+  currentSummary(): GameSummary | null | undefined;
+  /** Loads the stored problems, lets `change` add to them, and saves them. */
+  updateProblems<T>(change: (problems: StoredProblem[]) => T): T;
+}
+
+/**
+ * Turns each mistake of a finished game into a practice problem and returns the ones added: the
+ * position before it, the learner to play, and KataGo's candidates within ANSWER_MARGIN of its
+ * best as the answers. A mistake whose stored candidates are thin is analyzed again, deeper,
+ * first. So is one where a ko ban applied: the problem position has no move history, so the
+ * immediate recapture is legal there and the game's candidates (a ko threat, say) no longer
+ * answer it; without that analysis there is no problem.
+ */
+export async function generateProblems(
+  game: { gameId: string; settings: GameSettings; moves: readonly MoveRecord[]; summary: GameSummary },
+  maker: ProblemMaker,
+): Promise<StoredProblem[]> {
+  const { gameId, settings, moves } = game;
+  const snapshots: MistakeSnapshot[] = [];
+  const koBanned = new Set<MistakeSnapshot>();
+  for (const m of game.summary.mistakes) {
+    const record = moves[m.moveNumber - 1];
+    const evaluation = record?.eval;
+    if (!record || !evaluation) continue;
+    let before: GoGame;
+    try {
+      before = gameBefore(settings, moves, m.moveNumber);
+    } catch {
+      continue;
+    }
+    const snapshot: MistakeSnapshot = {
+      gameId,
+      moveNumber: m.moveNumber,
+      played: m.move,
+      pointLoss: evaluation.pointLoss,
+      category: m.category ?? "other",
+      size: settings.size,
+      komi: settings.komi,
+      board: before.board,
+      toPlay: record.move.color,
+      candidates: evaluation.candidates.map((c) => ({ move: c.move, lead: c.lead, visits: c.visits, pv: c.pv })),
+    };
+    snapshots.push(snapshot);
+    if (hasKoBan(before)) koBanned.add(snapshot);
+  }
+  const deepen = async (s: MistakeSnapshot): Promise<void> => {
+    try {
+      const position = problemPosition({ size: s.size, komi: s.komi, stones: stonesOf(s.board), toPlay: s.toPlay });
+      const analysis = maker.analyze(position, { maxVisits: DEEP_VISITS });
+      if (analysis) {
+        s.candidates = candidatesFromAnalysis(await analysis);
+        return;
+      }
+    } catch (err) {
+      maker.log(`deeper analysis for a problem from ${gameId} move ${s.moveNumber} failed: ${(err as Error).message}`);
+    }
+    if (koBanned.has(s)) s.candidates = []; // the game's answers belong to a position the problem can't show
+  };
+  // As many at once as KataGo runs, so they don't queue up ahead of the next game's analyses.
+  const queue = snapshots.filter((s) => koBanned.has(s) || candidatesThin(s.candidates));
+  const workers = Math.max(1, Math.min(queue.length, maker.concurrency));
+  await Promise.all(
+    Array.from({ length: workers }, async () => {
+      for (let s = queue.shift(); s; s = queue.shift()) await deepen(s);
+    }),
+  );
+  try {
+    const now = maker.now();
+    const current = maker.currentSummary() ?? game.summary;
+    for (const s of snapshots) s.category = current.mistakes.find((m) => m.moveNumber === s.moveNumber)?.category ?? s.category;
+    return maker.updateProblems((problems) => {
+      const fresh: StoredProblem[] = [];
+      for (const s of snapshots) {
+        const problem = problemFromMistake(s, nextProblemId([...problems, ...fresh]), now);
+        if (problem) fresh.push(problem);
+      }
+      return addProblems(problems, fresh);
+    });
+  } catch (err) {
+    maker.log(`saving practice problems from ${gameId} failed: ${(err as Error).message}`);
+    return [];
+  }
 }
 
 // ---------------------------------------------------------------------------

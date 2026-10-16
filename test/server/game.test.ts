@@ -1,7 +1,8 @@
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { beforeEach, describe, expect, it } from "vitest";
-import { GameController, UserError, passIsFine, type TutorEventInput } from "../../src/server/game.ts";
+import { UserError, type TutorEventInput } from "../../src/server/common.ts";
+import { GameController, passIsFine } from "../../src/server/game.ts";
 import type { Store } from "../../src/server/store.ts";
 import { FakeClock, FakeEngine, flush, tempStore } from "./fakes.ts";
 
@@ -173,6 +174,19 @@ describe("GameController", () => {
     expect(ctl.view().moment?.state).toBe("tutor");
   });
 
+  it("falls back when the wait's timer fires a moment before the deadline", async () => {
+    setup({ tutor: true });
+    clock.earlyMs = 1; // Node timers can fire about a millisecond early
+    await startGame();
+    engine.lossAfter(["C3"], 5);
+    ctl.play(C3);
+    await flush();
+    clock.advance(30_000);
+    expect(ctl.view().moment?.state).toBe("fallback");
+    expect(clock.pendingTimers).toBe(0);
+    expect(types()).toEqual(["game_start", "move", "teaching_moment", "fallback"]);
+  });
+
   it("falls back at once when the tutor detaches during the wait", async () => {
     setup({ tutor: true });
     await startGame();
@@ -321,7 +335,7 @@ describe("GameController", () => {
     const id = ctl.view().gameId!;
     await ctl.handleAction({ type: "chat", text: "before restart" });
     await ctl.handleTutor({ type: "say", text: "TUTOR-SAY" });
-    await flush(); // saves land at the end of the tick
+    await flush(); // saves land at the end of the tick, without a flush
     const texts = () => store.loadGame(id)!.chat.map((m) => m.text);
     expect(texts()).toContain("before restart");
     expect(texts()).toContain("TUTOR-SAY");
@@ -333,7 +347,7 @@ describe("GameController", () => {
 
     await again.handleAction({ type: "resign" });
     await again.handleTutor({ type: "say", text: "Let's review move 1." });
-    await flush();
+    again.flush();
     expect(store.loadGame(id)!.chat.at(-1)!.text).toBe("Let's review move 1.");
   });
 
@@ -508,7 +522,7 @@ describe("GameController", () => {
     const after = store.loadProfile();
     expect(after.mistakeCounts.shape).toBe(0);
     expect(after.mistakeCounts.direction).toBe(1);
-    await flush();
+    ctl.flush();
     expect(store.loadGame(end.gameId)!.summary!.mistakes[0]!.category).toBe("direction");
   });
 
@@ -567,6 +581,7 @@ describe("GameController", () => {
     ctl.play(E5);
     await flush();
     const id = ctl.view().gameId;
+    ctl.flush(); // as on shutdown
     const again = new GameController({ engine, store, clock, botDelayMs: 0 });
     expect(again.restoreLastGame()).toBe(true);
     expect(again.view().gameId).toBe(id);
@@ -580,6 +595,7 @@ describe("GameController", () => {
     ctl.play(C3);
     await flush();
     expect(ctl.view().status).toBe("paused");
+    ctl.flush(); // as on shutdown
     const again = new GameController({ engine, store, clock, botDelayMs: 0 });
     again.restoreLastGame();
     again.setEngineState("ready");
@@ -676,7 +692,7 @@ describe("GameController", () => {
 describe("GameController and the learner profile", () => {
   beforeEach(() => setup());
 
-  it("asks for ownership only around a mistake and categorizes a mistake that kills a group as life and death", async () => {
+  it("evaluates moves with ownership and categorizes a mistake that kills a group as life and death", async () => {
     await startGame();
     const id = ctl.view().gameId!;
     engine.botMoves = ["A9", "A8"];
@@ -691,12 +707,12 @@ describe("GameController and the learner profile", () => {
     ctl.play({ x: 8, y: 8 }); // J1
     await flush();
     expect(ctl.view().status).toBe("paused");
-    await flush();
+    ctl.flush();
     expect(store.loadGame(id)!.heuristics).toEqual({ 5: "life_and_death" });
-    // The move evals ran without ownership; the mistake's two positions were asked again with it.
+    // One query per position, each with ownership: the move evals serve the category too.
     const keyOf = (c: (typeof engine.analyzeCalls)[number]) => c.pos.moves.map((m) => m[1]).join(" ");
-    expect(engine.analyzeCalls.filter((c) => c.opts?.includeOwnership).map(keyOf)).toEqual(["E5 A9 F5 A8", "E5 A9 F5 A8 J1"]);
-    expect(engine.analyzeCalls.filter((c) => keyOf(c) === "E5 A9 F5 A8").map((c) => !!c.opts?.includeOwnership)).toEqual([false, true]);
+    expect(engine.analyzeCalls.every((c) => c.opts?.includeOwnership)).toBe(true);
+    expect(engine.analyzeCalls.filter((c) => keyOf(c) === "E5 A9 F5 A8")).toHaveLength(1);
     await ctl.handleAction({ type: "continue" });
     await flush();
 
@@ -773,5 +789,88 @@ describe("GameController and the learner profile", () => {
     ctl.newGame({ humanColor: "W" });
     expect(ctl.view().settings).toMatchObject({ humanColor: "W", handicap: 0 });
     await flush();
+  });
+});
+
+describe("GameController view contract", () => {
+  beforeEach(() => setup());
+
+  it("lists the actions it accepts, with the same checks the actions make", async () => {
+    expect(ctl.view().allowed).toEqual(["new_game", "chat", "next_problem"]);
+    await startGame();
+    expect(ctl.view().allowed).toEqual(["new_game", "chat", "next_problem", "resign", "play", "pass", "ask_tutor"]);
+    engine.lossAfter(["C3"], 6);
+    ctl.play(C3);
+    expect(ctl.view().allowed).not.toContain("play"); // the bot is to move while the eval runs
+    await flush();
+    expect(ctl.view().status).toBe("paused");
+    expect(ctl.view().allowed).toEqual(["new_game", "chat", "next_problem", "resign", "continue", "retry"]);
+    await ctl.handleAction({ type: "next_problem" });
+    expect(ctl.view().allowed).toEqual(["new_game", "chat", "next_problem", "leave_problem", "play"]);
+    await ctl.handleAction({ type: "leave_problem" });
+    await ctl.handleAction({ type: "resign" });
+    expect(ctl.view().allowed).toEqual(["new_game", "chat", "next_problem"]);
+  });
+
+  it("hands out a fresh allowed list each time, so changing one can't change the next view", async () => {
+    const first = ctl.view().allowed;
+    first.push("resign");
+    expect(ctl.view().allowed).toEqual(["new_game", "chat", "next_problem"]);
+    await startGame();
+    await ctl.handleAction({ type: "resign" });
+    ctl.view().allowed.length = 0;
+    expect(ctl.view().allowed).toEqual(["new_game", "chat", "next_problem"]);
+  });
+
+  it("stops offering Try again once a rethink took the moment's move back", async () => {
+    setup({ tutor: true });
+    await startGame();
+    engine.lossAfter(["C3"], 6);
+    ctl.play(C3);
+    await flush();
+    expect(ctl.view().allowed).toContain("retry");
+    await ctl.handleTutor({ type: "rethink", text: "Look again." });
+    expect(ctl.view().allowed).not.toContain("retry");
+    expect(ctl.view().allowed).toContain("play");
+  });
+
+  it("bumps profileVersion whenever the profile changes", async () => {
+    await startGame();
+    const v0 = ctl.view().profileVersion;
+    engine.lossAfter(["C3"], 6);
+    ctl.play(C3);
+    await flush();
+    await ctl.handleTutor({ type: "tag", gameId: ctl.view().gameId!, moveNumber: 1, category: "shape" });
+    expect(ctl.view().profileVersion).toBe(v0 + 1);
+    await ctl.handleAction({ type: "resign" });
+    expect(ctl.view().profileVersion).toBe(v0 + 2);
+    expect(ctl.currentProfile).toEqual(store.loadProfile());
+  });
+
+  it("puts the board size on events with coordinates", async () => {
+    setup({ tutor: true });
+    ctl.newGame({ size: 13 });
+    await flush();
+    engine.lossAfter(["C3"], 6);
+    ctl.play({ x: 2, y: 10 });
+    await flush();
+    await ctl.handleAction({ type: "continue" });
+    await flush();
+    await ctl.handleAction({ type: "ask_tutor" });
+    const sized = events.filter((e) => e.type === "move" || e.type === "teaching_moment" || e.type === "hint_request");
+    expect(sized.map((e) => e.type)).toEqual(["move", "teaching_moment", "move", "hint_request"]);
+    expect(sized.every((e) => "size" in e && e.size === 13)).toBe(true);
+  });
+
+  it("keeps the analysis cache bounded and serves the current position from it", async () => {
+    await startGame();
+    for (let i = 0; i < 12; i++) {
+      ctl.play({ x: i % 9, y: 8 - Math.floor(i / 9) });
+      await flush();
+    }
+    const calls = engine.analyzeCalls.length;
+    await ctl.handleAction({ type: "ask_tutor" });
+    expect(engine.analyzeCalls).toHaveLength(calls);
+    expect((ctl as unknown as { analyses: Map<string, unknown> }).analyses.size).toBeLessThanOrEqual(16);
   });
 });

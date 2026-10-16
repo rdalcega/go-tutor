@@ -32,8 +32,11 @@ export function neighbors(p: Point, size: number): Point[] {
   return out;
 }
 
-/** The connected chain of same-colored cells containing `start` (empty regions work too), and its liberties. */
-export function groupAt(board: Board, start: Point): { stones: Point[]; liberties: number } {
+/**
+ * The connected chain of same-colored cells containing `start` (empty regions work too), its
+ * liberty count and its liberties (as `pointKey`s).
+ */
+export function groupAt(board: Board, start: Point): { stones: Point[]; liberties: number; libertySet: Set<string> } {
   const size = board.length;
   const color = getCell(board, start);
   const seen = new Set([pointKey(start)]);
@@ -56,7 +59,30 @@ export function groupAt(board: Board, start: Point): { stones: Point[]; libertie
       }
     }
   }
-  return { stones, liberties: libs.size };
+  return { stones, liberties: libs.size, libertySet: libs };
+}
+
+/** A board from a diagram: one string per row, top row first, cells X (Black) / O (White) / . (spaces ignored). */
+export function boardFromDiagram(rows: readonly string[]): Board {
+  const size = rows.length;
+  const board = emptyBoard(size);
+  rows.forEach((row, y) => {
+    const cells = row.replace(/\s+/g, "");
+    if (cells.length !== size) throw new Error(`Diagram row ${y + 1} has ${cells.length} cells, expected ${size}: "${row}"`);
+    [...cells].forEach((c, x) => {
+      if (c === "X") setCell(board, { x, y }, "B");
+      else if (c === "O") setCell(board, { x, y }, "W");
+      else if (c !== ".") throw new Error(`Diagram row ${y + 1} has an unknown cell "${c}"`);
+    });
+  });
+  return board;
+}
+
+/** The stones on a board, row by row from the top-left. */
+export function boardStones(board: Board): { color: Color; point: Point }[] {
+  const stones: { color: Color; point: Point }[] = [];
+  board.forEach((row, y) => row.forEach((c, x) => c && stones.push({ color: c, point: { x, y } })));
+  return stones;
 }
 
 /** Compact string of the board's contents, for positional-superko checks. */

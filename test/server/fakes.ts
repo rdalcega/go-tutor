@@ -4,14 +4,27 @@ import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Gtp } from "../../src/shared/types.ts";
-import type { Clock, GameEngine } from "../../src/server/game.ts";
-import { sideToMove, type Analysis, type AnalyzeOptions, type Position } from "../../src/server/katago.ts";
+import type { Clock } from "../../src/server/common.ts";
+import type { GameEngine } from "../../src/server/game.ts";
+import { resolveKataGoPaths, sideToMove, type Analysis, type AnalyzeOptions, type Position } from "../../src/server/katago.ts";
 import { Store } from "../../src/server/store.ts";
+
+/** Whether the real KataGo (binary, config and nets) is installed, for the tests that need it. */
+export function hasKataGo(): boolean {
+  try {
+    resolveKataGoPaths();
+    return true;
+  } catch {
+    return false;
+  }
+}
 
 export class FakeClock implements Clock {
   t = Date.UTC(2026, 9, 15, 12, 0, 0);
   private nextId = 1;
   private timers: { id: number; at: number; fn: () => void }[] = [];
+  /** Timers fire this many ms before they are due (the clock reads that time while they run). */
+  earlyMs = 0;
 
   now(): number {
     return this.t;
@@ -34,10 +47,10 @@ export class FakeClock implements Clock {
   advance(ms: number): void {
     const end = this.t + ms;
     for (;;) {
-      const due = this.timers.filter((t) => t.at <= end).sort((a, b) => a.at - b.at)[0];
+      const due = this.timers.filter((t) => t.at - this.earlyMs <= end).sort((a, b) => a.at - b.at)[0];
       if (!due) break;
       this.timers = this.timers.filter((t) => t !== due);
-      this.t = due.at;
+      this.t = Math.max(this.t, due.at - this.earlyMs);
       due.fn();
     }
     this.t = end;

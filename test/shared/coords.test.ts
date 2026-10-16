@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { fromGtp, pointKey, parsePointKey, samePoint, toGtp, tryFromGtp } from "../../src/shared/coords.ts";
+import { fromGtp, moveGtp, movePoint, pointKey, samePoint, toGtp, tryFromGtp } from "../../src/shared/coords.ts";
 
 describe("toGtp", () => {
   it("puts row 1 at the bottom and A at the left", () => {
@@ -62,10 +62,20 @@ describe("fromGtp", () => {
   });
 });
 
-describe("point keys", () => {
-  it("round-trips", () => {
-    expect(parsePointKey(pointKey({ x: 3, y: 12 }))).toEqual({ x: 3, y: 12 });
+describe("points and moves", () => {
+  it("keys and compares points", () => {
+    expect(pointKey({ x: 3, y: 12 })).toBe("3,12");
     expect(samePoint({ x: 1, y: 2 }, { x: 1, y: 2 })).toBe(true);
     expect(samePoint({ x: 1, y: 2 }, { x: 2, y: 1 })).toBe(false);
+    expect(samePoint(null, { x: 1, y: 2 })).toBe(false);
+    expect(samePoint(undefined, null)).toBe(false);
+  });
+
+  it("names a move's point", () => {
+    expect(movePoint({ color: "B", point: { x: 3, y: 5 } })).toEqual({ x: 3, y: 5 });
+    expect(movePoint({ color: "W", pass: true })).toBeNull();
+    expect(movePoint(null)).toBeNull();
+    expect(moveGtp({ color: "B", point: { x: 3, y: 5 } }, 9)).toBe("D4");
+    expect(moveGtp({ color: "W", pass: true }, 9)).toBe("pass");
   });
 });

@@ -23,6 +23,7 @@ import { existsSync, readdirSync, realpathSync } from "node:fs";
 import { createInterface } from "node:readline";
 import { delimiter, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { opponent } from "../engine/board.ts";
 import { toGtp } from "../shared/coords.ts";
 import { toHumanSLProfile } from "../shared/rank.ts";
 import type { Color, Gtp, MoveEval } from "../shared/types.ts";
@@ -91,7 +92,6 @@ export interface BotMoveOptions {
 export interface Engine {
   start(): Promise<void>;
   stop(): Promise<void>;
-  readonly ready: boolean;
   /** Queries KataGo runs at once; more wait in the queue. */
   readonly concurrency: number;
   analyze(pos: Position, opts?: AnalyzeOptions): Promise<Analysis>;
@@ -128,13 +128,9 @@ export const MIN_POLICY_MASS = 0.01;
 /** The bot also passes when the regular (strongest-play) policy puts at least this much on pass. */
 export const PASS_POLICY_THRESHOLD = 0.5;
 
-export function other(c: Color): Color {
-  return c === "B" ? "W" : "B";
-}
-
 export function sideToMove(pos: Position): Color {
   const last = pos.moves.at(-1);
-  if (last) return other(last[0]);
+  if (last) return opponent(last[0]);
   return pos.initialPlayer ?? (pos.initialStones?.length ? "W" : "B");
 }
 
@@ -205,7 +201,7 @@ export const TRUSTED_CANDIDATE_VISITS = 50;
  * searches); any other move loses the root lead before minus the root lead after.
  */
 export function moveEvalFrom(before: Analysis, after: Analysis, played?: Gtp): MoveEval {
-  if (after.toPlay !== other(before.toPlay)) {
+  if (after.toPlay !== opponent(before.toPlay)) {
     throw new Error("moveEvalFrom: 'after' must be the position right after one move from 'before'");
   }
   const leadBefore = before.rootInfo.scoreLead;
@@ -314,15 +310,6 @@ export class KataGo implements Engine {
   private startPromise: Promise<void> | null = null;
 
   constructor(private readonly opts: KataGoOptions = {}) {}
-
-  get ready(): boolean {
-    return this.isReady;
-  }
-
-  /** Queries queued or running. */
-  get pending(): number {
-    return this.waiting.length + this.inFlight.size;
-  }
 
   start(): Promise<void> {
     this.startPromise ??= Promise.resolve()

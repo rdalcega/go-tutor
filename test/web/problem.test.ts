@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { ProblemView } from "../../src/shared/types.ts";
-import { attemptsLeftText, categoryName, problemHeading, problemResult } from "../../web/src/geometry.ts";
+import { categoryLabel } from "../../src/shared/text.ts";
+import { attemptsLeftText, problemHeading, problemResult } from "../../web/src/geometry.ts";
 
 const base: ProblemView = {
   id: "p4",
@@ -18,7 +19,7 @@ const base: ProblemView = {
 
 describe("problem card helpers", () => {
   it("names the category and where the problem comes from", () => {
-    expect(categoryName("capturing_race")).toBe("Capturing race");
+    expect(categoryLabel("capturing_race", { capitalize: true })).toBe("Capturing race");
     expect(problemHeading(base)).toBe("Life and death · from your game, move 14");
     const { source: _source, ...builtin } = base;
     expect(problemHeading({ ...builtin, kind: "builtin", category: "tactics" })).toBe("Tactics · classic problem");

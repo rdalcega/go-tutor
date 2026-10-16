@@ -4,9 +4,20 @@
 
 import { randomBytes } from "node:crypto";
 import type { IncomingMessage, ServerResponse } from "node:http";
-import type { ClientAction, Color, GameSettings, MistakeCategory, TutorCommand, TutorEvent } from "../shared/types.ts";
-import { UserError, type GameController, type TutorEventInput } from "./game.ts";
-import { MISTAKE_CATEGORIES, type Store } from "./store.ts";
+import {
+  MARK_KINDS,
+  MISTAKE_CATEGORIES,
+  type ClientAction,
+  type Color,
+  type GameSettings,
+  type MarkKind,
+  type MistakeCategory,
+  type TutorCommand,
+  type TutorEvent,
+} from "../shared/types.ts";
+import { UserError, type TutorEventInput } from "./common.ts";
+import type { GameController } from "./game.ts";
+import type { Store } from "./store.ts";
 
 export interface BridgeOptions {
   /** Events kept in memory for `since` replays; older ones are read from the log. Default 1000. */
@@ -73,8 +84,9 @@ export class TutorBridge {
   /** Stamp, log and fan out one event. */
   publish(input: TutorEventInput): TutorEvent {
     const event = { ...input, seq: ++this.seq, ts: this.now() } as TutorEvent;
+    const json = JSON.stringify(event); // once, for the log and every stream
     try {
-      this.store.appendEvent(event);
+      this.store.appendEvent(event, json);
       if (this.logFailing) this.log(`Event log is writable again (from seq ${event.seq}).`);
       this.logFailing = false;
     } catch (err) {
@@ -84,7 +96,7 @@ export class TutorBridge {
     }
     this.ring.push(event);
     if (this.ring.length > this.ringSize) this.ring.shift();
-    const frame = tutorFrame(event);
+    const frame = tutorFrame(event, json);
     for (const res of this.tutors) send(res, frame);
     return event;
   }
@@ -239,8 +251,8 @@ function startSse(res: ServerResponse): void {
   res.write(": connected\n\n");
 }
 
-function tutorFrame(e: TutorEvent): string {
-  return `id: ${e.seq}\ndata: ${JSON.stringify(e)}\n\n`;
+function tutorFrame(e: TutorEvent, json = JSON.stringify(e)): string {
+  return `id: ${e.seq}\ndata: ${json}\n\n`;
 }
 
 function viewFrame(view: unknown): string {
@@ -323,8 +335,6 @@ export function parseClientAction(body: unknown): ClientAction {
   }
 }
 
-const MARK_KINDS = ["circle", "triangle", "square", "x"] as const;
-
 export function parseTutorCommand(body: unknown): TutorCommand {
   const o = asObject(body);
   const momentId = str(o, "momentId");
@@ -349,7 +359,7 @@ export function parseTutorCommand(body: unknown): TutorCommand {
       return {
         type: "mark",
         points: strings(o, "points"),
-        ...(kind && { kind: kind as (typeof MARK_KINDS)[number] }),
+        ...(kind && { kind: kind as MarkKind }),
         ...(text && { text }),
       };
     }

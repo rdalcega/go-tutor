@@ -1,6 +1,6 @@
 import type { Board, Color, Move, MoveRecord, Point } from "../shared/types.ts";
 import { inBounds } from "../shared/coords.ts";
-import { cloneBoard, emptyBoard, getCell, groupAt, handicapPoints, neighbors, opponent, positionKey, setCell } from "./board.ts";
+import { boardStones, cloneBoard, emptyBoard, getCell, groupAt, handicapPoints, neighbors, opponent, positionKey, setCell } from "./board.ts";
 
 export type IllegalReason = "occupied" | "suicide" | "ko" | "not_your_turn" | "game_over" | "off_board";
 
@@ -66,6 +66,25 @@ export class GoGame {
       if (!result.ok) throw new Error(`Move ${game.moves.length + 1} is illegal: ${result.reason}`);
     }
     return game;
+  }
+
+  /** A game at `board` with `toPlay` to move: every stone is a setup stone, so there is no history (or ko). */
+  static fromBoard(board: Board, toPlay: Color, komi = 0): GoGame {
+    return new GoGame(board.length, komi, 0, { stones: boardStones(board), toPlay });
+  }
+
+  /**
+   * The game as it was before move `n` (1-based), as a separate game that can be played on. Built
+   * from this game's history without replaying; the move records are shared.
+   */
+  before(n: number): GoGame {
+    const copy: GoGame = Object.assign(Object.create(GoGame.prototype) as GoGame, this, {
+      records: this.records.slice(),
+      history: this.history.slice(),
+      seen: new Map(this.seen),
+    });
+    copy.undo(this.records.length - Math.max(0, n - 1));
+    return copy;
   }
 
   /** A copy of the current board, board[y][x]. */
@@ -194,3 +213,8 @@ export class GoGame {
   }
 }
 
+
+/** The game before move `n` (1-based) of `moves`, replayed from the settings. Throws if the moves don't replay. */
+export function gameBefore(setup: { size: number; komi: number; handicap: number }, moves: readonly MoveRecord[], n: number): GoGame {
+  return GoGame.fromMoves(setup.size, setup.komi, setup.handicap, moves.slice(0, Math.max(0, n - 1)).map((r) => r.move));
+}

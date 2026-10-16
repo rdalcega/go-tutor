@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { deadStonesFromOwnership, scoreArea, scoreWithOwnership, toGameResult } from "../../src/engine/score.ts";
+import { deadStonesFromOwnership, scoreArea } from "../../src/engine/score.ts";
 import { emptyBoard } from "../../src/engine/board.ts";
 import { boardFrom } from "./helpers.ts";
 
@@ -132,10 +132,10 @@ describe("dead stones from ownership", () => {
   });
 
   it("scores with ownership in one step", () => {
-    const s = scoreWithOwnership(board, 7, splitOwnership(5, 2));
+    const s = scoreArea(board, 7, deadStonesFromOwnership(board, splitOwnership(5, 2)));
     expect(s.black).toBe(10);
     expect(s.white).toBe(15);
     expect(s.margin).toBe(-12);
-    expect(toGameResult(s)).toEqual({ winner: "W", margin: -12, reason: "score" });
+    expect(s.winner).toBe("W");
   });
 });

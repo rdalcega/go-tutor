@@ -2,9 +2,10 @@
 // tutor's tags), the adaptive mistake threshold, and what to teach next. Pure functions over the
 // Profile; the controller loads and saves it.
 
-import { GoGame, getCell, neighbors } from "../engine/index.ts";
-import { pointKey, tryFromGtp } from "../shared/coords.ts";
+import { GoGame, getCell, groupAt, neighbors, opponent } from "../engine/index.ts";
+import { movePoint, pointKey, tryFromGtp } from "../shared/coords.ts";
 import { clampRating, rankToRating, ratingToRank } from "../shared/rank.ts";
+import { categoryLabel } from "../shared/text.ts";
 import type {
   Board,
   Color,
@@ -291,38 +292,19 @@ interface Chain {
   liberties: Set<string>;
 }
 
+/** Every chain of stones on the board. */
 function chains(board: Board): Chain[] {
-  const size = board.length;
   const seen = new Set<string>();
   const out: Chain[] = [];
-  for (let y = 0; y < size; y++) {
-    for (let x = 0; x < size; x++) {
-      const color = board[y]![x];
-      if (!color || seen.has(pointKey({ x, y }))) continue;
-      const chain: Chain = { color, stones: [], liberties: new Set() };
-      const stack = [{ x, y }];
-      seen.add(pointKey({ x, y }));
-      while (stack.length > 0) {
-        const p = stack.pop()!;
-        chain.stones.push(p);
-        for (const n of neighbors(p, size)) {
-          const cell = getCell(board, n);
-          const key = pointKey(n);
-          if (cell === null) chain.liberties.add(key);
-          else if (cell === color && !seen.has(key)) {
-            seen.add(key);
-            stack.push(n);
-          }
-        }
-      }
-      out.push(chain);
-    }
-  }
+  board.forEach((row, y) =>
+    row.forEach((color, x) => {
+      if (!color || seen.has(pointKey({ x, y }))) return;
+      const group = groupAt(board, { x, y });
+      for (const s of group.stones) seen.add(pointKey(s));
+      out.push({ color, stones: group.stones, liberties: group.libertySet });
+    }),
+  );
   return out;
-}
-
-function chainAt(list: Chain[], p: Point): Chain | undefined {
-  return list.find((c) => c.stones.some((s) => s.x === p.x && s.y === p.y));
 }
 
 function touches(chain: Chain, other: Chain, size: number): boolean {
@@ -365,24 +347,17 @@ function isCapturingRace(ctx: MistakeContext, mover: Color, played: Point | null
 /** Stones captured by `color` playing `gtp` on `board`, or 0 if it isn't a legal board move. */
 function capturesBy(board: Board, color: Color, gtp: Gtp | undefined): number {
   if (!gtp) return 0;
-  const size = board.length;
-  const point = tryFromGtp(gtp, size);
+  const point = tryFromGtp(gtp, board.length);
   if (!point) return 0;
-  const stones: { color: Color; point: Point }[] = [];
-  board.forEach((row, y) => row.forEach((c, x) => c && stones.push({ color: c, point: { x, y } })));
-  const game = new GoGame(size, 0, 0, { stones, toPlay: color });
-  const result = game.play({ color, point });
+  const result = GoGame.fromBoard(board, color).play({ color, point });
   return result.ok ? result.record.captures.length : 0;
 }
 
 /** Captures are involved: the move captured, put its own stones in atari, the best move captured, or the reply captures. */
 function involvesCaptures(ctx: MistakeContext, mover: Color, played: Point | null): boolean {
   if (ctx.captures > 0) return true;
-  if (played) {
-    const own = chainAt(chains(ctx.boardAfter), played);
-    if (own && own.liberties.size === 1) return true;
-  }
-  return capturesBy(ctx.boardBefore, mover, ctx.bestMove) > 0 || capturesBy(ctx.boardAfter, mover === "B" ? "W" : "B", ctx.reply) > 0;
+  if (played && getCell(ctx.boardAfter, played) && groupAt(ctx.boardAfter, played).liberties === 1) return true;
+  return capturesBy(ctx.boardBefore, mover, ctx.bestMove) > 0 || capturesBy(ctx.boardAfter, opponent(mover), ctx.reply) > 0;
 }
 
 /** An empty triangle (three own stones in a 2×2 square, the fourth empty) or a clump of four, made by the move. */
@@ -417,7 +392,7 @@ function manhattan(a: Point, b: Point): number {
  */
 export function classifyMistake(ctx: MistakeContext): MistakeCategory {
   const mover = ctx.move.color;
-  const played = "point" in ctx.move ? ctx.move.point : null;
+  const played = movePoint(ctx.move);
   const best = tryFromGtp(ctx.bestMove, ctx.size) ?? null;
   if (isCapturingRace(ctx, mover, played, best)) return "capturing_race";
   if (lifeStatusChanged(ctx)) return "life_and_death";
@@ -445,10 +420,6 @@ const BOOST_PER_GAME = 0.1;
 const MAX_BOOST = 0.5;
 /** Recency-weighted mistakes needed before problems beat playing. */
 const PROBLEMS_SCORE = 1.5;
-
-export function categoryLabel(c: MistakeCategory): string {
-  return c.replace(/_/g, " ");
-}
 
 /** Game ids newest first: recorded games, then any older games that only appear in recent mistakes. */
 function gamesNewestFirst(profile: Profile): string[] {

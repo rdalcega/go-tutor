@@ -227,9 +227,8 @@ describe("KataGo process wrapper (fake engine)", () => {
 
   it("starts, forwards stderr and normalizes analyses", async () => {
     kg = make();
-    expect(kg.ready).toBe(false);
+    await expect(kg.analyze(empty9)).rejects.toThrow(/not running/);
     await kg.start();
-    expect(kg.ready).toBe(true);
     expect(logs).toContain("Loading model...");
 
     const a = await kg.analyze(playMove(empty9, "E5"), { includeOwnership: true });
@@ -248,7 +247,6 @@ describe("KataGo process wrapper (fake engine)", () => {
     const results = await Promise.all(positions.map((p) => kg!.analyze(p)));
     expect(results.map((r) => r.toPlay)).toEqual(["W", "B", "B", "B", "B"]);
     expect(Math.max(...results.map((r) => r.rootInfo.visits))).toBe(2);
-    expect(kg.pending).toBe(0);
   });
 
   it("rejects a query KataGo reports as an error and keeps going", async () => {
@@ -286,7 +284,7 @@ describe("KataGo process wrapper (fake engine)", () => {
     process.env.FAKE_KATAGO = "crash";
     kg = make();
     await expect(kg.start()).rejects.toThrow(/exited \(code 2.*could not load model/s);
-    expect(kg.ready).toBe(false);
+    await expect(kg.analyze(empty9)).rejects.toThrow(/not running/);
   });
 
   it("rejects pending queries and reports a crash after start", async () => {
@@ -303,7 +301,6 @@ describe("KataGo process wrapper (fake engine)", () => {
     await expect(kg.analyze({ ...empty9, moves: [["B", "DIE"]] })).rejects.toThrow(/exited \(code 3/);
     await expect(pending).rejects.toThrow(/exited/);
     expect(exits).toHaveLength(1);
-    expect(kg.ready).toBe(false);
     await expect(kg.analyze(empty9)).rejects.toThrow(/not running/);
   });
 
@@ -317,7 +314,6 @@ describe("KataGo process wrapper (fake engine)", () => {
     const queued = kg.analyze(empty9);
     await expect(started).rejects.toThrow(/Could not launch KataGo/);
     await expect(queued).rejects.toThrow(/Could not launch KataGo/);
-    expect(kg.pending).toBe(0);
   });
 
   it("sends rules with positional superko, to match the local rules engine", () => {

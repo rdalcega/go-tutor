@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { groupAt } from "../../src/engine/index.ts";
+import { GoGame, boardFromDiagram, groupAt } from "../../src/engine/index.ts";
 import { tryFromGtp } from "../../src/shared/coords.ts";
 import type { MistakeCategory } from "../../src/shared/types.ts";
 import { BUILTIN_PROBLEMS } from "../../src/server/builtin-problems.ts";
@@ -7,9 +7,9 @@ import {
   BOX_INTERVALS,
   acceptedAnswers,
   addProblems,
-  boardFromDiagram,
   builtinProblem,
   candidatesThin,
+  hasKoBan,
   nextProblemId,
   pickNextProblem,
   positionHash,
@@ -276,5 +276,28 @@ describe("GET /api/problems body", () => {
     expect(r.counts).toEqual({ total: 3, due: 2, fromGames: 2, builtin: 1, byBox: [2, 1, 0, 0, 0], dueByCategory: { tactics: 1, shape: 1 } });
     expect(r.problems[1]).toMatchObject({ source: { gameId: "g1", moveNumber: 5 }, difficulty: 5, answers: ["D7"] });
     expect(r.problems[1]!.source).not.toHaveProperty("played");
+  });
+});
+
+describe("hasKoBan", () => {
+  const play = (g: GoGame, moves: [number, number][]) => {
+    for (const [x, y] of moves) expect(g.playAt({ x, y }).ok).toBe(true);
+    return g;
+  };
+
+  it("finds the immediate retake of a single stone", () => {
+    // On 2×2 White's last move takes one stone, and retaking it would repeat an earlier position.
+    const g = play(new GoGame(2, 0), [[0, 0], [1, 0], [0, 1], [1, 1], [0, 0], [0, 1]]);
+    expect(g.lastMove?.captures).toHaveLength(1);
+    expect(hasKoBan(g)).toBe(true);
+    expect(hasKoBan(new GoGame(9, 7))).toBe(false);
+  });
+
+  it("finds a superko ban that is not the retake of a single stone", () => {
+    // On 3×3 the last move takes two stones; White replaying C3 would recreate the position after move 7.
+    const g = play(new GoGame(3, 0), [[2, 2], [2, 0], [1, 1], [1, 2], [0, 1], [0, 0], [1, 0], [2, 1], [2, 2]]);
+    expect(g.lastMove?.captures).toHaveLength(2);
+    expect(g.illegalReason({ x: 2, y: 0 })).toBe("ko");
+    expect(hasKoBan(g)).toBe(true);
   });
 });

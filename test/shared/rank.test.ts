@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { normalizeBotRank, normalizeRank, rankToRating, ratingToRank, toHumanSLProfile } from "../../src/shared/rank.ts";
+import { normalizeBotRank, rankToRating, ratingToRank, toHumanSLProfile } from "../../src/shared/rank.ts";
 
 describe("rankToRating", () => {
   it("maps the scale anchors", () => {
@@ -45,8 +45,8 @@ describe("ratingToRank", () => {
   });
 
   it("normalizes rank strings", () => {
-    expect(normalizeRank("18K")).toBe("18k");
-    expect(normalizeRank("2 dan")).toBe("2d");
+    expect(normalizeBotRank("18K")).toBe("18k");
+    expect(normalizeBotRank("2 dan")).toBe("2d");
   });
 });
 

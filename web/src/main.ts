@@ -1,17 +1,16 @@
 import "./style.css";
 import type { ChatMessage, ClientAction, Color, GameView, GameSettings, ProfileResponse } from "../../src/shared/types.ts";
 import { ratingToRank } from "../../src/shared/rank.ts";
+import { categoryLabel, colorName, formatScore } from "../../src/shared/text.ts";
 import { type ConnectionState, type Transport, httpTransport } from "./api.ts";
 import { BoardView } from "./board.ts";
-import { tryFromGtp } from "../../src/shared/coords.ts";
+import { moveGtp, movePoint, tryFromGtp } from "../../src/shared/coords.ts";
 import {
   attemptsLeftText,
-  canRetry,
   formatLoss,
   humanMoves,
   lastHumanMove,
   lossLevel,
-  moveLabel,
   nextBotText,
   positionBefore,
   problemHeading,
@@ -88,20 +87,21 @@ const el = {
   toast: $("toast"),
 };
 
-const colorName = (c: Color) => (c === "B" ? "Black" : "White");
-
 // --- state ---------------------------------------------------------------
 
 let view: GameView | null = null;
+/** The last stream frame's text, so an identical frame isn't rendered again (compared as sent, not re-serialized). */
+let lastFrame: string | undefined;
 let pending = false;
 let shownResultFor: string | null = null;
 let renderedChatKey = "";
 let ngFormTouched = false;
 let profile: ProfileResponse | null = null;
-/** The finished game the profile was last fetched for, so each game end fetches it once. */
-let profileFor: string | null = null;
-/** The profile was fetched for the problem that just ended (problems solved, practiced categories). */
-let profileForProblem = false;
+/** The view's profileVersion that `profile` was fetched for, and the one last asked for. */
+let profileVersion: number | null = null;
+let profileRequested: number | null = null;
+/** The board before a variation's `fromMove`, for the game and move count it was built from. */
+let beforeCache: { key: string; value: ReturnType<typeof positionBefore> } | null = null;
 
 let transport: Transport = httpTransport;
 
@@ -143,36 +143,31 @@ function toast(text: string): void {
   toastTimer = setTimeout(() => (el.toast.hidden = true), 3500);
 }
 
-function setView(v: GameView): void {
+/** `raw` is the stream frame the view came in; an action's response has none and always renders. */
+function setView(v: GameView, raw?: string): void {
+  // The server sends a frame per change, and some changes leave the view as it was.
+  if (raw !== undefined && raw === lastFrame) return;
+  lastFrame = raw;
   view = v;
-  // The profile changes when a game ends: fetch it once per finished game.
-  if (v.status === "finished" && v.gameId && v.gameId !== profileFor) {
-    profileFor = v.gameId;
-    void refreshProfile();
+  // The profile changed (a game or problem ended, a tag): fetch it again.
+  if (v.profileVersion !== profileRequested) {
+    profileRequested = v.profileVersion;
+    void refreshProfile(v.profileVersion);
   }
-  // So does finishing a problem: fetch it once each time a problem ends.
-  const problemOver = v.mode === "problem" && !!v.problem?.revealed;
-  if (problemOver && !profileForProblem) void refreshProfile();
-  profileForProblem = problemOver;
   render();
 }
 
-async function refreshProfile(): Promise<void> {
+async function refreshProfile(version: number): Promise<void> {
   const p = await transport.getProfile();
-  if (p) profile = p;
+  if (!p || version !== profileRequested) return; // a newer change is being fetched
+  profile = p;
+  profileVersion = version;
   render();
 }
 
-/** Whether the board and turn-based controls accept input right now. */
-function humanCanMove(v: GameView | null): v is GameView & { settings: GameSettings } {
-  return (
-    !!v?.settings &&
-    v.mode !== "idle" &&
-    v.status === "playing" &&
-    !v.engineBusy &&
-    !pending &&
-    v.toPlay === v.settings.humanColor
-  );
+/** Whether the server takes this action now (the view lists them) and no other action is on its way. */
+function can(v: GameView | null, action: ClientAction["type"]): v is GameView {
+  return !!v && !pending && v.allowed.includes(action);
 }
 
 // --- rendering -----------------------------------------------------------
@@ -191,6 +186,13 @@ function render(): void {
   renderResultRating();
 }
 
+/** The board before move `fromMove`, memoized: it only changes with the game, its moves and the move. */
+function boardBefore(v: GameView, settings: GameSettings, fromMove: number): ReturnType<typeof positionBefore> {
+  const key = `${v.gameId}|${v.moves.length}|${fromMove}`;
+  if (beforeCache?.key !== key) beforeCache = { key, value: positionBefore(v.moves, settings, fromMove) };
+  return beforeCache.value;
+}
+
 function renderBoard(v: GameView | null): void {
   if (!v) return;
   const size = v.board.length;
@@ -198,13 +200,13 @@ function renderBoard(v: GameView | null): void {
   const moment = v.moment;
   const bestGtp =
     moment?.state === "fallback" ? v.moves[moment.moveNumber - 1]?.eval?.bestMove : undefined;
-  const canMove = humanCanMove(v);
+  const canMove = can(v, "play") && !!v.settings;
   // A variation that replaces a move is drawn on the board from before that move.
   const fromMove = v.overlay?.variation?.fromMove;
-  const before = fromMove !== undefined && v.settings ? positionBefore(v.moves, v.settings, fromMove) : null;
+  const before = fromMove !== undefined && v.settings ? boardBefore(v, v.settings, fromMove) : null;
   board.setScene({
     board: before?.board ?? v.board,
-    lastMove: before ? before.lastMove : last && "point" in last.move ? last.move.point : null,
+    lastMove: before ? before.lastMove : movePoint(last?.move),
     overlay: v.overlay,
     bestMove: bestGtp ? (tryFromGtp(bestGtp, size) ?? null) : null,
     hoverColor: canMove && !before ? v.settings!.humanColor : null,
@@ -241,13 +243,11 @@ function turnText(v: GameView): string {
 }
 
 function renderControls(v: GameView | null): void {
-  const canMove = humanCanMove(v);
-  const inGame = !!v?.settings && v.mode === "game" && v.status !== "finished";
-  el.pass.disabled = !canMove || v?.mode === "problem";
+  el.pass.disabled = !can(v, "pass");
   // Hints are for the human's move, not while paused or while the bot is to move.
-  el.hint.disabled = !inGame || pending || v.status !== "playing" || v.toPlay !== v.settings!.humanColor;
-  el.resign.disabled = !inGame || pending;
-  el.practice.disabled = !v || pending || v.mode === "problem";
+  el.hint.disabled = !can(v, "ask_tutor");
+  el.resign.disabled = !can(v, "resign");
+  el.practice.disabled = !can(v, "next_problem") || v.mode === "problem";
   el.chatInput.disabled = !v;
 
   // Keep the new-game form in sync with the current game unless the user is editing it.
@@ -268,12 +268,11 @@ function renderMoment(v: GameView | null): void {
 
   const record = v.moves[m.moveNumber - 1];
   const size = v.board.length;
-  const played = record ? moveLabel(record, size) : `move ${m.moveNumber}`;
+  const played = record ? moveGtp(record.move, size) : `move ${m.moveNumber}`;
   const best = record?.eval?.bestMove;
   el.moment.classList.toggle("fallback", m.state === "fallback");
   el.momentTitle.textContent = `Move ${m.moveNumber}: ${played} lost ${m.pointLoss.toFixed(1)} points`;
 
-  const retryable = canRetry(v);
   if (m.state === "waiting") {
     el.momentText.textContent = v.tutorAttached
       ? "Take a look at the position. Your tutor is on the way."
@@ -296,10 +295,10 @@ function renderMoment(v: GameView | null): void {
           : "KataGo's suggestion is shown on the board.";
   }
 
-  el.continueBtn.disabled = pending || v.status !== "paused";
+  el.continueBtn.disabled = !can(v, "continue");
   // After a rethink the move is already taken back; the server would refuse another Try again.
-  el.retry.hidden = !retryable;
-  el.retry.disabled = pending || !retryable;
+  el.retry.hidden = !v.allowed.includes("retry");
+  el.retry.disabled = !can(v, "retry");
 }
 
 function renderProblem(v: GameView | null): void {
@@ -313,8 +312,15 @@ function renderProblem(v: GameView | null): void {
   el.problemResult.hidden = !result;
   el.problemResult.className = `problem-result ${result?.tone ?? ""}`;
   el.problemResult.textContent = result?.text ?? "";
-  el.nextProblem.disabled = pending;
-  el.leaveProblem.disabled = pending;
+  el.nextProblem.disabled = !can(v, "next_problem");
+  el.leaveProblem.disabled = !can(v, "leave_problem");
+}
+
+/** The eval strip before there is a human move to show. */
+function clearEval(): void {
+  el.evalLoss.textContent = "–";
+  el.evalLoss.className = "loss";
+  el.evalDetail.textContent = "No moves yet.";
 }
 
 function renderEval(v: GameView | null): void {
@@ -322,67 +328,55 @@ function renderEval(v: GameView | null): void {
   el.evalCard.hidden = v?.mode === "problem";
   const human = v?.settings?.humanColor;
   if (!v || !human) {
-    el.evalLoss.textContent = "–";
-    el.evalLoss.className = "loss";
-    el.evalDetail.textContent = "No moves yet.";
+    clearEval();
     el.spark.replaceChildren();
     return;
   }
   const size = v.board.length;
   const last = lastHumanMove(v.moves, human);
   if (!last) {
-    el.evalLoss.textContent = "–";
-    el.evalLoss.className = "loss";
-    el.evalDetail.textContent = "No moves yet.";
+    clearEval();
   } else if (!last.eval) {
     el.evalLoss.textContent = "…";
     el.evalLoss.className = "loss";
-    el.evalDetail.textContent = `Move ${last.number} · ${moveLabel(last, size)} · analyzing`;
+    el.evalDetail.textContent = `Move ${last.number} · ${moveGtp(last.move, size)} · analyzing`;
   } else {
     const e = last.eval;
+    const played = moveGtp(last.move, size);
     el.evalLoss.textContent = `${formatLoss(e.pointLoss)} pts`;
     el.evalLoss.className = `loss ${lossLevel(e.pointLoss)}`;
-    const best = e.pointLoss >= 0.05 && e.bestMove !== moveLabel(last, size) ? ` · best ${e.bestMove}` : "";
-    el.evalDetail.textContent = `Move ${last.number} · ${moveLabel(last, size)}${best} · win ${Math.round(e.winrateAfter * 100)}%`;
+    const best = e.pointLoss >= 0.05 && e.bestMove !== played ? ` · best ${e.bestMove}` : "";
+    el.evalDetail.textContent = `Move ${last.number} · ${played}${best} · win ${Math.round(e.winrateAfter * 100)}%`;
   }
-  renderSparkline(humanMoves(v.moves, human).flatMap((m) => (m.eval ? [m.eval.pointLoss] : [])));
+  const losses = humanMoves(v.moves, human).flatMap((m) => (m.eval ? [m.eval.pointLoss] : []));
+  const base = svg("line", { class: "base", x1: "0", x2: "300", y1: "3", y2: "3" });
+  sparkline(el.spark, sparklinePoints(losses, 300, 44), losses.map((l) => ({ class: lossLevel(l), title: `${formatLoss(l)} pts` })), [base]);
 }
 
 const SVG_NS = "http://www.w3.org/2000/svg";
 
-function renderSparkline(losses: number[]): void {
-  const W = 300;
-  const H = 44;
-  const pts = sparklinePoints(losses, W, H);
-  const nodes: SVGElement[] = [];
-  const base = document.createElementNS(SVG_NS, "line");
-  base.setAttribute("class", "base");
-  base.setAttribute("x1", "0");
-  base.setAttribute("x2", String(W));
-  base.setAttribute("y1", "3");
-  base.setAttribute("y2", "3");
-  nodes.push(base);
-  if (pts.length > 1) {
-    const line = document.createElementNS(SVG_NS, "polyline");
-    line.setAttribute("class", "line");
-    line.setAttribute("points", pts.map((p) => `${p.x.toFixed(1)},${p.y.toFixed(1)}`).join(" "));
-    nodes.push(line);
-  }
-  // The viewBox stretches horizontally, so dots are tall rounded rects that render roughly round.
-  pts.forEach((p, i) => {
-    const dot = document.createElementNS(SVG_NS, "rect");
-    dot.setAttribute("class", lossLevel(losses[i]!));
-    dot.setAttribute("x", (p.x - 1.5).toFixed(1));
-    dot.setAttribute("y", (p.y - 2.5).toFixed(1));
-    dot.setAttribute("width", "3");
-    dot.setAttribute("height", "5");
-    dot.setAttribute("rx", "1.5");
-    const title = document.createElementNS(SVG_NS, "title");
-    title.textContent = `${formatLoss(losses[i]!)} pts`;
+function svg(tag: string, attrs: Record<string, string>): SVGElement {
+  const node = document.createElementNS(SVG_NS, tag);
+  for (const [k, v] of Object.entries(attrs)) node.setAttribute(k, v);
+  return node;
+}
+
+/**
+ * A sparkline in `target`: a polyline through `pts` and a dot with a tooltip for each of `dots`
+ * (matched to the last points). The viewBox stretches horizontally, so dots are tall rounded rects
+ * that render roughly round.
+ */
+function sparkline(target: SVGSVGElement, pts: { x: number; y: number }[], dots: { class: string; title: string }[], before: SVGElement[] = []): void {
+  const nodes = [...before];
+  if (pts.length > 1) nodes.push(svg("polyline", { class: "line", points: pts.map((p) => `${p.x.toFixed(1)},${p.y.toFixed(1)}`).join(" ") }));
+  pts.slice(pts.length - dots.length).forEach((p, i) => {
+    const dot = svg("rect", { class: dots[i]!.class, x: (p.x - 1.5).toFixed(1), y: (p.y - 2.5).toFixed(1), width: "3", height: "5", rx: "1.5" });
+    const title = svg("title", {});
+    title.textContent = dots[i]!.title;
     dot.append(title);
     nodes.push(dot);
   });
-  el.spark.replaceChildren(...nodes);
+  target.replaceChildren(...nodes);
 }
 
 function renderChat(v: GameView | null): void {
@@ -426,46 +420,23 @@ function renderProgress(): void {
   el.prGames.textContent = String(p.gamesPlayed);
   const cats = topCategories(p.mistakeCounts);
   el.prCats.textContent = cats.length ? cats.join(", ") : "–";
-  el.prCats.title = profile?.focus ? `Suggested focus: ${profile.focus.category.replace(/_/g, " ")}. ${profile.focus.reason}` : "";
-  renderRatingSpark(p.ratingHistory.slice(-20));
-}
-
-function renderRatingSpark(history: ProfileResponse["profile"]["ratingHistory"]): void {
-  const W = 300;
-  const H = 32;
+  el.prCats.title = profile?.focus ? `Suggested focus: ${categoryLabel(profile.focus.category)}. ${profile.focus.reason}` : "";
   // Start from the rating before the first shown game, so one game already draws a line.
+  const history = p.ratingHistory.slice(-20);
   const first = history[0];
   const values = first ? [first.rating - (first.delta ?? 0), ...history.map((h) => h.rating)] : [];
-  const pts = ratingSparkPoints(values, W, H);
-  const nodes: SVGElement[] = [];
-  if (pts.length > 1) {
-    const line = document.createElementNS(SVG_NS, "polyline");
-    line.setAttribute("class", "line");
-    line.setAttribute("points", pts.map((p) => `${p.x.toFixed(1)},${p.y.toFixed(1)}`).join(" "));
-    nodes.push(line);
-  }
-  pts.slice(1).forEach((p, i) => {
-    const h = history[i]!;
-    const dot = document.createElementNS(SVG_NS, "rect");
-    dot.setAttribute("class", h.won ? "dot-won" : "dot-lost");
-    dot.setAttribute("x", (p.x - 1.5).toFixed(1));
-    dot.setAttribute("y", (p.y - 2.5).toFixed(1));
-    dot.setAttribute("width", "3");
-    dot.setAttribute("height", "5");
-    dot.setAttribute("rx", "1.5");
-    const title = document.createElementNS(SVG_NS, "title");
-    title.textContent = `${h.won ? "Won" : "Lost"} vs ${h.botRank}: ${ratingToRank(h.rating)} (${h.rating.toFixed(1)})`;
-    dot.append(title);
-    nodes.push(dot);
-  });
-  el.prSpark.replaceChildren(...nodes);
+  const dots = history.map((h) => ({
+    class: h.won ? "dot-won" : "dot-lost",
+    title: `${h.won ? "Won" : "Lost"} vs ${h.botRank}: ${ratingToRank(h.rating)} (${h.rating.toFixed(1)})`,
+  }));
+  sparkline(el.prSpark, ratingSparkPoints(values, 300, 32), dots);
 }
 
-/** The result dialog's rating line, once the profile for that game has arrived. */
+/** The result dialog's rating line, once the profile the finished game changed has arrived. */
 function renderResultRating(): void {
   const gameId = shownResultFor;
   const p = profile?.profile;
-  if (!gameId || !p || profileFor !== gameId) {
+  if (!gameId || !p || profileVersion !== view?.profileVersion) {
     el.resultRating.hidden = true;
     return;
   }
@@ -491,15 +462,7 @@ function renderResult(v: GameView | null): void {
   const human = v.settings?.humanColor;
   const won = r.winner !== null && r.winner === human;
   el.resultTitle.textContent = r.winner === null ? "Draw" : won ? "You won" : "You lost";
-  const margin = Math.abs(r.margin).toFixed(1);
-  el.resultText.textContent =
-    r.winner === null
-      ? "The game ended in a draw."
-      : r.reason === "resign"
-        ? `${colorName(r.winner)} wins by resignation.`
-        : r.reason === "abandon"
-          ? `${colorName(r.winner)} wins; the game was abandoned.`
-          : `${colorName(r.winner)} wins by ${margin} points.`;
+  el.resultText.textContent = r.winner === null ? "The game ended in a draw." : `${formatScore(r)}.`;
 
   const size = v.board.length;
   const mistakes = human
@@ -511,7 +474,7 @@ function renderResult(v: GameView | null): void {
   el.resultMistakes.replaceChildren(
     ...mistakes.map((m) => {
       const li = document.createElement("li");
-      li.textContent = `Move ${m.number} (${moveLabel(m, size)}): ${formatLoss(m.eval!.pointLoss)} pts, best ${m.eval!.bestMove}`;
+      li.textContent = `Move ${m.number} (${moveGtp(m.move, size)}): ${formatLoss(m.eval!.pointLoss)} pts, best ${m.eval!.bestMove}`;
       return li;
     }),
   );
@@ -588,7 +551,7 @@ document.addEventListener("keydown", (e) => {
   } else if (key === "h" && !el.hint.disabled) {
     e.preventDefault();
     void act({ type: "ask_tutor" });
-  } else if (e.key === "Enter" && view?.status === "paused" && !el.moment.hidden && !el.continueBtn.disabled) {
+  } else if (e.key === "Enter" && can(view, "continue") && !el.moment.hidden) {
     // Don't steal Enter from a focused button.
     if (target?.closest("button")) return;
     e.preventDefault();
@@ -598,17 +561,15 @@ document.addEventListener("keydown", (e) => {
 
 function onConnection(s: ConnectionState): void {
   el.conn.hidden = s !== "reconnecting";
+  if (s === "reconnecting" && !view) el.turn.textContent = "Can't reach the server. Retrying…";
 }
 
 async function start(): Promise<void> {
   if (new URLSearchParams(location.search).has("mock")) {
     transport = (await import("./mock.ts")).createMockTransport();
   }
+  // The stream's first frame is the current view; setView fetches the profile for it.
   transport.subscribe(setView, onConnection);
-  void refreshProfile();
-  transport.getState().then(setView, () => {
-    if (!view) el.turn.textContent = "Can't reach the server. Retrying…";
-  });
 }
 
 render();

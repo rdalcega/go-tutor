@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { Client } from "../../src/cli/client.ts";
-import { boardSizeFromAscii, watch } from "../../src/cli/watch.ts";
+import { watch } from "../../src/cli/watch.ts";
 
 function sseResponse(chunks: string[]): Response {
   const enc = new TextEncoder();
@@ -20,7 +20,7 @@ describe("watch", () => {
     const urls: string[] = [];
     const controller = new AbortController();
     const start = { seq: 1, ts: 0, type: "game_start", gameId: "g1", settings: { size: 9, komi: 7, humanColor: "B", botRank: "20k", handicap: 0 } };
-    const move = { seq: 2, ts: 0, type: "move", gameId: "g1", by: "bot", record: { number: 1, move: { color: "W", point: { x: 3, y: 3 } }, captures: [] } };
+    const move = { seq: 2, ts: 0, type: "move", gameId: "g1", size: 9, by: "bot", record: { number: 1, move: { color: "W", point: { x: 3, y: 3 } }, captures: [] } };
     const fb = { seq: 3, ts: 0, type: "fallback", momentId: "m1" };
     const responses = [
       () => sseResponse([ev(start).slice(0, 10), ev(start).slice(10) + ev(move).slice(0, 5), ev(move).slice(5)]),
@@ -62,6 +62,26 @@ describe("watch", () => {
     ]);
     expect(sleeps).toEqual([500, 1000, 500]);
     expect(err.some((l) => l.includes("cannot reach"))).toBe(true);
+  });
+
+  it("names old events' points with the size from the game's game_start, and never throws", async () => {
+    const controller = new AbortController();
+    const start = { seq: 1, ts: 0, type: "game_start", gameId: "g1", settings: { size: 9, komi: 7, humanColor: "B", botRank: "20k", handicap: 0 } };
+    // Logged before events carried `size`.
+    const move = { seq: 2, ts: 0, type: "move", gameId: "g1", by: "bot", record: { number: 1, move: { color: "W", point: { x: 3, y: 3 } }, captures: [] } };
+    const other = { seq: 3, ts: 0, type: "move", gameId: "g0", by: "bot", record: { number: 12, move: { color: "W", point: { x: 3, y: 3 } }, captures: [] } };
+    const responses = [() => sseResponse([ev(start), ev(move), ev(other)])];
+    const fakeFetch = (async () => {
+      const next = responses.shift();
+      if (!next) {
+        controller.abort();
+        throw new DOMException("aborted", "AbortError");
+      }
+      return next();
+    }) as unknown as typeof fetch;
+    const out: string[] = [];
+    await watch({ client: new Client("http://x", fakeFetch), json: false, out: (l) => out.push(l), err: () => {}, signal: controller.signal, sleep: async () => {} });
+    expect(out).toEqual(["GAME_START g1 9x9 komi 7 human=B bot=20k", "MOVE 1 W D6 (bot)", "MOVE 12 W (coords unavailable) (bot)"]);
   });
 
   it("follows a restarted server's replay even when it reuses seqs", async () => {
@@ -106,30 +126,5 @@ describe("watch", () => {
     }) as unknown as typeof fetch;
     await watch({ client: new Client("http://x", fakeFetch), json: false, out: () => {}, err: () => {}, signal: controller.signal, sleep: async () => {} });
     expect(urls).toEqual(["http://x/api/tutor/events", "http://x/api/tutor/events?since=41"]);
-  });
-
-  it("doesn't cache a failed board-size lookup, and doesn't guess 19x19", async () => {
-    const controller = new AbortController();
-    const move = (seq: number, n: number) => ({ seq, ts: 0, type: "move", gameId: "g9", by: "bot", record: { number: n, move: { color: "W", point: { x: 2, y: 6 } }, captures: [] } });
-    let stateCalls = 0;
-    const fakeFetch = (async (url: string) => {
-      if (url.endsWith("/api/state")) {
-        if (++stateCalls === 1) throw new TypeError("fetch failed");
-        return new Response(JSON.stringify({ gameId: "g9", settings: { size: 9 } }), { status: 200 });
-      }
-      if (url.includes("/api/tutor/events") && stateCalls === 0) return sseResponse([ev(move(1, 1)), ev(move(2, 2))]);
-      controller.abort();
-      throw new DOMException("aborted", "AbortError");
-    }) as unknown as typeof fetch;
-    const out: string[] = [];
-    await watch({ client: new Client("http://x", fakeFetch), json: false, out: (l) => out.push(l), err: () => {}, signal: controller.signal, sleep: async () => {} });
-    expect(out[0]).toMatch(/^MOVE 1 W x2,y6 \(board size unknown/);
-    expect(out[1]).toBe("MOVE 2 W C3 (bot)");
-  });
-
-  it("reads board size from ASCII", () => {
-    const rows = Array.from({ length: 9 }, (_, i) => ` ${9 - i}  . . . . . . . . . ${9 - i}`);
-    expect(boardSizeFromAscii(["    A B C D E F G H J", ...rows, "    A B C D E F G H J"].join("\n"))).toBe(9);
-    expect(boardSizeFromAscii("")).toBeUndefined();
   });
 });

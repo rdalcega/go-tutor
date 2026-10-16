@@ -1,6 +1,6 @@
 // HTTP access to the Go Tutor server.
 
-import type { GameView, TutorCommand } from "../shared/types.ts";
+import type { ActionResponse, GameView, TutorCommand } from "../shared/types.ts";
 
 export const DEFAULT_SERVER = "http://localhost:4747";
 
@@ -58,7 +58,7 @@ export class Client {
       headers: { "content-type": "application/json", accept: "application/json" },
       body: JSON.stringify(command),
     });
-    const body = (await readBody(res)) as { ok?: boolean; view?: GameView; error?: string } | null;
+    const body = (await readBody(res)) as Partial<ActionResponse> | null;
     if (!res.ok || !body || body.ok !== true || !body.view) {
       throw new ServerError(errorMessage(body, res), res.status);
     }

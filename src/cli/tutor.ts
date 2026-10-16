@@ -1,9 +1,9 @@
 // Entry point: `npm run -s tutor -- <command> [args]`.
 
-import type { FocusRecommendation, ProblemsResponse, Profile, ProfileResponse } from "../shared/types.ts";
+import type { FocusRecommendation, ProblemsResponse, Profile, ProfileResponse, SavedGame } from "../shared/types.ts";
 import { parseInvocation, UsageError, type Invocation } from "./args.ts";
 import { Client, ServerError, serverUrl } from "./client.ts";
-import { formatProblemList, formatProblems, formatProfile, formatReview, formatState, statusLine, type SavedGame } from "./format.ts";
+import { formatProblemList, formatProblems, formatProfile, formatReview, formatState, statusLine } from "./format.ts";
 import { HELP, USAGE } from "./help.ts";
 import { watch } from "./watch.ts";
 
@@ -40,7 +40,10 @@ async function problems(client: Client, json: boolean): Promise<void> {
 }
 
 async function review(client: Client, gameId: string, json: boolean): Promise<void> {
-  const game = await client.getJson<SavedGame>(`/api/game/${encodeURIComponent(gameId)}`);
+  const [game, profile] = await Promise.all([
+    client.getJson<SavedGame>(`/api/game/${encodeURIComponent(gameId)}`),
+    json ? null : getProfile(client).catch(() => null),
+  ]);
   if (!game) {
     throw new ServerError(gameId === "last" ? "no saved games yet (GET /api/game/last returned 404)" : `no saved game "${gameId}"`, 404);
   }
@@ -48,10 +51,9 @@ async function review(client: Client, gameId: string, json: boolean): Promise<vo
     print(JSON.stringify(game));
     return;
   }
-  const profile = (await getProfile(client).catch(() => null))?.profile;
   // The threshold the game was played with decides what counted as a mistake.
-  const id = game.id ?? game.gameId;
-  const threshold = profile?.recentGames?.find((g) => g.gameId === id)?.threshold ?? profile?.mistakeThreshold;
+  const p = profile?.profile;
+  const threshold = p?.recentGames?.find((g) => g.gameId === game.id)?.threshold ?? p?.mistakeThreshold;
   print(formatReview(game, threshold));
 }
 

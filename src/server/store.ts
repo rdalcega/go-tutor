@@ -2,56 +2,13 @@
 // and the tutor event log. Everything is synchronous: the app is local and single-user, and
 // sync writes keep the on-disk order identical to the order things happened in.
 
-import { appendFileSync, closeSync, existsSync, mkdirSync, openSync, readFileSync, readSync, readdirSync, renameSync, statSync, writeFileSync } from "node:fs";
+import { appendFileSync, closeSync, existsSync, fstatSync, mkdirSync, openSync, readFileSync, readSync, readdirSync, renameSync, statSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import type {
-  ChatMessage,
-  GameResult,
-  GameSettings,
-  GameSummary,
-  MistakeCategory,
-  MoveRecord,
-  Profile,
-  TeachingMoment,
-  TutorEvent,
-} from "../shared/types.ts";
+import { MISTAKE_CATEGORIES, type MistakeCategory, type Profile, type SavedGame, type TutorEvent } from "../shared/types.ts";
 import { withBuiltins, type StoredProblem } from "./problems.ts";
 
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
-
-export const MISTAKE_CATEGORIES: readonly MistakeCategory[] = [
-  "life_and_death",
-  "capturing_race",
-  "opening",
-  "direction",
-  "shape",
-  "endgame",
-  "tactics",
-  "other",
-];
-
-/** games/<id>.json. GET /api/game/:id returns this as is. */
-export interface SavedGame {
-  id: string;
-  settings: GameSettings;
-  createdAt: number;
-  updatedAt: number;
-  moves: MoveRecord[];
-  result: GameResult | null;
-  summary: GameSummary | null;
-  /** Chat messages from this game. */
-  chat: ChatMessage[];
-  /** Mistake tags by move number, set with `tutor tag`. */
-  tags: Record<number, { category: MistakeCategory; note?: string }>;
-  /**
-   * Heuristic categories by move number, worked out when a mistake's eval arrives and refined with
-   * KataGo's ownership (which isn't saved). Tags win over these.
-   */
-  heuristics?: Record<number, MistakeCategory>;
-  /** The teaching moment as of the last save, so a restart can tell an open one from a dismissed one. */
-  moment?: TeachingMoment | null;
-}
 
 export function defaultProfile(): Profile {
   return {
@@ -82,7 +39,7 @@ export function isValidGameId(id: string): boolean {
 
 /** Write to a temp file and rename it over the target, so readers never see half a file. */
 function writeAtomic(path: string, data: string): void {
-  mkdirSync(dirname(path), { recursive: true });
+  mkdirSync(dirname(path), { recursive: true }); // the data dir may have been removed while running
   const tmp = `${path}.${process.pid}.tmp`;
   writeFileSync(tmp, data);
   renameSync(tmp, path);
@@ -90,8 +47,8 @@ function writeAtomic(path: string, data: string): void {
 
 /** By default the event log is rotated to events.1.jsonl (replacing the previous one) once it grows past this. */
 export const EVENT_LOG_MAX_BYTES = 8 * 1024 * 1024;
-/** How much of the log's end is read to find the last seq. */
-const TAIL_BYTES = 64 * 1024;
+/** The log is read from its end backwards in chunks of this size. */
+const READ_CHUNK_BYTES = 64 * 1024;
 
 /** Index entry per saved game, so finding the newest one doesn't parse every game. */
 interface GameIndexEntry {
@@ -104,35 +61,76 @@ function indexEntry(game: SavedGame): GameIndexEntry {
   return { createdAt: game.createdAt ?? 0, finished: !!game.result && game.result.reason !== "abandon" };
 }
 
-/** The complete lines in the last `bytes` of a file, oldest first. */
-function tailLines(path: string, bytes: number): string[] {
-  if (!existsSync(path)) return [];
-  const size = statSync(path).size;
-  const start = Math.max(0, size - bytes);
-  const buf = Buffer.alloc(size - start);
+/** Ids in id order, numeric suffixes compared as numbers ("-9" before "-10"). */
+function sortIds(ids: string[]): string[] {
+  return ids.sort((a, b) => a.localeCompare(b, "en", { numeric: true }));
+}
+
+/**
+ * Visits a file's lines from its end backwards, newest first, reading fixed chunks and each byte
+ * once; a line split across chunks is kept until its start is read. Stops when `visit` returns
+ * true. Returns the bytes read (for tests).
+ */
+export function readLinesBackward(path: string, visit: (line: string) => boolean, chunkBytes = READ_CHUNK_BYTES): number {
+  if (!existsSync(path)) return 0;
   const fd = openSync(path, "r");
+  let read = 0;
   try {
-    readSync(fd, buf, 0, buf.length, start);
+    let pos = fstatSync(fd).size;
+    /** The start of the file so far read: everything before its first newline is a partial line. */
+    let rest = Buffer.alloc(0);
+    while (pos > 0) {
+      const len = Math.min(chunkBytes, pos);
+      pos -= len;
+      const chunk = Buffer.alloc(len);
+      readSync(fd, chunk, 0, len, pos);
+      read += len;
+      const buf = rest.length ? Buffer.concat([chunk, rest]) : chunk;
+      // Newlines are single bytes in UTF-8, so splitting on them never cuts a character.
+      let end = buf.length;
+      for (let i = buf.length - 1; i >= 0; i--) {
+        if (buf[i] !== 0x0a) continue;
+        if (visit(buf.toString("utf8", i + 1, end))) return read;
+        end = i;
+      }
+      rest = buf.subarray(0, end);
+    }
+    if (rest.length) visit(rest.toString("utf8"));
+    return read;
   } finally {
     closeSync(fd);
   }
-  const lines = buf.toString("utf8").split("\n");
-  if (start > 0) lines.shift(); // starts mid-line
-  return lines;
 }
 
-function parseEvents(lines: string[], since: number): TutorEvent[] {
-  const events: TutorEvent[] = [];
-  for (const line of lines) {
-    if (!line.trim()) continue;
-    try {
-      const event = JSON.parse(line) as TutorEvent;
-      if (event.seq > since) events.push(event);
-    } catch {
-      // A torn last line after a crash; ignore it.
-    }
+/** An event from a log line, or null for a blank or torn line (a crash mid-write). */
+function parseEvent(line: string): TutorEvent | null {
+  if (!line.trim()) return null;
+  try {
+    return JSON.parse(line) as TutorEvent;
+  } catch {
+    return null;
   }
-  return events;
+}
+
+/**
+ * The events in a log file with seq > since, oldest first, read from the end backwards only as far
+ * as needed. `reached` says whether the file goes back to `since` (otherwise older ones are in the
+ * rotated log).
+ */
+function eventsAfter(path: string, since: number): { events: TutorEvent[]; reached: boolean } {
+  const events: TutorEvent[] = [];
+  let reached = false;
+  readLinesBackward(path, (line) => {
+    const event = parseEvent(line);
+    if (!event) return false;
+    if (event.seq <= since) return (reached = true);
+    events.push(event);
+    return false;
+  });
+  events.reverse();
+  // A file that starts right after `since` holds everything newer too.
+  if (!reached && events[0] && events[0].seq <= since + 1) reached = true;
+  return { events, reached };
 }
 
 /** Whether the file's last byte is something other than a newline (a line torn by a crash). */
@@ -154,6 +152,7 @@ export class Store {
   readonly dir: string;
   /** Bytes in events.jsonl, once the first append has looked at it. */
   private eventLogBytes: number | null = null;
+  /** games/index.json in memory: read (and checked against the files) once, then kept up to date by saveGame. */
   private gameIndex: Map<string, GameIndexEntry> | null = null;
 
   private readonly maxEventLogBytes: number;
@@ -161,6 +160,7 @@ export class Store {
   constructor(dir: string = defaultDataDir(), opts: { maxEventLogBytes?: number } = {}) {
     this.dir = resolve(dir);
     this.maxEventLogBytes = opts.maxEventLogBytes ?? EVENT_LOG_MAX_BYTES;
+    mkdirSync(this.gamesDir, { recursive: true });
   }
 
   private get gamesDir(): string {
@@ -257,14 +257,15 @@ export class Store {
     }
   }
 
-  /** Saved game ids in id order, numeric suffixes compared as numbers ("-9" before "-10"). */
+  /** Saved game ids on disk in id order, numeric suffixes compared as numbers ("-9" before "-10"). */
   gameIds(): string[] {
     if (!existsSync(this.gamesDir)) return [];
-    return readdirSync(this.gamesDir)
-      .filter((f) => f.endsWith(".json") && f !== "index.json")
-      .map((f) => f.slice(0, -".json".length))
-      .filter(isValidGameId)
-      .sort((a, b) => a.localeCompare(b, "en", { numeric: true }));
+    return sortIds(
+      readdirSync(this.gamesDir)
+        .filter((f) => f.endsWith(".json") && f !== "index.json")
+        .map((f) => f.slice(0, -".json".length))
+        .filter(isValidGameId),
+    );
   }
 
   /**
@@ -274,7 +275,7 @@ export class Store {
   lastGame(opts: { finished?: boolean } = {}): SavedGame | null {
     const index = this.loadIndex();
     // Newest first: ids are in id order, and the sort is stable, so equal createdAt keeps the later id first.
-    const ids = this.gameIds()
+    const ids = sortIds([...index.keys()])
       .reverse()
       .filter((id) => !opts.finished || index.get(id)?.finished)
       .sort((a, b) => (index.get(b)?.createdAt ?? 0) - (index.get(a)?.createdAt ?? 0));
@@ -286,20 +287,19 @@ export class Store {
   }
 
   /**
-   * games/index.json (createdAt and finished per id), kept in step with the files on disk: a game
-   * missing from it (an older data dir, a crash between writes) is read once and added.
+   * games/index.json (createdAt and finished per id). The first call reads it and brings it in step
+   * with the files on disk: a game missing from it (an older data dir, a crash between writes) is
+   * read once and added. After that it lives in memory and saveGame keeps it current.
    */
   private loadIndex(): Map<string, GameIndexEntry> {
-    if (!this.gameIndex) {
-      this.gameIndex = new Map();
-      try {
-        const saved = JSON.parse(readFileSync(this.indexPath, "utf8")) as Record<string, GameIndexEntry>;
-        for (const [id, entry] of Object.entries(saved)) this.gameIndex.set(id, entry);
-      } catch {
-        // Missing or corrupt: rebuilt below.
-      }
+    if (this.gameIndex) return this.gameIndex;
+    const index = new Map<string, GameIndexEntry>();
+    try {
+      const saved = JSON.parse(readFileSync(this.indexPath, "utf8")) as Record<string, GameIndexEntry>;
+      for (const [id, entry] of Object.entries(saved)) index.set(id, entry);
+    } catch {
+      // Missing or corrupt: rebuilt below.
     }
-    const index = this.gameIndex;
     const ids = this.gameIds();
     const present = new Set(ids);
     let changed = false;
@@ -308,6 +308,7 @@ export class Store {
       index.delete(id);
       changed = true;
     }
+    this.gameIndex = index;
     for (const id of ids) {
       if (index.has(id)) continue;
       const game = this.loadGame(id);
@@ -329,8 +330,9 @@ export class Store {
 
   // --- tutor event log -----------------------------------------------------
 
-  appendEvent(event: TutorEvent): void {
-    mkdirSync(this.dir, { recursive: true });
+  /** Append one event; `json` is the event already stringified, when the caller has it. */
+  appendEvent(event: TutorEvent, json = JSON.stringify(event)): void {
+    mkdirSync(this.dir, { recursive: true }); // the data dir may have been removed while running
     if (this.eventLogBytes === null) {
       // A crash can leave half a line; end it so the next event starts on a line of its own.
       if (endsMidLine(this.eventsPath)) appendFileSync(this.eventsPath, "\n");
@@ -340,30 +342,30 @@ export class Store {
       renameSync(this.eventsPath, this.rotatedEventsPath);
       this.eventLogBytes = 0;
     }
-    const line = JSON.stringify(event) + "\n";
+    const line = json + "\n";
     appendFileSync(this.eventsPath, line);
     this.eventLogBytes += Buffer.byteLength(line);
   }
 
-  /** Logged events with seq > since, oldest first (the rotated log too, when needed). Unparseable lines are skipped. */
+  /**
+   * Logged events with seq > since, oldest first (the rotated log too, when needed), read from the
+   * end of the log backwards only as far as `since`. Unparseable lines are skipped.
+   */
   readEvents(since = -Infinity): TutorEvent[] {
-    const read = (path: string) => (existsSync(path) ? parseEvents(readFileSync(path, "utf8").split("\n"), since) : []);
-    const current = read(this.eventsPath);
-    const first = current[0];
-    if (first && first.seq <= since + 1) return current;
-    return [...read(this.rotatedEventsPath), ...current];
+    const current = eventsAfter(this.eventsPath, since);
+    if (current.reached) return current.events;
+    return [...eventsAfter(this.rotatedEventsPath, since).events, ...current.events];
   }
 
-  /** The highest seq in the log, or 0. Reads only the end of the log (more if its last line is huge). */
+  /** The seq of the last logged event, or 0. Reads the log from its end back to its last complete event. */
   lastEventSeq(): number {
     for (const path of [this.eventsPath, this.rotatedEventsPath]) {
-      if (!existsSync(path)) continue;
-      const size = statSync(path).size;
-      for (let bytes = TAIL_BYTES; ; bytes *= 4) {
-        const events = parseEvents(tailLines(path, bytes), -Infinity);
-        if (events.length > 0) return events.reduce((max, e) => Math.max(max, e.seq), 0);
-        if (bytes >= size) break;
-      }
+      let seq: number | null = null;
+      readLinesBackward(path, (line) => {
+        seq = parseEvent(line)?.seq ?? null;
+        return seq !== null;
+      });
+      if (seq !== null) return seq;
     }
     return 0;
   }

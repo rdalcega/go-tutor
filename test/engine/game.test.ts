@@ -1,12 +1,12 @@
 import { describe, expect, it } from "vitest";
-import { GoGame } from "../../src/engine/game.ts";
-import { handicapPoints, starPoints } from "../../src/engine/board.ts";
+import { GoGame, gameBefore } from "../../src/engine/game.ts";
+import { boardFromDiagram, groupAt, handicapPoints, starPoints } from "../../src/engine/board.ts";
 import { fromGtp, toGtp } from "../../src/shared/coords.ts";
 import type { Color, Point } from "../../src/shared/types.ts";
-import { diagram, stonesFrom } from "./helpers.ts";
+import { boardFrom, diagram } from "./helpers.ts";
 
 function position(rows: string[], toPlay: Color = "B"): GoGame {
-  return new GoGame(rows.length, 0, 0, { stones: stonesFrom(rows), toPlay });
+  return GoGame.fromBoard(boardFrom(rows), toPlay);
 }
 
 function at(x: number, y: number): Point {
@@ -353,5 +353,49 @@ describe("fromMoves", () => {
         { color: "W", point: at(0, 0) },
       ]),
     ).toThrow(/Move 2 is illegal: occupied/);
+  });
+});
+
+describe("earlier positions", () => {
+  const koShape = [". X O . .", "X O . O .", ". X O . .", ". . . . .", ". . . . ."];
+
+  it("copies the game before a move without replaying, keeping the ko history", () => {
+    const g = position(koShape);
+    g.playAt(at(2, 1)); // Black takes the ko
+    g.playAt(at(4, 4));
+    g.playAt(at(4, 3));
+    const before = g.before(2);
+    expect(before.moves).toHaveLength(1);
+    expect(before.toPlay).toBe("W");
+    expect(before.illegalReason(at(1, 1))).toBe("ko"); // the retake is still banned there
+    expect(before.playAt(at(0, 4)).ok).toBe(true);
+    expect(g.moves).toHaveLength(3); // the original is untouched
+    expect(diagram(g.before(1).board)).toEqual(koShape);
+    expect(g.before(4).board).toEqual(g.board);
+  });
+
+  it("replays a saved move list up to a move", () => {
+    const g = new GoGame(9, 7, 2);
+    g.playAt(at(4, 4));
+    g.playAt(at(3, 3));
+    const before = gameBefore({ size: 9, komi: 7, handicap: 2 }, g.moves, 2);
+    expect(before.board).toEqual(g.before(2).board);
+    expect(before.lastMove?.move).toEqual({ color: "W", point: at(4, 4) });
+  });
+
+  it("sets up a game from a board, with the given side to move", () => {
+    const board = boardFromDiagram(koShape);
+    const g = GoGame.fromBoard(board, "W", 6.5);
+    expect(g.board).toEqual(board);
+    expect(g.toPlay).toBe("W");
+    expect(g.komi).toBe(6.5);
+    expect(g.moves).toEqual([]);
+  });
+
+  it("finds a group's liberties", () => {
+    const group = groupAt(boardFromDiagram(koShape), at(1, 1));
+    expect(group.stones).toEqual([at(1, 1)]);
+    expect(group.liberties).toBe(1);
+    expect([...group.libertySet]).toEqual(["2,1"]);
   });
 });

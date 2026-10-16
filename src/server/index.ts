@@ -6,7 +6,8 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 import { dirname, extname, join, normalize, resolve, sep } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { TutorBridge, parseClientAction, parseTutorCommand } from "./bridge.ts";
-import { GameController, UserError, type GameEngine } from "./game.ts";
+import { UserError } from "./common.ts";
+import { GameController, type GameEngine } from "./game.ts";
 import { KataGo } from "./katago.ts";
 import { problemsResponse } from "./problems.ts";
 import { recommendFocus } from "./profile.ts";
@@ -141,12 +142,12 @@ export function createApp({ controller, bridge, store, distDir = join(REPO_ROOT,
       return sendJson(res, 200, { ok: true, view: controller.view() });
     }
     if (path === "/api/profile" && method === "GET") {
-      const profile = store.loadProfile();
+      const profile = controller.currentProfile;
       const body: ProfileResponse = { profile, focus: recommendFocus(profile) };
       return sendJson(res, 200, body);
     }
     if (path === "/api/problems" && method === "GET") {
-      const body: ProblemsResponse = problemsResponse(store.loadProblems(), Date.now(), recommendFocus(store.loadProfile()));
+      const body: ProblemsResponse = problemsResponse(store.loadProblems(), Date.now(), recommendFocus(controller.currentProfile));
       return sendJson(res, 200, body);
     }
     const gameMatch = /^\/api\/game\/([^/]+)$/.exec(path);
@@ -262,6 +263,8 @@ async function main(): Promise<void> {
   };
   process.on("SIGINT", shutdown);
   process.on("SIGTERM", shutdown);
+  process.on("SIGHUP", shutdown); // the terminal running the server closed
+  process.on("beforeExit", () => controller.flush());
 }
 
 const entry = process.argv[1];
