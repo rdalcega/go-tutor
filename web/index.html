@@ -52,7 +52,7 @@
           <div class="card-body" id="controls-body">
             <div class="row">
               <button id="pass" title="Pass (P)">Pass</button>
-              <button id="hint" title="Hint (H)">Hint</button>
+              <button id="take-back" title="Take back your last move (and the bot's reply)">Take back</button>
               <button id="practice" title="Practice problems from your mistakes">Practice</button>
               <button id="resign" class="danger">Resign</button>
             </div>
@@ -132,6 +132,7 @@
           </h2>
           <div class="card-body" id="progress-body">
             <dl class="facts">
+              <div><dt>Estimate</dt><dd id="pr-estimate">–</dd></div>
               <div><dt>Next bot</dt><dd id="pr-bot">–</dd></div>
               <div><dt>Games</dt><dd id="pr-games">–</dd></div>
               <div><dt>Work on</dt><dd id="pr-cats">–</dd></div>
@@ -144,6 +145,7 @@
           <ol class="chat-log" id="chat-log" aria-live="polite"></ol>
           <form class="chat-form" id="chat-form">
             <input id="chat-input" type="text" placeholder="Ask your tutor…" autocomplete="off" />
+            <button type="button" id="hint" title="Ask for a hint (H); anything you typed goes with it">Hint</button>
             <button type="submit">Send</button>
           </form>
         </section>

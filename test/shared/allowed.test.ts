@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { allowedActions, retryBlocked, type ActionState } from "../../src/shared/allowed.ts";
+import { allowedActions, retryBlocked, takeBackBlocked, type ActionState } from "../../src/shared/allowed.ts";
 import type { Move } from "../../src/shared/types.ts";
 
 const B = (x: number, y: number): { move: Move } => ({ move: { color: "B", point: { x, y } } });
@@ -42,13 +42,30 @@ describe("allowedActions", () => {
 
   it("offers Continue and Try again during a pause, until the moment's move is taken back", () => {
     const moment = { moveNumber: 1, state: "waiting" as const };
-    expect(allowedActions(game({ status: "paused", toPlay: "W", moves: [B(2, 2)], moment }))).toEqual([...ALWAYS, "resign", "continue", "retry"]);
+    expect(allowedActions(game({ status: "paused", toPlay: "W", moves: [B(2, 2)], moment }))).toEqual([...ALWAYS, "resign", "continue", "retry", "take_back"]);
     const takenBack = game({ moves: [], moment: { moveNumber: 1, state: "tutor" } });
     expect(retryBlocked(takenBack)).toBe("taken_back");
     expect(allowedActions(takenBack)).not.toContain("retry");
     expect(retryBlocked(game({ moves: [W(0, 0)], humanColor: "B" }))).toBe("no_move");
     expect(retryBlocked(game({ humanColor: null }))).toBe("no_game");
     expect(retryBlocked(game({ finished: true, moves: [B(0, 0)] }))).toBe("finished");
+  });
+
+  it("offers Take back on the learner's turn or in a pause, not while the bot thinks", () => {
+    // The learner's turn after the bot's reply: their move and the reply go.
+    expect(allowedActions(game({ moves: [B(2, 2), W(6, 6)] }))).toContain("take_back");
+    expect(takeBackBlocked(game({ moves: [B(2, 2), W(6, 6)] }))).toBeNull();
+    // Their move is being evaluated or the bot is thinking: not yet.
+    expect(takeBackBlocked(game({ toPlay: "W", moves: [B(2, 2)] }))).toBe("not_now");
+    expect(allowedActions(game({ toPlay: "W", moves: [B(2, 2)] }))).not.toContain("take_back");
+    // A pause: like Try again.
+    expect(takeBackBlocked(game({ status: "paused", toPlay: "W", moves: [B(2, 2)], moment: { moveNumber: 1, state: "fallback" } }))).toBeNull();
+    // Nothing of theirs to take back, a finished game, or a game being scored after two passes.
+    expect(takeBackBlocked(game())).toBe("no_move");
+    expect(takeBackBlocked(game({ finished: true, moves: [B(0, 0), W(1, 1)] }))).toBe("finished");
+    expect(takeBackBlocked(game({ moves: [B(0, 0), W(1, 1), pass("B"), pass("W")] }))).toBe("not_now");
+    // Every tutor level and with a tutor attached: the rules don't depend on either.
+    expect(allowedActions(game({ tutorAttached: true, moves: [B(2, 2), W(6, 6)] }))).toContain("take_back");
   });
 
   it("lets the learner play a problem until it is revealed, while KataGo isn't checking", () => {

@@ -323,6 +323,7 @@ export function parseClientAction(body: unknown): ClientAction {
     case "resign":
     case "continue":
     case "retry":
+    case "take_back":
     case "next_problem":
     case "leave_problem":
     case "clear_overlay":
@@ -389,12 +390,17 @@ export function parseTutorCommand(body: unknown): TutorCommand {
       }
       if (!Number.isInteger(o.moveNumber) || (o.moveNumber as number) < 1) throw new UserError('"moveNumber" must be a positive integer.');
       const note = str(o, "note");
+      const tb = o.takenBack;
+      if (tb !== undefined && typeof tb !== "boolean" && !(Number.isInteger(tb) && (tb as number) >= 1)) {
+        throw new UserError('"takenBack" must be true, false or a try number (1, 2, …).');
+      }
       return {
         type: "tag",
         gameId: str(o, "gameId", true),
         moveNumber: o.moveNumber as number,
         category: category as MistakeCategory,
         ...(note && { note }),
+        ...((tb === true || typeof tb === "number") && { takenBack: tb }),
       };
     }
     default:

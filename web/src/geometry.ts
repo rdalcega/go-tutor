@@ -4,7 +4,7 @@
 import { gameBefore } from "../../src/engine/game.ts";
 import { GTP_COLUMNS, movePoint } from "../../src/shared/coords.ts";
 import { ratingToRank } from "../../src/shared/rank.ts";
-import { categoryLabel, comeBackText } from "../../src/shared/text.ts";
+import { categoryLabel, comeBackText, estimateRankText, rankEstimateText } from "../../src/shared/text.ts";
 import type { Board, Color, GameSettings, MistakeCategory, MoveRecord, Point, ProblemView, Profile } from "../../src/shared/types.ts";
 
 export interface BoardLayout {
@@ -153,12 +153,22 @@ export function nextBotText(profile: Pick<Profile, "botRank" | "handicap">): str
   return profile.handicap >= 2 ? `${profile.botRank} +${profile.handicap} stones` : profile.botRank;
 }
 
-/** What a finished game did to the rating, from the profile's history; null when it didn't count. */
-export function ratingChangeFor(profile: Profile, gameId: string): { before: string; after: string; delta: number } | null {
+/**
+ * What a finished game did to the rating, from the profile's history, with the game's rank estimate
+ * in words ("Rank estimate 18k from 34 unassisted moves (3 hints)"); null when it didn't count.
+ */
+export function ratingChangeFor(profile: Profile, gameId: string): { before: string; after: string; delta: number; estimate?: string } | null {
   const entry = profile.ratingHistory.find((h) => h.gameId === gameId);
   if (!entry) return null;
   const delta = entry.delta ?? 0;
-  return { before: ratingToRank(entry.rating - delta), after: ratingToRank(entry.rating), delta };
+  return { before: ratingToRank(entry.rating - delta), after: ratingToRank(entry.rating), delta, ...(entry.estimate && { estimate: rankEstimateText(entry.estimate) }) };
+}
+
+/** The progress card's estimate: the latest game's rank and move count ("18k · 34 moves"), and the whole sentence for its tooltip. */
+export function latestEstimate(profile: Profile): { short: string; long: string } | null {
+  const estimate = [...profile.ratingHistory].reverse().find((h) => h.estimate)?.estimate;
+  if (!estimate) return null;
+  return { short: `${estimateRankText(estimate)} · ${estimate.moves} moves`, long: `Last game: ${rankEstimateText(estimate)}.` };
 }
 
 /** The problem card's title: category, and where the problem comes from. */

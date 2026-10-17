@@ -7,31 +7,37 @@
 // count; a reply that no longer matches is dropped, so late answers never touch a newer state.
 
 import { randomBytes } from "node:crypto";
-import { GoGame, deadStonesFromOwnership, emptyBoard, opponent, scoreArea, toAscii, writeSgf } from "../engine/index.ts";
-import { allowedActions, retryBlocked, type ActionState } from "../shared/allowed.ts";
+import { GoGame, deadStonesFromOwnership, emptyBoard, gameFromLine, opponent, scoreArea, toAscii, writeSgf } from "../engine/index.ts";
+import { allowedActions, retryBlocked, takeBackBlocked, type ActionState } from "../shared/allowed.ts";
 import { moveGtp, movePoint, samePoint, toGtp, tryFromGtp } from "../shared/coords.ts";
 import { normalizeBotRank } from "../shared/rank.ts";
-import { colorName, formatScore, round1, tutorLevelChangedText } from "../shared/text.ts";
-import type {
-  ChatMessage,
-  ClientAction,
-  Color,
-  GameResult,
-  GameSettings,
-  GameStatus,
-  GameSummary,
-  GameView,
-  Gtp,
-  MistakeCategory,
-  Move,
-  MoveRecord,
-  Overlay,
-  Point,
-  Profile,
-  SavedGame,
-  TeachingMoment,
-  TutorCommand,
-  TutorLevel,
+import { colorName, formatScore, round1, takenBackTryText, tutorLevelChangedText } from "../shared/text.ts";
+import {
+  ASSIST_KINDS,
+  type AssistCounts,
+  type AssistKind,
+  type ChatMessage,
+  type ClientAction,
+  type Color,
+  type GameResult,
+  type GameSettings,
+  type GameStatus,
+  type GameSummary,
+  type GameView,
+  type Gtp,
+  type MistakeCategory,
+  type Move,
+  type MoveRecord,
+  type Overlay,
+  type Point,
+  type Profile,
+  type RankEstimate,
+  type RatingChange,
+  type SavedGame,
+  type TakenBackMove,
+  type TeachingMoment,
+  type TutorCommand,
+  type TutorLevel,
 } from "../shared/types.ts";
 import {
   ILLEGAL_TEXT,
@@ -45,10 +51,26 @@ import {
   type Clock,
   type TutorEventInput,
 } from "./common.ts";
+import { estimateRank, rankSamples } from "./estimate.ts";
 import { moveEvalFrom, type Analysis, type Engine, type Position } from "./katago.ts";
+import { migrateRatingModel } from "./migrate.ts";
 import { PracticeSession, type PracticeDeps } from "./practice.ts";
 import { generateProblems, pickNextProblem, promptFor, resultOf, schedule, type StoredProblem } from "./problems.ts";
-import { applyGame, applyProblemResult, applyTag, classifyMistake, recommendFocus } from "./profile.ts";
+import {
+  applyEstimate,
+  applyGame,
+  applyProblemResult,
+  applyTag,
+  classifyPlayed,
+  clearEstimating,
+  firstAttemptMistakes,
+  isEstimating,
+  mistakeEntry,
+  noAssistance,
+  recommendFocus,
+  totalPointLoss,
+  worstFirst,
+} from "./profile.ts";
 import type { Store } from "./store.ts";
 
 export type GameEngine = Pick<Engine, "analyze" | "botMove"> & Partial<Pick<Engine, "concurrency">>;
@@ -80,6 +102,35 @@ const DEFAULT_PROBLEM_VISITS = 600;
 const HANDICAP_KOMI = 0.5;
 /** Analyses kept: the recent positions, which cover an open moment and a Try again. */
 const ANALYSIS_CACHE_SIZE = 16;
+
+/** Rating-migration attempts per server run that KataGo may fail before it waits for a restart. */
+export const MAX_MIGRATION_ATTEMPTS = 4;
+/** Wait before trying a failed migration again; each further failure waits 4× longer (1, 4, 16 min). */
+export const MIGRATION_RETRY_MS = 60_000;
+
+/**
+ * The index in `takenBack` of the taken-back try at `moveNumber` the tutor means: `which` is its
+ * number among the tries taken back there (#1, #2, … as review prints them), or `true` for the
+ * only one. Throws a message listing the tries when there is no such one or it is ambiguous.
+ */
+export function pickTakenBack(gameId: string, takenBack: readonly TakenBackMove[], size: number, moveNumber: number, which: true | number): number {
+  const at = takenBack.flatMap((t, i) => (t.moveNumber === moveNumber ? [i] : []));
+  if (at.length === 0) throw new UserError(`Game ${gameId} has no taken-back move ${moveNumber}. Leave off --taken-back to tag the move on the board.`);
+  const list = at
+    .map((i, n) => {
+      const t = takenBack[i]!;
+      const loss = t.record.eval ? ` -${round1(t.record.eval.pointLoss)}` : "";
+      return `#${n + 1} ${moveGtp(t.record.move, size)}${loss}`;
+    })
+    .join(", ");
+  if (which === true) {
+    if (at.length === 1) return at[0]!;
+    throw new UserError(`Game ${gameId} has ${at.length} taken-back tries at move ${moveNumber} (${list}). Name one: --taken-back <n>.`);
+  }
+  const index = at[which - 1];
+  if (index === undefined) throw new UserError(`Game ${gameId} has no taken-back ${takenBackTryText(which)} at move ${moveNumber}; it has ${list}.`);
+  return index;
+}
 
 /** Points a pass may cost the bot, in KataGo's judgment, for it to answer a pass with a pass. */
 export const PASS_TOLERANCE = 1.5;
@@ -122,6 +173,21 @@ export class GameController {
   private tags: SavedGame["tags"] = {};
   /** Heuristic mistake categories by move number, from the eval of each mistake. */
   private heuristics: Record<number, MistakeCategory> = {};
+  /** The human moves taken back so far (first attempts), kept with their evals. */
+  private takenBack: TakenBackMove[] = [];
+  /** Help the learner had in this game. */
+  private assistance: AssistCounts = noAssistance();
+  /** Help for the learner's next move: what they had at move count `at` (cleared by a move or take-back). */
+  private help: { at: number; kinds: Set<AssistKind> } | null = null;
+  /** A hint request the attached tutor hasn't answered yet: the move count it was asked at. */
+  private hintAskedAt: number | null = null;
+  /** Rank estimates and the rating-model migration, one at a time. */
+  private ratingWork: Promise<void> = Promise.resolve();
+  /** A run of the pending rank estimates is queued and hasn't started yet. */
+  private estimatesQueued = false;
+  /** Rating-migration attempts KataGo failed this run, and the timer for the next try. */
+  private migrationFailures = 0;
+  private migrationRetry: unknown = null;
   private tutorAttached = false;
   /**
    * The learner's latest chat message or hint request in this game (or problem) reached an attached
@@ -328,6 +394,8 @@ export class GameController {
       if (evaluation) record.eval = evaluation;
       const level = saved.moves[i]?.tutorLevel;
       if (level) record.tutorLevel = level;
+      const assist = saved.moves[i]?.assist;
+      if (assist?.length) record.assist = assist;
     });
     this.resetGameState();
     this.game = game;
@@ -336,6 +404,8 @@ export class GameController {
     this.createdAt = saved.createdAt;
     this.tags = saved.tags ?? {};
     this.heuristics = saved.heuristics ?? {};
+    this.takenBack = saved.takenBack ?? [];
+    this.assistance = { ...noAssistance(), ...saved.assistance };
     this.chat = saved.chat ?? [];
     const maxChatId = Math.max(0, ...this.chat.map((m) => Number(/^c(\d+)$/.exec(m.id)?.[1] ?? 0)));
     this.nextChatId = Math.max(this.nextChatId, maxChatId + 1);
@@ -381,6 +451,8 @@ export class GameController {
         return this.continueGame();
       case "retry":
         return this.retry(null);
+      case "take_back":
+        return this.takeBack();
       case "ask_tutor":
         return this.hint(action.text);
     }
@@ -392,7 +464,31 @@ export class GameController {
     this.checkSilent(cmd);
     await this.tutorCommand(cmd);
     // The tutor answered: on Silent, the learner's question has had its one reply.
-    if (cmd.type === "say" || cmd.type === "show" || cmd.type === "mark") this.questionOpen = false;
+    if (cmd.type === "say" || cmd.type === "show" || cmd.type === "mark") {
+      this.questionOpen = false;
+      this.noteTutorHelp(cmd.type);
+    }
+  }
+
+  /**
+   * The tutor said or drew something in a game, on the learner's turn: a hint request it answers
+   * makes their next move hinted, and a drawing makes it "shown" (both only for this position).
+   */
+  private noteTutorHelp(type: "say" | "show" | "mark"): void {
+    const { game, settings } = this;
+    if (this.practice || !game || !settings || this.result || game.toPlay !== settings.humanColor) return;
+    if (this.hintAskedAt === game.moves.length) {
+      this.hintAskedAt = null;
+      this.noteHelp("hint");
+    }
+    if (type !== "say") this.noteHelp("shown");
+  }
+
+  /** The learner gets `kind` of help for the move they play next in this position. */
+  private noteHelp(kind: AssistKind): void {
+    const at = this.game?.moves.length ?? 0;
+    if (this.help?.at !== at) this.help = { at, kinds: new Set() };
+    this.help.kinds.add(kind);
   }
 
   private async tutorCommand(cmd: TutorCommand): Promise<void> {
@@ -404,7 +500,7 @@ export class GameController {
       case "start_problem":
         return this.startProblem(cmd.problemId);
       case "tag":
-        return this.tag(cmd.gameId, cmd.moveNumber, cmd.category, cmd.note);
+        return this.tag(cmd.gameId, cmd.moveNumber, cmd.category, cmd.note, cmd.takenBack);
       // Drawings go on the problem in problem mode, else on the game. They are checked before the
       // tutor engages a moment, so a typo doesn't cancel the fallback.
       case "show": {
@@ -527,6 +623,10 @@ export class GameController {
     this.overlay = null;
     this.tags = {};
     this.heuristics = {};
+    this.takenBack = [];
+    this.assistance = noAssistance();
+    this.help = null;
+    this.hintAskedAt = null;
     this.status = "playing";
     this.botFailures = 0;
     this.questionOpen = false;
@@ -588,11 +688,17 @@ export class GameController {
     if (game.toPlay !== settings.humanColor) throw new UserError("Wait for the bot to move.");
     if (this.engineState !== "ready") throw new UserError(this.engineNotReadyText());
 
+    const at = game.moves.length;
     const result = point ? game.playAt(point) : game.pass();
     if (!result.ok) throw new UserError(ILLEGAL_TEXT[result.reason]);
     const record = result.record;
     // A level change applies from the learner's next move: each move keeps the level it was played at.
     record.tutorLevel = this.level;
+    // Help the learner had in this position (a hint, a drawing, a take-back) marks the move as assisted.
+    const help = this.help?.at === at ? this.help.kinds : null;
+    if (help?.size) record.assist = ASSIST_KINDS.filter((k) => help.has(k));
+    this.help = null;
+    this.hintAskedAt = null;
 
     // Playing again after a rethink ends that moment; any leftover overlay is about the old position.
     if (this.moment) this.setMomentState("resolved");
@@ -829,11 +935,15 @@ export class GameController {
     return m;
   }
 
-  /** Why Try again can't take a move back now, or null when it can. */
-  /** How many of the last moves Try again takes back (the human's last move and any reply), or why it can't. */
-  private movesToTakeBack(): number | string {
+  /**
+   * How many of the last moves Try again (or Take back) takes back: the human's last move and any
+   * reply. Or why it can't. Take back is for the learner's turn or a pause, and it may go further
+   * back than a moment the tutor already took back.
+   */
+  private movesToTakeBack(takeBack = false): number | string {
     const { game, settings } = this;
-    switch (retryBlocked(this.actionState())) {
+    const state = this.actionState();
+    switch (takeBack ? takeBackBlocked(state) : retryBlocked(state)) {
       case "no_game":
         return "No game in progress. Start a new game first.";
       case "finished":
@@ -842,6 +952,8 @@ export class GameController {
         return "That move is already taken back. Play a new one.";
       case "no_move":
         return "There is no move of yours to take back.";
+      case "not_now":
+        return "Wait for the bot to move, then take back.";
     }
     const moves = game!.moves;
     let lastHuman = moves.length - 1;
@@ -849,39 +961,57 @@ export class GameController {
     return moves.length - lastHuman;
   }
 
+  /** The learner's Take back: Try again at any time on their turn or in a pause. */
+  private takeBack(): void {
+    this.retry(null, undefined, true);
+  }
+
   /**
    * Take back the human's last move (and the bot's reply, if it came). From the browser's
-   * Try again (text null) the moment is over; from the tutor's rethink the moment stays with the
-   * tutor until the human plays again.
+   * Try again or Take back (text null) the moment is over; from the tutor's rethink the moment
+   * stays with the tutor until the human plays again. The human move is kept as a first attempt
+   * (`takenBack`, with its eval, category and tag), and the move that replaces it is assisted.
    */
-  private retry(text: string | null, momentId?: string): void {
-    const count = this.movesToTakeBack();
+  private retry(text: string | null, momentId?: string, takeBack = false): void {
+    const count = this.movesToTakeBack(takeBack);
     if (typeof count === "string") throw new UserError(count);
-    const { game } = this.requireGame();
+    const { game, settings } = this.requireGame();
+    const by = text === null ? "human" : "tutor";
     this.invalidatePending();
+    const removed = game.moves.slice(game.moves.length - count);
+    const line = game.moves.slice(0, game.moves.length - count).map((r) => moveGtp(r.move, game.size));
     game.undo(count);
-    this.dropTagsAfter(game.moves.length);
+    for (const record of removed) if (record.move.color === settings.humanColor) this.keepTakenBack(record, by, line);
+    if (by === "human") this.assistance.takeBacks++;
+    else this.assistance.rethinks++;
+    // The move that replaces it is the learner's second try.
+    this.help = { at: game.moves.length, kinds: new Set([by === "human" ? "retry" : "rethink"]) };
+    this.hintAskedAt = null;
     this.status = "playing";
     this.overlay = null;
     if (this.moment) this.setMomentState(text === null ? "resolved" : "tutor");
-    this.emit({ type: "undo", gameId: this.gameId!, moves: game.moves.length, toPlay: game.toPlay, by: text === null ? "human" : "tutor" });
+    this.emit({ type: "undo", gameId: this.gameId!, moves: game.moves.length, toPlay: game.toPlay, by });
     if (text !== null) this.addChat("tutor", text, momentId);
     this.save();
     this.changed();
   }
 
-  /** Tags on moves that were taken back no longer describe anything: remove them and their tallies. */
-  private dropTagsAfter(moveCount: number): void {
-    for (const n of Object.keys(this.heuristics).map(Number)) if (n > moveCount) delete this.heuristics[n];
-    const dropped = Object.keys(this.tags).map(Number).filter((n) => n > moveCount);
-    if (dropped.length === 0) return;
+  /**
+   * A taken-back human move stays in the record as a first attempt, with its heuristic category and
+   * tag (a tag counted in the profile now points at the first attempt).
+   */
+  private keepTakenBack(record: MoveRecord, by: TakenBackMove["by"], line: Gtp[]): void {
+    const n = record.number;
+    const heuristic = this.heuristics[n];
+    const tag = this.tags[n];
+    const index =
+      this.takenBack.push({ moveNumber: n, record, by, ts: this.clock.now(), before: line, ...(heuristic && { heuristic }), ...(tag && { tag }) }) - 1;
+    delete this.heuristics[n];
+    delete this.tags[n];
+    if (!tag) return;
     this.updateProfile((profile) => {
-      for (const n of dropped) {
-        const { category } = this.tags[n]!;
-        profile.mistakeCounts[category] = Math.max(0, profile.mistakeCounts[category] - 1);
-        delete this.tags[n];
-      }
-      profile.recentMistakes = profile.recentMistakes.filter((m) => m.gameId !== this.gameId || m.moveNumber <= moveCount);
+      const entry = profile.recentMistakes.find((m) => m.gameId === this.gameId && m.moveNumber === n && m.takenBack === undefined);
+      if (entry) entry.takenBack = index;
     });
   }
 
@@ -965,6 +1095,8 @@ export class GameController {
       throw new UserError(this.status === "paused" ? "Press Continue or Try again first, then ask for a hint." : "Wait for the bot to move, then ask for a hint.");
     }
     if (text?.trim()) this.addChat("user", text.trim(), this.activeMoment()?.id);
+    this.assistance.hints++;
+    this.save();
     this.emit({
       type: "hint_request",
       gameId: this.gameId!,
@@ -975,6 +1107,7 @@ export class GameController {
     });
     if (this.tutorAttached) {
       this.questionOpen = true; // the tutor got it: on Silent it may answer with one say
+      this.hintAskedAt = game.moves.length; // the tutor's answer makes the next move hinted
       this.system("Asked your tutor for a hint.");
       this.changed();
       return;
@@ -987,8 +1120,10 @@ export class GameController {
       if (!this.isCurrent(gen) || game.moves.length !== moveCount) return;
       const best = analysis.moveInfos[0]?.move ?? "pass";
       const point = best === "pass" ? null : tryFromGtp(best, settings.size);
+      this.noteHelp("hint");
       if (point) {
         this.overlay = { ...this.overlay, marks: [{ point, kind: "circle" }] };
+        this.noteHelp("shown");
         this.system(`Hint from KataGo: look at ${best} (circled). Your tutor isn't connected, so that's all it can say.`);
       } else {
         this.system("Hint from KataGo: passing is fine here; the board is settled.");
@@ -1080,13 +1215,160 @@ export class GameController {
     const gameId = this.gameId!;
     this.emit({ type: "game_end", gameId, result, summary });
     this.changed();
-    this.makeProblems(gameId, settings, this.game!.moves, summary);
+    const moves = this.game!.moves;
+    this.makeProblems(gameId, settings, moves, summary, this.takenBack);
+    if (summary.rating?.pending) this.runPendingEstimates();
+  }
+
+  /**
+   * In the background: the rank estimates of the finished games waiting for one
+   * (`Profile.estimating`, in the order they finished), each from the saved game's unassisted moves
+   * (estimate.ts), then its rating (`applyEstimate`), written to the profile and the game's summary
+   * and announced with a `rating` event. The games wait (and stay marked, on disk) while KataGo
+   * isn't ready or fails, and while the rating migration hasn't run (it covers them); the next
+   * engine-ready or game end runs them. Only a game with too few unassisted moves for an estimate
+   * is rated from its result alone.
+   */
+  private runPendingEstimates(): void {
+    if (this.estimatesQueued) return;
+    this.estimatesQueued = true;
+    void this.queueRatingWork(async () => {
+      this.estimatesQueued = false;
+      for (const gameId of [...(this.profile.estimating ?? [])]) {
+        if (this.engineState !== "ready" || this.profile.ratingModel !== 2) return;
+        // Later games wait behind one KataGo failed on, so the rating history stays in game order.
+        if (!(await this.estimatePending(gameId))) return;
+      }
+    });
+  }
+
+  /** One waiting game's rank estimate and rating. False when KataGo failed (the game keeps waiting). */
+  private async estimatePending(gameId: string): Promise<boolean> {
+    const saved = this.store.loadGame(gameId);
+    if (!saved?.result || !saved.summary) {
+      // Gone, or never finished: there is nothing to estimate.
+      this.updateProfile((profile) => clearEstimating(profile, gameId));
+      return true;
+    }
+    const { settings, result, moves } = saved;
+    let estimate: RankEstimate | null;
+    try {
+      // Null only when the game has too few unassisted moves.
+      estimate = await estimateRank(this.engine, rankSamples(settings, moves, saved.takenBack ?? []), { ...noAssistance(), ...saved.assistance });
+    } catch (err) {
+      this.log(`rank estimate for ${gameId} failed: ${(err as Error).message}; it runs again when KataGo is next ready or the next game ends`);
+      return false;
+    }
+    if (!isEstimating(this.store.loadProfile(), gameId)) return true;
+    const human = moves.filter((r) => r.move.color === settings.humanColor);
+    const change = this.updateProfile((profile) =>
+      applyEstimate(profile, {
+        gameId,
+        ts: profile.recentGames.find((g) => g.gameId === gameId)?.ts ?? saved.updatedAt,
+        settings,
+        result,
+        humanMoves: human.length,
+        assistedMoves: human.filter((r) => r.assist?.length).length,
+        estimate,
+      }),
+    );
+    this.recordRatingChange(gameId, change);
+    this.emit({ type: "rating", gameId, rating: change });
+    this.changed();
+    return true;
+  }
+
+  /** Runs `task` after the rating work queued before it (estimates and the migration never overlap). Failures are logged. */
+  private queueRatingWork(task: () => Promise<void>): Promise<void> {
+    this.ratingWork = this.ratingWork.then(task).catch((err: unknown) => this.log(`rating update failed: ${(err as Error).message}`));
+    return this.ratingWork;
+  }
+
+  /** Resolves once the rating work queued so far is done (for tests and shutdown). */
+  ratingIdle(): Promise<void> {
+    return this.ratingWork;
+  }
+
+  /** The game's summary gets its rating change: the current game's in memory, an older one's on disk. */
+  private recordRatingChange(gameId: string, change: RatingChange): void {
+    if (gameId === this.gameId && this.summary) {
+      this.summary.rating = change;
+      this.save();
+      return;
+    }
+    const saved = this.store.loadGame(gameId);
+    if (!saved?.summary) return;
+    saved.summary.rating = change;
+    try {
+      this.store.saveGame({ ...saved, updatedAt: this.clock.now() }, this.sgfFor(saved.settings, saved.moves, saved.result, saved.tags ?? {}));
+    } catch (err) {
+      this.log(`saving the rating of game ${gameId} failed: ${(err as Error).message}`);
+    }
+  }
+
+  /**
+   * When KataGo is ready: once per data dir, re-estimate the rating from the saved games' moves
+   * (rating model 2), with the taken-back moves and help rebuilt from the event log (migrate.ts);
+   * then the rank estimates still waiting (a stopped server's, or games that finished while KataGo
+   * was away or before the migration). Runs in the rating queue. If KataGo fails during the
+   * migration nothing is written; it is tried again after MIGRATION_RETRY_MS (growing), or at
+   * the next engine-ready, up to MAX_MIGRATION_ATTEMPTS times per run.
+   */
+  migrateRatings(): Promise<void> {
+    return this.queueRatingWork(async () => {
+      if (this.engineState !== "ready") return;
+      if (this.profile.ratingModel !== 2 && !(await this.migrate())) return;
+      this.runPendingEstimates();
+    });
+  }
+
+  /** One migration attempt. True once the profile is on rating model 2. */
+  private async migrate(): Promise<boolean> {
+    if (this.migrationFailures >= MAX_MIGRATION_ATTEMPTS) return false;
+    if (this.migrationRetry !== null) {
+      this.clock.clearTimeout(this.migrationRetry);
+      this.migrationRetry = null;
+    }
+    let report: Awaited<ReturnType<typeof migrateRatingModel>>;
+    try {
+      report = await migrateRatingModel({
+        store: this.store,
+        engine: this.engine,
+        now: () => this.clock.now(),
+        log: (msg) => this.log(msg),
+        threshold: this.profile.mistakeThreshold,
+        skip: this.gameId && !this.result ? this.gameId : undefined,
+      });
+    } catch (err) {
+      const n = ++this.migrationFailures;
+      const why = `rating migration attempt ${n} of ${MAX_MIGRATION_ATTEMPTS} failed, nothing was written: ${(err as Error).message}`;
+      if (n >= MAX_MIGRATION_ATTEMPTS) {
+        this.log(`${why}; it runs again when the server restarts`);
+        return false;
+      }
+      const delay = MIGRATION_RETRY_MS * 4 ** (n - 1);
+      this.log(`${why}; trying again in ${Math.round(delay / 1000)} s or when KataGo is next ready`);
+      this.migrationRetry = this.clock.setTimeout(() => {
+        this.migrationRetry = null;
+        void this.migrateRatings();
+      }, delay);
+      return false;
+    }
+    // The migration wrote the profile; the controller's copy follows.
+    this.profile = this.store.loadProfile();
+    this.profileVersion++;
+    if (report.message) {
+      this.log(report.summary);
+      this.system(report.message);
+    }
+    this.changed();
+    return true;
   }
 
   /** In the background, each mistake of the finished game becomes a practice problem (problems.ts). */
-  private makeProblems(gameId: string, settings: GameSettings, moves: MoveRecord[], summary: GameSummary): void {
+  private makeProblems(gameId: string, settings: GameSettings, moves: MoveRecord[], summary: GameSummary, takenBack: readonly TakenBackMove[]): void {
     generateProblems(
-      { gameId, settings, moves, summary },
+      { gameId, settings, moves, summary, takenBack },
       {
         analyze: (position, opts) => (this.engineState === "ready" ? this.engine.analyze(position, opts) : null),
         concurrency: this.engine.concurrency ?? 1,
@@ -1108,59 +1390,40 @@ export class GameController {
     );
   }
 
+  /** The game's mistakes, the taken-back first attempts included, worst first; with the total loss and the help the learner had. */
   private buildSummary(): GameSummary {
     const game = this.game!;
     const settings = this.settings!;
-    const human = game.moves.filter((r) => r.move.color === settings.humanColor && r.eval);
-    const mistakes = human
-      .filter((r) => r.eval!.pointLoss >= this.profile.mistakeThreshold)
-      .sort((a, b) => b.eval!.pointLoss - a.eval!.pointLoss)
+    const threshold = this.profile.mistakeThreshold;
+    const final = game.moves
+      .filter((r) => r.move.color === settings.humanColor && r.eval && r.eval.pointLoss >= threshold)
       .map((r) => {
         const tagged = this.tags[r.number]?.category;
         // A mistake evaluated before this boot (or below the threshold back then) is classified now, without ownership.
-        const category = tagged ?? (this.heuristics[r.number] ??= this.classifyOrOther(r));
-        return {
-          moveNumber: r.number,
-          move: moveGtp(r.move, settings.size),
-          pointLoss: round1(r.eval!.pointLoss),
-          bestMove: r.eval!.bestMove,
-          category,
-          categorySource: tagged ? ("tutor" as const) : ("heuristic" as const),
-        };
+        return mistakeEntry(r, settings.size, tagged ?? (this.heuristics[r.number] ??= this.classifyOrOther(r)), !!tagged);
       });
-    const total = human.reduce((sum, r) => sum + r.eval!.pointLoss, 0);
-    return { moves: game.moves.length, mistakes, totalPointLoss: round1(total) };
+    const firsts = firstAttemptMistakes(this.takenBack, settings.size, threshold, (t) => (t.heuristic ??= this.classifyOrOther(t.record, t)));
+    return {
+      moves: game.moves.length,
+      mistakes: worstFirst([...final, ...firsts]),
+      totalPointLoss: totalPointLoss(game.moves, settings.humanColor, this.takenBack),
+      assistance: { ...this.assistance },
+    };
   }
 
   /**
    * A heuristic category for a human move (src/server/profile.ts). The analyses around the move
    * give KataGo's ownership, for spotting groups that live or die; without them that check is skipped.
+   * `replay` is the game before the move (default: from the current game's moves).
    */
-  private classify(record: MoveRecord, before?: Analysis, after?: Analysis): MistakeCategory {
-    const settings = this.settings!;
-    const replay = this.game!.before(record.number);
-    const boardBefore = replay.board;
-    replay.play(record.move);
-    return classifyMistake({
-      size: settings.size,
-      moveNumber: record.number,
-      move: record.move,
-      captures: record.captures.length,
-      pointLoss: record.eval?.pointLoss ?? 0,
-      threshold: this.profile.mistakeThreshold,
-      bestMove: record.eval?.bestMove ?? "pass",
-      reply: after?.moveInfos[0]?.move,
-      boardBefore,
-      boardAfter: replay.board,
-      ...(before?.ownership && { ownershipBefore: before.ownership }),
-      ...(after?.ownership && { ownershipAfter: after.ownership }),
-    });
+  private classify(record: MoveRecord, before?: Analysis, after?: Analysis, replay: GoGame = this.game!.before(record.number)): MistakeCategory {
+    return classifyPlayed(replay, record, this.profile.mistakeThreshold, before, after);
   }
 
-  /** `classify`, or "other" (logged) when it fails, so a bad replay can't stop the game from ending. */
-  private classifyOrOther(record: MoveRecord): MistakeCategory {
+  /** `classify` (of a taken-back move, with `takenBack`), or "other" (logged) when it fails, so a bad replay can't stop the game from ending. */
+  private classifyOrOther(record: MoveRecord, takenBack?: TakenBackMove): MistakeCategory {
     try {
-      return this.classify(record);
+      return takenBack ? this.classify(record, undefined, undefined, gameFromLine(this.settings!, takenBack.before)) : this.classify(record);
     } catch (err) {
       this.log(`classifying move ${record.number} failed: ${(err as Error).message}`);
       return "other";
@@ -1176,6 +1439,7 @@ export class GameController {
         settings: this.settings!,
         result,
         moves: this.game!.moves,
+        takenBack: this.takenBack,
         summary,
         threshold: this.profile.mistakeThreshold,
       }),
@@ -1191,31 +1455,39 @@ export class GameController {
    * Tag a mistake with a category (current or saved game). The tutor's tag replaces the heuristic
    * category in the summary and in the profile tallies.
    */
-  private tag(gameId: string, moveNumber: number, category: MistakeCategory, note?: string): void {
+  private tag(gameId: string, moveNumber: number, category: MistakeCategory, note?: string, takenBack: boolean | number = false): void {
     const saved = gameId === this.gameId ? null : this.store.loadGame(gameId);
     if (gameId !== this.gameId && !saved) throw new UserError(`No saved game "${gameId}".`);
     const moves = saved ? saved.moves : this.game!.moves;
-    const humanColor = (saved ? saved.settings : this.settings!).humanColor;
-    const record = moves[moveNumber - 1];
+    const firsts = saved ? (saved.takenBack ?? []) : this.takenBack;
+    const { humanColor, size } = saved ? saved.settings : this.settings!;
+    // A taken-back move: the try the tutor named (review's "first try #n"), or the only one there.
+    const index = takenBack === false ? undefined : pickTakenBack(gameId, firsts, size, moveNumber, takenBack);
+    const first = index !== undefined ? firsts[index]! : undefined;
+    const record = first ? first.record : moves[moveNumber - 1];
     if (!record) throw new UserError(`Game ${gameId} has no move ${moveNumber}.`);
     if (record.move.color !== humanColor) {
       throw new UserError(`Move ${moveNumber} was the bot's. Tag the learner's moves (${colorName(humanColor)}).`);
     }
     const tags = saved ? (saved.tags ??= {}) : this.tags;
     const summary = saved ? saved.summary : this.summary;
-    const entry = summary?.mistakes.find((m) => m.moveNumber === moveNumber);
+    const entry = summary?.mistakes.find((m) => m.moveNumber === moveNumber && m.takenBack === index);
     // What the move counts as so far: an earlier tag, or the heuristic category counted at game end.
-    const previous = tags[moveNumber]?.category ?? (entry?.categorySource === "heuristic" ? entry.category : undefined);
-    tags[moveNumber] = { category, ...(note && { note }) };
+    const previous = (first ? first.tag : tags[moveNumber])?.category ?? (entry?.categorySource === "heuristic" ? entry.category : undefined);
+    const value = { category, ...(note && { note }) };
+    if (first) first.tag = value;
+    else tags[moveNumber] = value;
 
     const pointLoss = round1(record.eval?.pointLoss ?? 0);
-    this.updateProfile((profile) => applyTag(profile, { ts: this.clock.now(), gameId, moveNumber, category, pointLoss, ...(note && { note }) }, previous));
+    this.updateProfile((profile) =>
+      applyTag(profile, { ts: this.clock.now(), gameId, moveNumber, category, pointLoss, ...(note && { note }), ...(index !== undefined && { takenBack: index }) }, previous),
+    );
 
     if (entry) {
       entry.category = category;
       entry.categorySource = "tutor";
     }
-    this.retagProblem(gameId, moveNumber, category);
+    this.retagProblem(gameId, moveNumber, category, index);
     if (saved) {
       this.store.saveGame({ ...saved, updatedAt: this.clock.now() }, this.sgfFor(saved.settings, saved.moves, saved.result, tags));
     } else {
@@ -1225,8 +1497,8 @@ export class GameController {
   }
 
   /** A tag changes what a mistake was about; the practice problem made from it follows. */
-  private retagProblem(gameId: string, moveNumber: number, category: MistakeCategory): void {
-    const fromMove = (p: StoredProblem) => p.source?.gameId === gameId && p.source.moveNumber === moveNumber;
+  private retagProblem(gameId: string, moveNumber: number, category: MistakeCategory, takenBack: number | undefined): void {
+    const fromMove = (p: StoredProblem) => p.source?.gameId === gameId && p.source.moveNumber === moveNumber && p.source.takenBack === takenBack;
     // The problem may be on the board right now: its result and attempts count for the new category.
     if (this.practice && fromMove(this.practice.problem)) this.practice.retag(category);
     try {
@@ -1371,6 +1643,8 @@ export class GameController {
       tags: this.tags,
       heuristics: this.heuristics,
       moment: this.moment,
+      takenBack: this.takenBack,
+      assistance: this.assistance,
     };
     try {
       this.store.saveGame(record, this.sgfFor(settings, moves, this.result, this.tags));

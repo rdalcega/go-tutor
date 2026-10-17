@@ -98,7 +98,9 @@ class MockServer implements Transport {
         botRank: "20k",
         won: i === 0 || rating > games[i - 1]!,
         delta: i === 0 ? 1.2 : round1(rating - games[i - 1]!),
+        estimate: { rating: Math.max(10, rating + 0.3), floor: rating + 0.3 <= 10, moves: 28 + i, hints: i % 3, takeBacks: i % 2, rethinks: 1 },
       })),
+      ratingModel: 2,
       mistakeThreshold: 4,
       thresholdHistory: [],
       mistakeCounts: { life_and_death: 4, capturing_race: 1, opening: 2, direction: 1, shape: 3, endgame: 0, tactics: 2, other: 1 },
@@ -323,7 +325,8 @@ class MockServer implements Transport {
         v.overlay = null;
         if (s && game && game.toPlay !== s.humanColor) this.botReply();
         return null;
-      case "retry": {
+      case "retry":
+      case "take_back": {
         if (!s || !game) return "No game in progress.";
         const moves = game.moves;
         let idx = moves.length - 1;
@@ -346,6 +349,7 @@ class MockServer implements Transport {
         return null;
       case "ask_tutor": {
         if (!s) return "Start a game first.";
+        if (a.text?.trim()) this.msg("user", a.text.trim(), v.moment?.id);
         const p = this.randomEmpty();
         if (p) v.overlay = { marks: [{ point: p, kind: "circle" }] };
         this.msg("system", p ? `Hint: consider ${toGtp(p, s.size)}.` : "No hint available.");

@@ -4,7 +4,7 @@
 // finished game through the controller (game.ts), and store.ts reads and writes data/problems.json.
 
 import { createHash } from "node:crypto";
-import { GoGame, boardFromDiagram, emptyBoard, gameBefore, opponent, positionKey, setCell } from "../engine/index.ts";
+import { GoGame, boardFromDiagram, emptyBoard, gameBefore, gameFromLine, opponent, positionKey, setCell } from "../engine/index.ts";
 import { toGtp, tryFromGtp } from "../shared/coords.ts";
 import { MAX_BOX } from "../shared/schedule.ts";
 import { colorName, round1 } from "../shared/text.ts";
@@ -19,9 +19,11 @@ import type {
   MoveRecord,
   ProblemListItem,
   ProblemsResponse,
+  TakenBackMove,
 } from "../shared/types.ts";
 import { BUILTIN_PROBLEMS, type BuiltinProblem } from "./builtin-problems.ts";
-import { TRUSTED_CANDIDATE_VISITS, type Analysis, type Position } from "./katago.ts";
+import { BACKGROUND_PRIORITY, TRUSTED_CANDIDATE_VISITS, type Analysis, type AnalyzeOptions, type Position } from "./katago.ts";
+import { mistakeKey } from "./profile.ts";
 
 export { BOX_INTERVALS, MAX_BOX, resultOf, schedule, type ProblemResult } from "../shared/schedule.ts";
 
@@ -54,7 +56,8 @@ export interface StoredProblem {
   bestPv?: Gtp[];
   /** Points the learner's move lost in the game. */
   difficulty?: number;
-  source?: { gameId: string; moveNumber: number; played: Gtp };
+  /** `takenBack`: made from a first attempt that was taken back (its index in the game's `takenBack`). */
+  source?: { gameId: string; moveNumber: number; played: Gtp; takenBack?: number };
   /** Hash of the position and side to move; one problem per position. */
   hash: string;
   createdAt: number;
@@ -234,6 +237,8 @@ export interface MistakeSnapshot {
   toPlay: Color;
   /** KataGo's candidates in that position, best first. */
   candidates: Candidate[];
+  /** A taken-back first attempt: its index in the game's `takenBack`. */
+  takenBack?: number;
 }
 
 /** A practice problem from a mistake, or null when there is nothing to find (KataGo would pass, or no answer). */
@@ -255,7 +260,7 @@ export function problemFromMistake(m: MistakeSnapshot, id: string, now: number):
     bestMove: best.move,
     bestPv: best.pv.slice(0, 8),
     difficulty: round1(m.pointLoss),
-    source: { gameId: m.gameId, moveNumber: m.moveNumber, played: m.played },
+    source: { gameId: m.gameId, moveNumber: m.moveNumber, played: m.played, ...(m.takenBack !== undefined && { takenBack: m.takenBack }) },
     hash: positionHash(m.board, m.toPlay),
     createdAt: now,
     box: 1,
@@ -271,13 +276,13 @@ export function nextProblemId(problems: readonly Pick<StoredProblem, "id">[]): s
   return `p${max + 1}`;
 }
 
-/** Adds new problems, skipping any whose position (or source move) is already a problem. */
+/** Adds new problems, skipping any whose position (or source move, `mistakeKey`) is already a problem. */
 export function addProblems(problems: StoredProblem[], fresh: readonly StoredProblem[]): StoredProblem[] {
   const hashes = new Set(problems.map((p) => p.hash));
-  const sources = new Set(problems.flatMap((p) => (p.source ? [`${p.source.gameId}#${p.source.moveNumber}`] : [])));
+  const sources = new Set(problems.flatMap((p) => (p.source ? [mistakeKey(p.source)] : [])));
   const added: StoredProblem[] = [];
   for (const p of fresh) {
-    const source = p.source ? `${p.source.gameId}#${p.source.moveNumber}` : null;
+    const source = p.source ? mistakeKey(p.source) : null;
     if (hashes.has(p.hash) || (source && sources.has(source))) continue;
     hashes.add(p.hash);
     if (source) sources.add(source);
@@ -299,7 +304,7 @@ export function hasKoBan(game: GoGame): boolean {
 /** What `generateProblems` needs from the controller. */
 export interface ProblemMaker {
   /** A deeper KataGo analysis of a position, or null while KataGo isn't ready. */
-  analyze(position: Position, opts: { maxVisits: number }): Promise<Analysis> | null;
+  analyze(position: Position, opts: AnalyzeOptions): Promise<Analysis> | null;
   /** Queries KataGo runs at once. */
   concurrency: number;
   now(): number;
@@ -319,19 +324,22 @@ export interface ProblemMaker {
  * answer it; without that analysis there is no problem.
  */
 export async function generateProblems(
-  game: { gameId: string; settings: GameSettings; moves: readonly MoveRecord[]; summary: GameSummary },
+  game: { gameId: string; settings: GameSettings; moves: readonly MoveRecord[]; summary: GameSummary; takenBack?: readonly TakenBackMove[] },
   maker: ProblemMaker,
 ): Promise<StoredProblem[]> {
   const { gameId, settings, moves } = game;
   const snapshots: MistakeSnapshot[] = [];
   const koBanned = new Set<MistakeSnapshot>();
   for (const m of game.summary.mistakes) {
-    const record = moves[m.moveNumber - 1];
+    // A taken-back first attempt was played in its own position, which later take-backs may have changed.
+    const first = m.takenBack !== undefined ? game.takenBack?.[m.takenBack] : undefined;
+    if (m.takenBack !== undefined && !first) continue;
+    const record = first ? first.record : moves[m.moveNumber - 1];
     const evaluation = record?.eval;
     if (!record || !evaluation) continue;
     let before: GoGame;
     try {
-      before = gameBefore(settings, moves, m.moveNumber);
+      before = first ? gameFromLine(settings, first.before) : gameBefore(settings, moves, m.moveNumber);
     } catch {
       continue;
     }
@@ -346,6 +354,7 @@ export async function generateProblems(
       board: before.board,
       toPlay: record.move.color,
       candidates: evaluation.candidates.map((c) => ({ move: c.move, lead: c.lead, visits: c.visits, pv: c.pv })),
+      ...(m.takenBack !== undefined && { takenBack: m.takenBack }),
     };
     snapshots.push(snapshot);
     if (hasKoBan(before)) koBanned.add(snapshot);
@@ -353,7 +362,8 @@ export async function generateProblems(
   const deepen = async (s: MistakeSnapshot): Promise<void> => {
     try {
       const position = problemPosition({ size: s.size, komi: s.komi, stones: stonesOf(s.board), toPlay: s.toPlay });
-      const analysis = maker.analyze(position, { maxVisits: DEEP_VISITS });
+      // Nobody waits on it: the next game's queries go first.
+      const analysis = maker.analyze(position, { maxVisits: DEEP_VISITS, priority: BACKGROUND_PRIORITY });
       if (analysis) {
         s.candidates = candidatesFromAnalysis(await analysis);
         return;
@@ -374,7 +384,7 @@ export async function generateProblems(
   try {
     const now = maker.now();
     const current = maker.currentSummary() ?? game.summary;
-    for (const s of snapshots) s.category = current.mistakes.find((m) => m.moveNumber === s.moveNumber)?.category ?? s.category;
+    for (const s of snapshots) s.category = current.mistakes.find((m) => m.moveNumber === s.moveNumber && m.takenBack === s.takenBack)?.category ?? s.category;
     return maker.updateProblems((problems) => {
       const fresh: StoredProblem[] = [];
       for (const s of snapshots) {

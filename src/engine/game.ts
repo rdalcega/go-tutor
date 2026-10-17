@@ -1,5 +1,5 @@
 import type { Board, Color, Move, MoveRecord, Point } from "../shared/types.ts";
-import { inBounds } from "../shared/coords.ts";
+import { inBounds, tryFromGtp } from "../shared/coords.ts";
 import { boardStones, cloneBoard, emptyBoard, getCell, groupAt, handicapPoints, neighbors, opponent, positionKey, setCell } from "./board.ts";
 
 export type IllegalReason = "occupied" | "suicide" | "ko" | "not_your_turn" | "game_over" | "off_board";
@@ -213,6 +213,26 @@ export class GoGame {
   }
 }
 
+
+/**
+ * Moves from a GTP line ("pass" allowed), colors alternating from the game's first mover (White
+ * with handicap stones). Throws on a coordinate that isn't on the board.
+ */
+export function movesFromLine(setup: { size: number; handicap: number }, line: readonly string[]): Move[] {
+  let color: Color = setup.handicap >= 2 ? "W" : "B";
+  return line.map((gtp) => {
+    const point = tryFromGtp(gtp, setup.size);
+    if (point === undefined) throw new Error(`"${gtp}" is not a point on a ${setup.size}×${setup.size} board`);
+    const move: Move = point ? { color, point } : { color, pass: true };
+    color = opponent(color);
+    return move;
+  });
+}
+
+/** The game after a GTP line of moves (e.g. a taken-back move's `before`), replayed from the settings. Throws if it doesn't replay. */
+export function gameFromLine(setup: { size: number; komi: number; handicap: number }, line: readonly string[]): GoGame {
+  return GoGame.fromMoves(setup.size, setup.komi, setup.handicap, movesFromLine(setup, line));
+}
 
 /** The game before move `n` (1-based) of `moves`, replayed from the settings. Throws if the moves don't replay. */
 export function gameBefore(setup: { size: number; komi: number; handicap: number }, moves: readonly MoveRecord[], n: number): GoGame {

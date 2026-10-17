@@ -3,10 +3,11 @@
 // Profile; the controller loads and saves it.
 
 import { GoGame, getCell, groupAt, neighbors, opponent } from "../engine/index.ts";
-import { movePoint, pointKey, tryFromGtp } from "../shared/coords.ts";
+import { moveGtp, movePoint, pointKey, tryFromGtp } from "../shared/coords.ts";
 import { clampRating, rankToRating, ratingToRank } from "../shared/rank.ts";
-import { categoryLabel } from "../shared/text.ts";
+import { categoryLabel, round1 } from "../shared/text.ts";
 import type {
+  AssistCounts,
   Board,
   Color,
   FocusRecommendation,
@@ -19,7 +20,9 @@ import type {
   MoveRecord,
   Point,
   Profile,
+  RankEstimate,
   RatingChange,
+  TakenBackMove,
 } from "../shared/types.ts";
 
 // ---------------------------------------------------------------------------
@@ -114,10 +117,17 @@ export interface FinishedGame {
   settings: GameSettings;
   result: GameResult;
   moves: MoveRecord[];
-  /** With categories filled in (tutor tags, else heuristics). */
+  /** The human moves that were taken back (their first attempts). */
+  takenBack?: readonly TakenBackMove[];
+  /** With categories filled in (tutor tags, else heuristics), taken-back mistakes included. */
   summary: GameSummary;
   /** The mistake threshold the game was played with. */
   threshold: number;
+}
+
+/** Whether a finished game moves the rating: played to a result, with 10+ human moves. */
+export function isRated(game: Pick<FinishedGame, "result" | "moves" | "settings">): boolean {
+  return game.result.reason !== "abandon" && game.moves.filter((r) => r.move.color === game.settings.humanColor).length >= MIN_RATED_MOVES;
 }
 
 export interface GameUpdate {
@@ -127,63 +137,146 @@ export interface GameUpdate {
 
 const round2 = (n: number) => Math.round(n * 100) / 100;
 
-/** Whether `gameId` was already applied to the profile (it is in the rating history or the recent games). */
+/** Whether `gameId` was already applied to the profile (it is in the rating history, the recent games or waiting for its estimate). */
 export function gameApplied(profile: Profile, gameId: string): boolean {
-  return profile.ratingHistory.some((e) => e.gameId === gameId) || profile.recentGames.some((g) => g.gameId === gameId);
+  return profile.ratingHistory.some((e) => e.gameId === gameId) || profile.recentGames.some((g) => g.gameId === gameId) || isEstimating(profile, gameId);
+}
+
+/** Whether `gameId` is a finished rated game whose rank estimate hasn't been applied yet. */
+export function isEstimating(profile: Pick<Profile, "estimating">, gameId: string): boolean {
+  return profile.estimating?.includes(gameId) ?? false;
+}
+
+/** Marks a finished game as waiting for its rank estimate (at the end of the list, once). */
+export function markEstimating(profile: Profile, gameId: string): void {
+  profile.estimating = [...(profile.estimating ?? []).filter((id) => id !== gameId), gameId];
+}
+
+/** The game's rank estimate is in (or never will be): it no longer waits. */
+export function clearEstimating(profile: Profile, gameId: string): void {
+  const rest = (profile.estimating ?? []).filter((id) => id !== gameId);
+  if (rest.length) profile.estimating = rest;
+  else delete profile.estimating;
+}
+
+/** The recorded rating change of a game already in the rating history, or null. */
+function recordedChange(profile: Profile, gameId: string): RatingChange | null {
+  const entry = profile.ratingHistory.find((e) => e.gameId === gameId && e.delta !== undefined);
+  if (!entry) return null;
+  return {
+    before: round2(entry.rating - entry.delta!),
+    after: entry.rating,
+    rated: true,
+    nextBotRank: profile.botRank,
+    nextHandicap: profile.handicap ?? 0,
+    ...(entry.estimate && { estimate: entry.estimate }),
+  };
 }
 
 /**
- * Applies a finished game to the profile (mutating it): rating and next bot, heuristic mistake
- * categories (tutor tags were counted when they were made), recent-game stats and the threshold.
- * A game already applied (the profile was saved but the game wasn't, and it was finished again
- * after a restart) changes nothing; its recorded rating change is returned.
+ * Which mistake: the game, the move number and, for a taken-back first attempt, its index in
+ * `SavedGame.takenBack`. Profile tallies, problem sources and the migration all use it.
+ */
+export function mistakeKey(m: { gameId: string; moveNumber: number; takenBack?: number }): string {
+  return `${m.gameId}#${m.moveNumber}${m.takenBack !== undefined ? `#t${m.takenBack}` : ""}`;
+}
+
+/** No help yet: the start of a game's `AssistCounts`. */
+export function noAssistance(): AssistCounts {
+  return { hints: 0, takeBacks: 0, rethinks: 0 };
+}
+
+type SummaryMistake = GameSummary["mistakes"][number];
+
+/** A summary entry for an evaluated human move: a final move, or a taken-back first attempt (`takenBack`: its index). */
+export function mistakeEntry(record: MoveRecord, size: number, category: MistakeCategory | undefined, tagged: boolean, takenBack?: number): SummaryMistake {
+  return {
+    moveNumber: record.number,
+    move: moveGtp(record.move, size),
+    pointLoss: round1(record.eval!.pointLoss),
+    bestMove: record.eval!.bestMove,
+    ...(category && { category, categorySource: tagged ? ("tutor" as const) : ("heuristic" as const) }),
+    ...(takenBack !== undefined && { takenBack }),
+  };
+}
+
+/**
+ * The taken-back first attempts that were mistakes (point loss >= `threshold`) as summary entries,
+ * each with the tutor's tag, else `heuristic(t)` (which may work it out and keep it on `t`).
+ */
+export function firstAttemptMistakes(
+  takenBack: readonly TakenBackMove[],
+  size: number,
+  threshold: number,
+  heuristic: (t: TakenBackMove) => MistakeCategory | undefined = (t) => t.heuristic,
+): SummaryMistake[] {
+  return takenBack.flatMap((t, i) => {
+    if (!t.record.eval || t.record.eval.pointLoss < threshold) return [];
+    const tagged = t.tag?.category;
+    return [mistakeEntry(t.record, size, tagged ?? heuristic(t), !!tagged, i)];
+  });
+}
+
+/** Mistakes worst first (sorts in place). */
+export function worstFirst(mistakes: SummaryMistake[]): SummaryMistake[] {
+  return mistakes.sort((a, b) => b.pointLoss - a.pointLoss);
+}
+
+/** A game's total point loss: every human move on the board plus every taken-back first attempt. */
+export function totalPointLoss(moves: readonly MoveRecord[], humanColor: Color, takenBack: readonly TakenBackMove[]): number {
+  const records = [...moves.filter((r) => r.move.color === humanColor), ...takenBack.map((t) => t.record)];
+  return round1(records.reduce((sum, r) => sum + (r.eval?.pointLoss ?? 0), 0));
+}
+
+/**
+ * Applies a finished game to the profile (mutating it): heuristic mistake categories (tutor tags
+ * were counted when they were made; taken-back first attempts count too), recent-game stats and the
+ * threshold. The rating waits for the game's rank estimate (`applyEstimate`): a rated game is
+ * marked `estimating` and its change comes back `pending`. A game already applied (the profile was
+ * saved but the game wasn't, and it was finished again after a restart) changes nothing; its
+ * recorded rating change is returned.
  */
 export function applyGame(profile: Profile, game: FinishedGame): GameUpdate {
-  const { settings, result, summary } = game;
+  const { settings, summary } = game;
+  const unchanged = (rated: boolean, pending: boolean): RatingChange => ({
+    before: profile.rating,
+    after: profile.rating,
+    rated,
+    ...(pending && { pending }),
+    nextBotRank: profile.botRank,
+    nextHandicap: profile.handicap ?? 0,
+  });
   if (gameApplied(profile, game.gameId)) {
-    const entry = profile.ratingHistory.find((e) => e.gameId === game.gameId && e.delta !== undefined);
-    const after = entry?.rating ?? profile.rating;
-    const before = entry ? round2(entry.rating - entry.delta!) : profile.rating;
-    return { rating: { before, after, rated: !!entry, nextBotRank: profile.botRank, nextHandicap: profile.handicap ?? 0 } };
+    // Its estimate may still be waiting (only a rated game gets one).
+    const pending = isEstimating(profile, game.gameId);
+    return { rating: recordedChange(profile, game.gameId) ?? unchanged(pending, pending) };
   }
   const human = game.moves.filter((r) => r.move.color === settings.humanColor);
   profile.gamesPlayed++;
-
-  // Rating.
-  const before = profile.rating;
-  const rated = result.reason !== "abandon" && human.length >= MIN_RATED_MOVES;
-  if (rated) {
-    const score = result.winner === null ? 0.5 : result.winner === settings.humanColor ? 1 : 0;
-    const delta = 2 * ratingStep(ratedGames(profile)) * (score - expectedScore(before, botStrength(settings)));
-    profile.rating = round2(clampRating(before + delta));
-    profile.ratingHistory.push({
-      ts: game.ts,
-      gameId: game.gameId,
-      rating: profile.rating,
-      botRank: settings.botRank,
-      won: score === 1,
-      handicap: settings.handicap,
-      delta: round2(profile.rating - before),
-    });
-  }
-  const next = botFor(profile.rating);
-  profile.botRank = next.botRank;
-  profile.handicap = next.handicap;
+  const rated = isRated(game);
+  if (rated) markEstimating(profile, game.gameId);
 
   // Mistakes the tutor didn't tag count under their heuristic category.
   const added = summary.mistakes
     .filter((m) => m.categorySource === "heuristic" && m.category)
     .sort((a, b) => b.moveNumber - a.moveNumber)
-    .map((m) => ({ ts: game.ts, gameId: game.gameId, moveNumber: m.moveNumber, category: m.category!, pointLoss: m.pointLoss }));
+    .map((m) => ({
+      ts: game.ts,
+      gameId: game.gameId,
+      moveNumber: m.moveNumber,
+      category: m.category!,
+      pointLoss: m.pointLoss,
+      ...(m.takenBack !== undefined && { takenBack: m.takenBack }),
+    }));
   for (const m of added) profile.mistakeCounts[m.category] = (profile.mistakeCounts[m.category] ?? 0) + 1;
-  const replaced = new Set(added.map((m) => m.moveNumber));
-  profile.recentMistakes = [...added, ...profile.recentMistakes.filter((m) => m.gameId !== game.gameId || !replaced.has(m.moveNumber))].slice(
+  const replaced = new Set(added.map(mistakeKey));
+  profile.recentMistakes = [...added, ...profile.recentMistakes.filter((m) => !replaced.has(mistakeKey(m)))].slice(
     0,
     RECENT_MISTAKES_CAP,
   );
 
-  // Game stats and the threshold.
-  const evaluated = human.filter((r) => r.eval);
+  // Game stats and the threshold, first attempts included.
+  const evaluated = [...human, ...(game.takenBack ?? []).map((t) => t.record)].filter((r) => r.eval);
   if (evaluated.length > 0) {
     const loss = evaluated.reduce((sum, r) => sum + r.eval!.pointLoss, 0);
     profile.recentGames.push({
@@ -200,10 +293,85 @@ export function applyGame(profile: Profile, game: FinishedGame): GameUpdate {
   const threshold = adaptThreshold(profile, game);
   if (threshold) profile.thresholdHistory.push({ ts: game.ts, gameId: game.gameId, ...threshold });
 
-  return {
-    rating: { before, after: profile.rating, rated, nextBotRank: next.botRank, nextHandicap: next.handicap },
-    ...(threshold && { threshold }),
+  return { rating: unchanged(rated, rated), ...(threshold && { threshold }) };
+}
+
+/** Each older game's rank estimate weighs this much less than the next newer one's (times its moves). */
+export const ESTIMATE_DECAY = 0.8;
+/** Weight of the win/loss (Elo) signal against the move-quality estimate, for a game played without help. */
+export const ELO_WEIGHT = 0.2;
+
+/**
+ * The learner's strength from move quality: the games' rank estimates, each weighted by its
+ * unassisted moves and by ESTIMATE_DECAY per newer estimated game. Null without any estimate.
+ * A floor estimate ("20k or weaker") is only an upper bound: given `belowFloor` (what the results
+ * say, the Elo rating) it counts as the lower of the two, so a learner below 20k can stay there.
+ */
+export function combinedEstimate(history: Profile["ratingHistory"], belowFloor?: number): number | null {
+  const estimated = history.filter((e) => e.estimate && e.estimate.moves > 0);
+  let weights = 0;
+  let sum = 0;
+  estimated.forEach((e, i) => {
+    const w = ESTIMATE_DECAY ** (estimated.length - 1 - i) * e.estimate!.moves;
+    const { rating, floor } = e.estimate!;
+    weights += w;
+    sum += w * (floor && belowFloor !== undefined ? Math.min(rating, belowFloor) : rating);
+  });
+  return weights > 0 ? sum / weights : null;
+}
+
+/** A rated game's rank estimate (null when it had too few unassisted moves, or KataGo couldn't tell). */
+export interface EstimatedGame {
+  gameId: string;
+  ts: number;
+  settings: GameSettings;
+  result: GameResult;
+  /** Human moves on the board at the end, and how many of them had help. */
+  humanMoves: number;
+  assistedMoves: number;
+  estimate: RankEstimate | null;
+}
+
+/**
+ * The rating after a rated game (mutating the profile; rating model 2). The move-quality estimate
+ * over the recent games (`combinedEstimate`, this one included) decides, and the game's result adds
+ * a light Elo nudge: weight ELO_WEIGHT, shrunk by the share of the learner's moves that had help,
+ * toward the old rating plus the Elo change (expected score `expectedScore` against the bot's
+ * strength, step `ratingStep`). Without any estimate yet, the Elo change alone. A floor estimate
+ * ("20k or weaker") counts as at most the Elo rating, so below 20k the results decide. Records the
+ * game in `ratingHistory`, clears its `estimating` mark and sets the next bot. A game already
+ * recorded changes nothing. It never sets `ratingModel`: only the migration does.
+ */
+export function applyEstimate(profile: Profile, game: EstimatedGame): RatingChange {
+  clearEstimating(profile, game.gameId);
+  const recorded = recordedChange(profile, game.gameId);
+  if (recorded) return recorded;
+  const { settings, result, estimate } = game;
+  const before = profile.rating;
+  const score = result.winner === null ? 0.5 : result.winner === settings.humanColor ? 1 : 0;
+  const elo = before + 2 * ratingStep(ratedGames(profile)) * (score - expectedScore(before, botStrength(settings)));
+  const entry: Profile["ratingHistory"][number] = {
+    ts: game.ts,
+    gameId: game.gameId,
+    rating: before,
+    botRank: settings.botRank,
+    won: score === 1,
+    handicap: settings.handicap,
+    delta: 0,
+    ...(estimate && { estimate }),
   };
+  const quality = combinedEstimate([...profile.ratingHistory, entry], elo);
+  const helped = game.humanMoves > 0 ? Math.min(1, game.assistedMoves / game.humanMoves) : 0;
+  const w = ELO_WEIGHT * (1 - helped);
+  const after = round2(clampRating(quality === null ? elo : (1 - w) * quality + w * elo));
+  entry.rating = after;
+  entry.delta = round2(after - before);
+  profile.ratingHistory.push(entry);
+  profile.rating = after;
+  const next = botFor(after);
+  profile.botRank = next.botRank;
+  profile.handicap = next.handicap;
+  return { before, after, rated: true, nextBotRank: next.botRank, nextHandicap: next.handicap, ...(estimate && { estimate }) };
 }
 
 /** One gentle step of the mistake threshold, or nothing. Mutates profile.mistakeThreshold. */
@@ -230,12 +398,12 @@ function adaptThreshold(profile: Profile, game: FinishedGame): GameUpdate["thres
  */
 export function applyTag(
   profile: Profile,
-  tag: { ts: number; gameId: string; moveNumber: number; category: MistakeCategory; pointLoss: number; note?: string },
+  tag: { ts: number; gameId: string; moveNumber: number; category: MistakeCategory; pointLoss: number; note?: string; takenBack?: number },
   previous?: MistakeCategory,
 ): void {
   if (previous) profile.mistakeCounts[previous] = Math.max(0, (profile.mistakeCounts[previous] ?? 0) - 1);
   profile.mistakeCounts[tag.category] = (profile.mistakeCounts[tag.category] ?? 0) + 1;
-  profile.recentMistakes = [tag, ...profile.recentMistakes.filter((m) => m.gameId !== tag.gameId || m.moveNumber !== tag.moveNumber)].slice(
+  profile.recentMistakes = [tag, ...profile.recentMistakes.filter((m) => mistakeKey(m) !== mistakeKey(tag))].slice(
     0,
     RECENT_MISTAKES_CAP,
   );
@@ -382,6 +550,36 @@ export function poorShapeAt(board: Board, p: Point, color: Color): boolean {
 
 function manhattan(a: Point, b: Point): number {
   return Math.abs(a.x - b.x) + Math.abs(a.y - b.y);
+}
+
+/**
+ * The heuristic category of `record` played on `replay` (the game just before it; the move is
+ * played on it), with KataGo's ownership before and after it and its best reply when known.
+ * "other" when the move doesn't replay. For final moves and taken-back first attempts alike.
+ */
+export function classifyPlayed(
+  replay: GoGame,
+  record: MoveRecord,
+  threshold: number,
+  before?: { ownership?: number[] },
+  after?: { ownership?: number[]; moveInfos: readonly { move: Gtp }[] },
+): MistakeCategory {
+  const boardBefore = replay.board;
+  if (!replay.play(record.move).ok) return "other";
+  return classifyMistake({
+    size: replay.size,
+    moveNumber: record.number,
+    move: record.move,
+    captures: record.captures.length,
+    pointLoss: record.eval?.pointLoss ?? 0,
+    threshold,
+    bestMove: record.eval?.bestMove ?? "pass",
+    reply: after?.moveInfos[0]?.move,
+    boardBefore,
+    boardAfter: replay.board,
+    ...(before?.ownership && { ownershipBefore: before.ownership }),
+    ...(after?.ownership && { ownershipAfter: after.ownership }),
+  });
 }
 
 /**

@@ -1,7 +1,6 @@
-import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { mkdirSync, writeFileSync } from "node:fs";
 import type { AddressInfo } from "node:net";
 import type { Server } from "node:http";
-import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { TutorBridge, parseClientAction, parseTutorCommand, type StreamHello } from "../../src/server/bridge.ts";
@@ -11,7 +10,7 @@ import { crashLimiter, createApp, isAllowedOrigin } from "../../src/server/index
 import { Store, defaultProfile } from "../../src/server/store.ts";
 import type { GameView, ProblemsResponse, ProfileResponse, TutorEvent } from "../../src/shared/types.ts";
 import { SseParser } from "../../src/cli/sse.ts";
-import { FakeEngine, flush, tempStore } from "./fakes.ts";
+import { FakeEngine, flush, tempDir, tempStore } from "./fakes.ts";
 
 describe("request validation", () => {
   it("accepts well-formed actions and commands", () => {
@@ -23,6 +22,18 @@ describe("request validation", () => {
     expect(parseTutorCommand({ type: "show", moves: ["C3", "pass"], start: "W" })).toEqual({ type: "show", moves: ["C3", "pass"], start: "W" });
     expect(parseClientAction({ type: "leave_problem", extra: 1 })).toEqual({ type: "leave_problem" });
     expect(parseClientAction({ type: "clear_overlay" })).toEqual({ type: "clear_overlay" });
+    expect(parseClientAction({ type: "take_back" })).toEqual({ type: "take_back" });
+    expect(parseClientAction({ type: "ask_tutor", text: "where?" })).toEqual({ type: "ask_tutor", text: "where?" });
+    expect(parseTutorCommand({ type: "tag", gameId: "g", moveNumber: 3, category: "shape", takenBack: true })).toEqual({
+      type: "tag",
+      gameId: "g",
+      moveNumber: 3,
+      category: "shape",
+      takenBack: true,
+    });
+    expect(() => parseTutorCommand({ type: "tag", gameId: "g", moveNumber: 3, category: "shape", takenBack: "yes" })).toThrow(/takenBack/);
+    expect(parseTutorCommand({ type: "tag", gameId: "g", moveNumber: 3, category: "shape", takenBack: 2 })).toMatchObject({ takenBack: 2 });
+    expect(() => parseTutorCommand({ type: "tag", gameId: "g", moveNumber: 3, category: "shape", takenBack: 0 })).toThrow(/takenBack/);
     expect(parseClientAction({ type: "set_tutor_level", level: "point_out" })).toEqual({ type: "set_tutor_level", level: "point_out" });
     expect(parseTutorCommand({ type: "start_problem", problemId: "p3" })).toEqual({ type: "start_problem", problemId: "p3" });
     expect(parseTutorCommand({ type: "tag", gameId: "g", moveNumber: 3, category: "shape" })).toEqual({
@@ -78,7 +89,7 @@ describe("Store", () => {
   });
 
   it("creates the data dir on demand and reads events since a seq", () => {
-    const store = new Store(join(mkdtempSync(join(tmpdir(), "go-tutor-")), "nested", "data"));
+    const store = new Store(join(tempDir(), "nested", "data"));
     expect(store.lastEventSeq()).toBe(0);
     for (let seq = 1; seq <= 3; seq++) store.appendEvent({ seq, ts: seq, type: "fallback", momentId: `m${seq}` });
     expect(store.readEvents(1).map((e) => e.seq)).toEqual([2, 3]);
@@ -231,7 +242,7 @@ describe("HTTP server", () => {
   });
 
   it("serves the built UI with an SPA fallback and no path traversal", async () => {
-    const dist = mkdtempSync(join(tmpdir(), "go-tutor-dist-"));
+    const dist = tempDir();
     mkdirSync(join(dist, "assets"));
     writeFileSync(join(dist, "index.html"), "<!doctype html><title>Go Tutor</title>");
     writeFileSync(join(dist, "assets", "app.js"), "console.log(1)");

@@ -156,3 +156,20 @@ describe("Store", () => {
     expect(restarted.readEvents(first).map((e) => e.seq)).toEqual(kept.slice(1));
   });
 });
+
+describe("Store backups", () => {
+  it("copies the named data files into a new backup folder, keeping their layout", () => {
+    const store = tempStore();
+    store.saveProfile({ ...store.loadProfile(), rating: 12 });
+    store.saveGame(game("g1", 1), "(;SZ[9])");
+    expect(store.loadSgf("g1")).toBe("(;SZ[9])");
+    expect(store.loadSgf("nope")).toBeNull();
+    const dir = store.backup(["profile.json", "problems.json", "games/g1.json", "../outside.json"], Date.UTC(2026, 9, 17, 8, 0, 0));
+    expect(dir).toBe(join(store.dir, "backup-2026-10-17T08-00-00-000Z"));
+    expect(JSON.parse(readFileSync(join(dir, "profile.json"), "utf8")).rating).toBe(12);
+    expect(existsSync(join(dir, "games", "g1.json"))).toBe(true);
+    expect(existsSync(join(dir, "problems.json"))).toBe(false); // there was none
+    // A second backup in the same millisecond gets its own folder.
+    expect(store.backup(["profile.json"], Date.UTC(2026, 9, 17, 8, 0, 0))).toBe(`${dir}-2`);
+  });
+});

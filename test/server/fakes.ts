@@ -1,8 +1,9 @@
 // Test doubles for the server: a scriptable engine and a manual clock.
 
-import { mkdtempSync } from "node:fs";
+import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { afterAll } from "vitest";
 import type { Gtp } from "../../src/shared/types.ts";
 import type { Clock } from "../../src/server/common.ts";
 import type { GameEngine } from "../../src/server/game.ts";
@@ -82,6 +83,11 @@ export class FakeEngine implements GameEngine {
   botMoves: Gtp[] = [];
   /** Ownership for includeOwnership queries (Black's view), by board size and position (moves as GTP list); default all zero. */
   ownership: ((size: number, moves: string) => number[]) | null = null;
+  /**
+   * The human-SL policy for policy queries with a humanSLProfile (size*size+1 entries), by position
+   * and profile (e.g. "rank_5k"); default uniform, which every profile explains equally (an estimate at 20k).
+   */
+  humanPolicy: ((pos: Position, profile: string) => number[]) | null = null;
   /** When true, replies wait for release(). */
   hold = false;
   readonly held: Held[] = [];
@@ -129,6 +135,11 @@ export class FakeEngine implements GameEngine {
         ],
       };
       if (opts?.includeOwnership) analysis.ownership = this.ownership?.(pos.size, key) ?? new Array(pos.size * pos.size).fill(0);
+      const profile = opts?.overrideSettings?.humanSLProfile;
+      if (opts?.includePolicy && typeof profile === "string") {
+        const n = pos.size * pos.size + 1;
+        analysis.humanPolicy = this.humanPolicy?.(pos, profile) ?? new Array(n).fill(1 / n);
+      }
       return analysis;
     });
   }
@@ -149,8 +160,29 @@ export class FakeEngine implements GameEngine {
   }
 }
 
+/** Temp dirs made by `tempDir` in this test file, removed after its tests (and, as a fallback, on exit). */
+const tempDirs: string[] = [];
+
+function removeTempDirs(): void {
+  for (const dir of tempDirs.splice(0)) rmSync(dir, { recursive: true, force: true });
+}
+
+afterAll(async () => {
+  // A controller's end-of-tick save from the last test would otherwise recreate its dir.
+  await flush(10);
+  removeTempDirs();
+});
+process.on("exit", removeTempDirs);
+
+/** A new empty go-tutor-test-* directory, deleted after the test file's tests. */
+export function tempDir(): string {
+  const dir = mkdtempSync(join(tmpdir(), "go-tutor-test-"));
+  tempDirs.push(dir);
+  return dir;
+}
+
 export function tempStore(): Store {
-  return new Store(mkdtempSync(join(tmpdir(), "go-tutor-test-")));
+  return new Store(tempDir());
 }
 
 /** Let queued promise callbacks and setImmediate work run. */

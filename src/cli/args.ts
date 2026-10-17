@@ -17,6 +17,8 @@ export type Invocation =
 
 /** Flags that never take a value. Every other `--flag` consumes the next token (or `=value`). */
 const BOOLEAN_FLAGS = new Set(["json", "help"]);
+/** Flags with an optional number: they consume the next token only when it is one (`--taken-back 2`). */
+const OPTIONAL_NUMBER_FLAGS = new Set(["taken-back"]);
 
 interface Split {
   positional: string[];
@@ -47,6 +49,14 @@ export function splitArgs(tokens: string[]): Split {
       flags.set(body.slice(0, eq), body.slice(eq + 1));
     } else if (BOOLEAN_FLAGS.has(body)) {
       flags.set(body, true);
+    } else if (OPTIONAL_NUMBER_FLAGS.has(body)) {
+      const value = tokens[i + 1];
+      if (value !== undefined && /^\d+$/.test(value)) {
+        flags.set(body, value);
+        i++;
+      } else {
+        flags.set(body, true);
+      }
     } else {
       const value = tokens[i + 1];
       if (value === undefined) throw new UsageError(`--${body} needs a value`);
@@ -92,6 +102,23 @@ class Flags {
     const v = this.map.get(name);
     if (v === true) throw new UsageError(`--${name} needs a value`);
     return v;
+  }
+
+  /** A flag without a value (one of BOOLEAN_FLAGS): whether it was given. */
+  boolean(name: string): boolean {
+    this.used.add(name);
+    const v = this.map.get(name);
+    if (v !== undefined && v !== true) throw new UsageError(`--${name} takes no value`);
+    return v === true;
+  }
+
+  /** A flag with an optional positive number (one of OPTIONAL_NUMBER_FLAGS): absent false, bare true, else the number. */
+  optionalNumber(name: string): boolean | number {
+    this.used.add(name);
+    const v = this.map.get(name);
+    if (v === undefined || v === true) return v === true;
+    if (!/^\d+$/.test(v) || Number(v) < 1) throw new UsageError(`--${name} takes a number from 1, got "${v}"`);
+    return Number(v);
   }
 
   /** Rejects flags the command does not know, so typos are not silently ignored. */
@@ -219,14 +246,15 @@ export function parseInvocation(argv: string[]): Invocation {
       case "tag": {
         const [gameId, moveRaw, category, ...noteParts] = positional;
         if (!gameId || !moveRaw || !category) {
-          throw new UsageError("tag needs <gameId> <move#> <category> [note], e.g. tutor tag g12 14 shape \"empty triangle\"");
+          throw new UsageError("tag needs <gameId> <move#> <category> [note] [--taken-back [n]], e.g. tutor tag g12 14 shape \"empty triangle\"");
         }
         const moveNumber = parseIntStrict(moveRaw, "move#");
         if (!MISTAKE_CATEGORIES.includes(category as MistakeCategory)) {
           throw new UsageError(`category must be one of ${MISTAKE_CATEGORIES.join(", ")}, got "${category}"`);
         }
         const note = noteParts.join(" ").trim();
-        return cmd({ type: "tag", gameId, moveNumber, category: category as MistakeCategory, ...(note && { note }) });
+        const takenBack = flags.optionalNumber("taken-back");
+        return cmd({ type: "tag", gameId, moveNumber, category: category as MistakeCategory, ...(note && { note }), ...(takenBack !== false && { takenBack }) });
       }
       default:
         throw new UsageError(`unknown command "${name}"`);

@@ -20,9 +20,12 @@ SESSION FLOW
                  and finish with resume. A drawing you made stays up after resume: the game stays
                  paused until the learner presses Continue when ready. If you don't claim in time
                  a FALLBACK line appears: KataGo's answer is already shown; you can still add a say.
-  4. on HINT:    run state, then say/show/mark. Don't give the answer outright unless asked.
+  4. on HINT:    run state, then say/show/mark. Don't give the answer outright unless asked. (The
+                 learner presses Hint next to the chat input; anything they typed comes as the question.
+                 Your answer marks their next move as helped, so it doesn't count for the rank estimate.)
   5. on USER:    answer with say (pass --moment <id> when the line names one).
-  6. on GAME_END: review last, discuss the top 1-2 mistakes, tag categories, maybe new-game.
+  6. on GAME_END: review last, discuss the top 1-2 mistakes, tag categories, maybe new-game. The rank
+                 estimate runs after the game; a RATING line brings the rating change a few seconds later.
   7. on PROBLEM_START / PROBLEM: the learner is on a practice problem. Let them try; after a wrong
                  first attempt ask what they see (say); after the answer is shown, explain it with show.
   8. on LEVEL:   the learner changed how much you step in (see TUTOR LEVELS); follow it from now on.
@@ -35,6 +38,17 @@ TUTOR LEVELS (the learner picks one in the UI; summary, state and GAME_START sho
              refused while the game runs, except one say answering a USER or HINT line. Teach in the
              review after GAME_END (everything works again then), and in practice problems.
   Mistakes are evaluated and recorded the same way at every level (summary, review, problems).
+  The learner can Take back their last move at any level (on their turn or in a pause); it prints
+  an UNDO line like Try again.
+
+RANK ESTIMATE AND HELP
+  The rating comes from the learner's own moves: after each game of 10+ moves, KataGo's human-style
+  model scores every move played without help at ranks 20k ... 9d, and the best-fitting rank is the
+  game's estimate (below 20k it says "20k or weaker"). Recent games' estimates, weighted by moves,
+  set the rating; wins and losses only nudge it. A move counts as helped (left out) when it came
+  after an answered hint, replaced a taken-back move (Try again, Take back, your rethink), or was
+  played after you drew on that position (show, mark). Taken-back first attempts are kept: their
+  mistakes appear in review (marked "first try #n, taken back"), in summary and as practice problems.
 
 COMMANDS
   watch [--since N]
@@ -51,8 +65,9 @@ COMMANDS
         HINT game=g12 B to play — user asks: "where now?" — run: state, then say/show/mark
         USER "why was that bad?" (moment m3) game=g12
         FALLBACK m3 (tutor too slow; KataGo answer shown)
-        UNDO game=g12 by human: back to move 13, B to play   (the position you were discussing is gone)
-        GAME_END g12 W+3.5 — 3 mistakes, worst move 14 (6.2), total loss 15 over 61 moves, rating 10 -> 10.8 — run: review g12
+        UNDO game=g12 by human: back to move 13, B to play   (Try again or Take back; the position you were discussing is gone)
+        GAME_END g12 W+3.5 — 3 mistakes (1 taken back), worst move 14 (6.2), total loss 15 over 61 moves, help: 1 hint, rank estimate running (a RATING line follows) — run: review g12
+        RATING g12 rank estimate 18k from 25 unassisted moves (1 hint); rating 10 -> 11.9 (+1.9, rank 18k); next bot 18k
         PROBLEM_START p4 life_and_death B to play (from g12 move 14, box 1) answers D5 — "Black to play. ..." — run: state; ...
         PROBLEM p4 attempt 1 C7 wrong, lost 5.2 (life_and_death; another attempt left) — ask what they see, ...
         PROBLEM p4 attempt 2 D5 correct (life_and_death) — best D5, pv D5 E4 C6 — say why it works
@@ -129,22 +144,29 @@ COMMANDS
       due, results so far, and the accepted answers.
       Example: npm run -s tutor -- problems
 
-  tag <gameId> <move#> <category> [note]
+  tag <gameId> <move#> <category> [note] [--taken-back [n]]
       Record why a mistake happened; feeds the learner profile. Categories:
       ${MISTAKE_CATEGORIES.join(", ")}.
+      --taken-back n tags a try at that move that was taken back, not the move that stayed on the
+      board: n is the number review prints ("first try #2, taken back"). Plain --taken-back works
+      when only one try was taken back there; with several it lists them.
       Example: npm run -s tutor -- tag g12 14 direction "played toward thickness"
+      Example: npm run -s tutor -- tag g12 9 tactics --taken-back 2
 
   summary
-      Learner profile: rank estimate and rating trend, the bot's rank (and handicap stones while the
+      Learner profile: rank estimate and rating trend, the last game's move-quality estimate (from how
+      many unassisted moves, and the help left out), the bot's rank (and handicap stones while the
       learner is below 20k), the tutor level, the mistake threshold, mistake counts by category with the last 3 games,
-      recent mistakes, the recommended focus with its reason, and practice problems (how many, how
-      many are due, by category, and the next few due).
+      recent mistakes (taken-back first tries marked), the recommended focus with its reason, and
+      practice problems (how many, how many are due, by category, and the next few due).
       Example: npm run -s tutor -- summary
 
   review [gameId|last]
-      Compact post-game review (default last): result and rating change, each mistake (move, played,
-      best, loss, category, KataGo's PV), the win-rate swings, the board before each of the 3 worst
-      mistakes, and the move list. Categories marked "heuristic" are the server's guess; tag to correct.
+      Compact post-game review (default last): result, rank estimate and rating change, the help the
+      learner had (hints, take-backs, rethinks, and which moves had help), each mistake (move, played,
+      best, loss, category, KataGo's PV; taken-back first tries included and marked), the win-rate
+      swings, the board before each of the 3 worst mistakes, and the move list (* = played with help).
+      Categories marked "heuristic" are the server's guess; tag to correct.
       Example: npm run -s tutor -- review last
 
   help

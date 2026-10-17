@@ -18,8 +18,9 @@
 //   await kg.stop()
 //   The `Engine` interface is what the server depends on, so tests can supply a fake.
 
-import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
-import { existsSync, readdirSync, realpathSync } from "node:fs";
+import { execFileSync, spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
+import { existsSync, readdirSync, realpathSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { createInterface } from "node:readline";
 import { delimiter, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -56,6 +57,12 @@ export interface AnalyzeOptions {
   /** Higher runs first, both in our queue and inside KataGo. Default 0. */
   priority?: number;
 }
+
+/**
+ * Priority for work nobody is waiting on (rank estimates, practice problems from a finished game,
+ * the rating migration): below the live game's queries (0) and the bot's moves (10).
+ */
+export const BACKGROUND_PRIORITY = -10;
 
 export interface MoveInfo {
   move: Gtp;
@@ -266,6 +273,88 @@ function findMainNet(binary: string): string | undefined {
   return undefined;
 }
 
+// COREML TEMP FILES
+//   With the Metal/CoreML ("mux") backend, every KataGo start converts each net to a CoreML package,
+//   `$TMPDIR/katago_coreml/model_<katago pid>_<n>_<id>.mlpackage` (deleted after conversion unless
+//   KataGo dies first), and CoreML compiles it to `model_<katago pid>_<n>_<id>.mlmodelc` (about 50 MB
+//   each, several per start) in the macOS per-user temp dir (Foundation's temporary directory, which
+//   ignores $TMPDIR), which nobody deletes. So `KataGo` deletes a process's files once it exits, and
+//   each start sweeps the files of pids that are no longer running (left by a crash or a SIGKILL of the
+//   server). Files of a live pid are never touched: another server or test may be using them.
+
+const COREML_FILE = /^model_(\d+)_.*\.(?:mlmodelc|mlpackage)$/;
+
+/**
+ * Where KataGo's CoreML backend may write: $TMPDIR (KataGo inherits our env; os.tmpdir() reads it),
+ * the macOS per-user temp dir and /tmp, each with its `katago_coreml` subfolder. Resolved and
+ * deduplicated; missing folders are left out.
+ */
+export function coremlTempDirs(): string[] {
+  const bases = [tmpdir(), "/tmp"];
+  if (process.platform === "darwin") {
+    try {
+      const userTemp = execFileSync("getconf", ["DARWIN_USER_TEMP_DIR"], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }).trim();
+      if (userTemp) bases.push(userTemp);
+    } catch {
+      // No getconf: nothing more to add.
+    }
+  }
+  const unique = new Set<string>();
+  for (const dir of bases.flatMap((b) => [b, join(b, "katago_coreml")])) {
+    try {
+      unique.add(realpathSync(dir));
+    } catch {
+      // A missing dir has nothing to clean.
+    }
+  }
+  return [...unique];
+}
+
+/** True when `pid` names a running process (EPERM means it exists but belongs to another user). */
+export function isPidAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (err) {
+    return (err as NodeJS.ErrnoException).code !== "ESRCH";
+  }
+}
+
+/** Deletes the CoreML files in `dirs` whose pid passes `shouldRemove`. Returns the paths removed. */
+function removeCoreMLFiles(dirs: string[], shouldRemove: (pid: number) => boolean): string[] {
+  const removed: string[] = [];
+  for (const dir of dirs) {
+    let names: string[];
+    try {
+      names = readdirSync(dir);
+    } catch {
+      continue;
+    }
+    for (const name of names) {
+      const m = COREML_FILE.exec(name);
+      if (!m || !shouldRemove(Number(m[1]))) continue;
+      const path = join(dir, name);
+      try {
+        rmSync(path, { recursive: true, force: true });
+        removed.push(path);
+      } catch {
+        // Best effort: whatever is left is swept on a later start.
+      }
+    }
+  }
+  return removed;
+}
+
+/** Deletes the CoreML files that the KataGo process `pid` wrote (call once it has exited). */
+export function removeCoreMLModels(pid: number, dirs: string[] = coremlTempDirs()): string[] {
+  return removeCoreMLFiles(dirs, (p) => p === pid);
+}
+
+/** Deletes the CoreML files of every pid that is no longer running. */
+export function sweepStaleCoreMLModels(dirs: string[] = coremlTempDirs(), isAlive: (pid: number) => boolean = isPidAlive): string[] {
+  return removeCoreMLFiles(dirs, (pid) => pid > 0 && !isAlive(pid));
+}
+
 interface RawMoveInfo {
   move: string;
   scoreLead: number;
@@ -326,8 +415,18 @@ export class KataGo implements Engine {
     const args = ["analysis", "-config", paths.config, "-model", paths.model, "-human-model", paths.humanModel];
     this.stopping = false;
     this.stderrTail.length = 0;
-    const proc = spawn(paths.binary, args, { stdio: ["pipe", "pipe", "pipe"] });
+    const tempDirs = coremlTempDirs();
+    this.logRemoved(sweepStaleCoreMLModels(tempDirs));
+    // Its own process group, so a Ctrl-C or hangup sent to the terminal's group reaches only the
+    // server, which then stops KataGo itself (stop() + the cleanup below) instead of seeing it crash
+    // and restarting it. KataGo still exits on stdin EOF if the server dies without stopping it.
+    const proc = spawn(paths.binary, args, { stdio: ["pipe", "pipe", "pipe"], detached: true });
     this.proc = proc;
+    // Registered before any other "close" listener (stop() waits on one), so the files are gone by
+    // the time stop() resolves. Runs on every exit: stop, crash, kill or startup failure.
+    proc.on("close", () => {
+      if (proc.pid !== undefined) this.logRemoved(removeCoreMLModels(proc.pid, tempDirs));
+    });
     // Writes after a crash raise EPIPE here; the exit handler reports the failure.
     proc.stdin.on("error", (err) => this.opts.onLog?.(`katago stdin: ${err.message}`));
 
@@ -493,6 +592,10 @@ export class KataGo implements Engine {
     for (const job of [...this.inFlight.values(), ...this.waiting]) job.reject(err);
     this.inFlight.clear();
     this.waiting.length = 0;
+  }
+
+  private logRemoved(removed: string[]): void {
+    if (removed.length) this.opts.onLog?.(`removed ${removed.length} CoreML temp model(s) left by KataGo`);
   }
 
   private tailText(): string {

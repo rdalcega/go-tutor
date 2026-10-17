@@ -77,7 +77,9 @@ export class PracticeSession {
   /** Put the problem on the board: tell the learner and the tutor, and let KataGo read the position. */
   start(early: boolean): void {
     const { problem } = this;
-    const from = problem.source ? ` from your game ${problem.source.gameId} (move ${problem.source.moveNumber})` : "";
+    const source = problem.source;
+    const firstTry = source?.takenBack !== undefined ? ", your first try before the take-back" : "";
+    const from = source ? ` from your game ${source.gameId} (move ${source.moveNumber}${firstTry})` : "";
     this.deps.system(`Practice problem${from}: ${problem.prompt}${early ? " (Nothing is due right now, so this is an early review.)" : ""}`);
     this.deps.emit({
       type: "problem_start",
@@ -112,7 +114,7 @@ export class PracticeSession {
   }
 
   /** The browser's game actions while a problem is on the board: only a stone counts as an answer. */
-  handleAction(action: Extract<ClientAction, { type: "play" | "pass" | "resign" | "continue" | "retry" | "ask_tutor" }>): void {
+  handleAction(action: Extract<ClientAction, { type: "play" | "pass" | "resign" | "continue" | "retry" | "take_back" | "ask_tutor" }>): void {
     switch (action.type) {
       case "play":
         return this.play(action.point);
@@ -123,7 +125,8 @@ export class PracticeSession {
       case "continue":
         return; // Enter on the problem screen: nothing to continue
       case "retry":
-        throw new UserError("Try again is for games. In a problem, just play another move while you have attempts left.");
+      case "take_back":
+        throw new UserError("Taking moves back is for games. In a problem, just play another move while you have attempts left.");
       case "ask_tutor":
         throw new UserError("Hints are for games. In a problem, ask your tutor in the chat.");
     }

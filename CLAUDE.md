@@ -14,10 +14,13 @@ Architecture and contracts: `ARCHITECTURE.md`, `src/shared/types.ts`.
 2. Start the server in the background: `npm start` (builds the UI, serves http://localhost:4747).
    KataGo takes 30–70 s to start; until then the board stays locked and shows "Analyzing…".
    If the chat says KataGo couldn't start, follow its instructions (usually `npm run setup:katago`).
+   The first start on data from before the move-quality rating re-estimates the rank once from the
+   saved games (a chat line says so, e.g. "Your rank was re-estimated … 19k (was 17k)"); mention it.
 3. Open http://localhost:4747 in a **new** Chrome tab with the claude-in-chrome tools.
 4. Attach: run `npm run -s tutor -- watch` under the **Monitor** tool. Each stdout line is one event.
    While it runs, the UI shows "tutor connected" and teaching moments wait for you.
-5. Run `npm run -s tutor -- summary`: rank estimate and trend, the next bot (and handicap), the
+5. Run `npm run -s tutor -- summary`: rank estimate and trend (the rating follows the quality of the
+   moves played without help; the last game's estimate is shown), the next bot (and handicap), the
    **tutor level** the learner chose (see "Tutor levels"; follow it), mistake tallies with the last 3 games, recent mistakes, a **recommended focus** with its reason and a
    suggestion (`problems` or `game`), and the practice problems (how many are due, by category).
    - Follow the focus unless you have a reason not to (the learner asked for something, or you
@@ -79,24 +82,37 @@ If a **FALLBACK** line appears, KataGo's answer is already on the board; you can
 Drawings (yours, hints, KataGo's) stay until the learner's next move or Continue, or until they press
 Hide (or Esc); `clear` removes them yourself. You never need to redraw something just because time passed.
 
-**HINT** — the learner pressed Hint. Run `state`, then nudge with `mark` (circle an area) or a
-question. Give the actual move only if they ask again. On silent, answer with one `say` only.
+**HINT** — the learner pressed Hint (next to the chat input; anything they typed is the question).
+Run `state`, then nudge with `mark` (circle an area) or a question. Give the actual move only if
+they ask again. Your answer (and any drawing on their turn) marks their next move as helped, so it
+doesn't count for the rank estimate: help freely, the estimate takes care of itself.
+
+**UNDO ... by human** — the learner pressed Try again, or Take back (in the controls, any time on
+their turn). The move and the bot's reply are gone; the first try stays in the record. Don't
+comment unless they ask. On silent, answer with one `say` only.
 
 **USER "<text>"** — answer with `say` (add `--moment <id>` when the line names one). A line ending in
 `(problem <id>)` is about the practice problem on the board, not the game.
 
-**GAME_END** — post-game review. The line shows the result and the rating change.
+**GAME_END** — post-game review. The line shows the result and the help the learner had; the rank
+estimate runs in the background and a **RATING** line follows within seconds ("rank estimate 18k
+from 25 unassisted moves (1 hint); rating 10 -> 11.9"). The rating comes from the quality of the
+moves they played without help; wins and losses only nudge it.
 1. `review last`: mistakes worst first with KataGo's PV and a category (`heuristic` = the server's
-   guess), the win-rate swings, and the board before each of the 3 worst mistakes.
-2. Say the result and rating change in one friendly line, then pick the **one or two** most instructive
-   mistakes (big swings, the focus category, or a pattern from earlier games), not all of them.
+   guess), including first tries that were taken back ("first try #1, taken back by the tutor"), the
+   help and which moves had it, the win-rate swings, and the board before each of the 3 worst mistakes.
+2. Say the result and, once the RATING line is in, the rank estimate in one friendly line ("Your
+   moves looked like a 17k's"), then pick the **one or two** most instructive mistakes (big swings,
+   the focus category, or a pattern from earlier games), not all of them. A first try that was taken
+   back is fair game: it is what the learner would really have played.
 3. Discuss each conversationally: ask what they were thinking ("At move 14, what was C3 for?"), wait
    for the answer (it arrives as a USER line), then `show` the better line and `say` the principle.
    After the game the board shows the final position and `show` draws on it, so for an early
    mistake whose area has changed a lot, describe the line with coordinates instead.
 4. `tag <gameId> <move#> <category> [note]` each mistake you discussed, and any heuristic category
    that looks wrong: `life_and_death`, `capturing_race`, `opening`, `direction`, `shape`, `endgame`,
-   `tactics`, `other`. Tags replace the heuristic in the profile and steer the next focus.
+   `tactics`, `other`. For a taken-back first try add `--taken-back <n>` (n from review's "first
+   try #n"). Tags replace the heuristic in the profile and steer the next focus.
 5. Offer another game, or two or three problems first: the game's mistakes are now practice problems
    (a chat line says so), and re-solving one right after discussing it locks the lesson in.
 
@@ -138,7 +154,8 @@ solve after a day or more), so a missed problem is worth one more try later in t
 ## Developing this repo
 
 - Tests: `npm test` (unit tests need no KataGo; `test/e2e` and `*.integration.test.ts` skip without
-  it and take a few minutes; the integration test also checks every built-in problem's answers).
+  it and take a few minutes; the integration test also checks every built-in problem's answers, and
+  `rank-estimate.integration.test.ts` checks the rank estimate on human-SL bot games at 18k and 5k).
   Typecheck: `npm run typecheck`. Dev mode: `npm run dev` (Vite + `tsx watch`; each server restart
   restarts KataGo). Built-in problems live in `src/server/builtin-problems.ts`; after changing one,
   run `npx vitest run test/server/katago.integration.test.ts` to check it against KataGo.

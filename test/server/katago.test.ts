@@ -1,13 +1,18 @@
 // Unit tests for src/server/katago.ts. They never need KataGo: the protocol tests run a small
 // fake `katago` script that speaks the JSON analysis protocol.
-import { chmodSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { spawn } from "node:child_process";
+import { chmodSync, mkdirSync, mkdtempSync, readdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterAll, afterEach, describe, expect, it } from "vitest";
+import { afterAll, afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
   KATAGO_RULES,
   KataGo,
   chooseBotMove,
+  coremlTempDirs,
+  isPidAlive,
+  removeCoreMLModels,
+  sweepStaleCoreMLModels,
   TRUSTED_CANDIDATE_VISITS,
   moveEvalFrom,
   policyIndexToGtp,
@@ -155,6 +160,15 @@ const FAKE = String.raw`#!/usr/bin/env node
 if (process.env.FAKE_KATAGO === "crash") {
   process.stderr.write("Loading model...\nError: could not load model\n");
   process.exit(2);
+}
+if (process.env.FAKE_KATAGO === "coreml") {
+  // Like the CoreML backend: compiled models in $TMPDIR named after our pid, never deleted.
+  const { mkdirSync, writeFileSync } = require("node:fs");
+  for (const n of [1, 2]) {
+    const dir = process.env.TMPDIR + "/model_" + process.pid + "_" + n + "_123.mlmodelc";
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(dir + "/weights.bin", "x");
+  }
 }
 process.stderr.write("Loading model...\nStarted, ready to begin handling requests\n");
 let outstanding = 0, maxOutstanding = 0, buf = "";
@@ -322,5 +336,79 @@ describe("KataGo process wrapper (fake engine)", () => {
 
   it("explains missing files", async () => {
     await expect(new KataGo({ binary, config: join(dir, "nope.cfg") }).start()).rejects.toThrow(/setup:katago/);
+  });
+
+  describe("CoreML temp models", () => {
+    const savedTmp = process.env.TMPDIR;
+    let tmp = "";
+    const models = () => readdirSync(tmp).filter((f) => f.startsWith("model_"));
+
+    beforeEach(() => {
+      tmp = realpathSync(mkdtempSync(join(dir, "tmp-")));
+      process.env.TMPDIR = tmp; // read by os.tmpdir() and inherited by the fake
+      process.env.FAKE_KATAGO = "coreml";
+    });
+    afterEach(() => {
+      if (savedTmp === undefined) delete process.env.TMPDIR;
+      else process.env.TMPDIR = savedTmp;
+    });
+
+    it("looks in $TMPDIR and its katago_coreml folder", () => {
+      expect(coremlTempDirs()).toContain(tmp);
+      mkdirSync(join(tmp, "katago_coreml"));
+      expect(coremlTempDirs()).toContain(join(tmp, "katago_coreml"));
+    });
+
+    it("deletes the process's compiled models when KataGo stops", async () => {
+      kg = make();
+      await kg.start();
+      expect(models()).toHaveLength(2);
+      await kg.stop();
+      expect(models()).toEqual([]);
+      expect(logs).toContain("removed 2 CoreML temp model(s) left by KataGo");
+    });
+
+    it("deletes them when KataGo crashes too", async () => {
+      const exits: Error[] = [];
+      kg = new KataGo({ binary, config: join(dir, "analysis.cfg"), model: join(dir, "main.bin.gz"), humanModel: join(dir, "human.bin.gz"), onExit: (e) => exits.push(e) });
+      await kg.start();
+      expect(models()).toHaveLength(2);
+      await expect(kg.analyze({ ...empty9, moves: [["B", "DIE"]] })).rejects.toThrow(/exited/);
+      expect(exits).toHaveLength(1);
+      expect(models()).toEqual([]);
+    });
+  });
+});
+
+describe("CoreML temp model sweep", () => {
+  let tmp = "";
+  const touch = (name: string) => {
+    mkdirSync(join(tmp, name));
+    writeFileSync(join(tmp, name, "weights.bin"), "x");
+  };
+  beforeEach(() => {
+    tmp = mkdtempSync(join(tmpdir(), "go-tutor-sweep-"));
+  });
+  afterEach(() => rmSync(tmp, { recursive: true, force: true }));
+
+  it("removes the models of dead pids and keeps those of live pids and other files", () => {
+    for (const f of ["model_111_1_5.mlmodelc", "model_111_2_6.mlmodelc", "model_222_1_7.mlmodelc", "model_333_1_8.mlpackage", "model_x_1.mlmodelc", "model_444_1_9.txt", "other"]) touch(f);
+    const alive = new Set([222]);
+    const removed = sweepStaleCoreMLModels([tmp, join(tmp, "missing")], (pid) => alive.has(pid));
+    expect(removed.map((p) => p.slice(tmp.length + 1)).sort()).toEqual(["model_111_1_5.mlmodelc", "model_111_2_6.mlmodelc", "model_333_1_8.mlpackage"]);
+    expect(readdirSync(tmp).sort()).toEqual(["model_222_1_7.mlmodelc", "model_444_1_9.txt", "model_x_1.mlmodelc", "other"]);
+  });
+
+  it("removes one pid's models only", () => {
+    for (const f of ["model_111_1_5.mlmodelc", "model_1111_1_5.mlmodelc", "model_222_1_7.mlmodelc"]) touch(f);
+    expect(removeCoreMLModels(111, [tmp])).toEqual([join(tmp, "model_111_1_5.mlmodelc")]);
+    expect(readdirSync(tmp).sort()).toEqual(["model_1111_1_5.mlmodelc", "model_222_1_7.mlmodelc"]);
+  });
+
+  it("tells live pids from exited ones", async () => {
+    expect(isPidAlive(process.pid)).toBe(true);
+    const child = spawn(process.execPath, ["-e", ""]);
+    await new Promise((r) => child.once("exit", r));
+    expect(isPidAlive(child.pid!)).toBe(false);
   });
 });

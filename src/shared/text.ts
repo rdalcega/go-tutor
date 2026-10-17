@@ -1,6 +1,7 @@
 // Small wording helpers shared by the server, the tutor CLI and the browser.
 
-import type { Color, GameResult, MistakeCategory, TutorLevel } from "./types.ts";
+import { ratingToRank } from "./rank.ts";
+import type { AssistCounts, Color, GameResult, MistakeCategory, RankEstimate, TutorLevel } from "./types.ts";
 
 /** "Black" or "White". */
 export function colorName(c: Color): string {
@@ -50,6 +51,38 @@ export const TUTOR_LEVEL_TEXT: Record<TutorLevel, { label: string; learner: stri
 export function tutorLevelChangedText(level: TutorLevel): string {
   const text = TUTOR_LEVEL_TEXT[level];
   return `Tutor help: ${text.label}. ${text.learner}`;
+}
+
+/**
+ * Which try at its move number the taken-back move `takenBack[index]` was: 1 for the first one
+ * taken back there, 2 for the next, … Stable, since `SavedGame.takenBack` only grows.
+ */
+export function takenBackTry(takenBack: readonly { moveNumber: number }[], index: number): number {
+  const n = takenBack[index]?.moveNumber;
+  return takenBack.slice(0, index + 1).filter((t) => t.moveNumber === n).length;
+}
+
+/** "first try #2": a taken-back try by its number at its move (what `tag --taken-back 2` takes). */
+export function takenBackTryText(n: number): string {
+  return `first try #${n}`;
+}
+
+/** "3 hints, 2 take-backs, 1 tutor take-back" (zero counts left out), or "no help". */
+export function assistText(a: AssistCounts): string {
+  const count = (n: number, word: string) => (n ? [`${n} ${word}${n === 1 ? "" : "s"}`] : []);
+  const parts = [...count(a.hints, "hint"), ...count(a.takeBacks, "take-back"), ...count(a.rethinks, "tutor take-back")];
+  return parts.length ? parts.join(", ") : "no help";
+}
+
+/** The estimated rank: "18k", or "20k or weaker" at the bottom of KataGo's human profiles. */
+export function estimateRankText(e: Pick<RankEstimate, "rating" | "floor">): string {
+  return e.floor ? "20k or weaker" : ratingToRank(e.rating);
+}
+
+/** "Rank estimate 18k from 34 unassisted moves (3 hints, 2 take-backs)": a game's estimate and the help left out of it. */
+export function rankEstimateText(e: RankEstimate): string {
+  const help = assistText(e);
+  return `Rank estimate ${estimateRankText(e)} from ${e.moves} unassisted move${e.moves === 1 ? "" : "s"}${help === "no help" ? "" : ` (${help})`}`;
 }
 
 const MINUTE = 60_000;

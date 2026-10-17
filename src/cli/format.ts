@@ -2,10 +2,10 @@
 // compact, explicit labels, coordinates in GTP, no decoration.
 
 import { toAscii } from "../engine/ascii.ts";
-import { gameBefore } from "../engine/game.ts";
+import { gameBefore, gameFromLine } from "../engine/game.ts";
 import { moveGtp, movePoint, toGtp } from "../shared/coords.ts";
 import { ratingToRank } from "../shared/rank.ts";
-import { TUTOR_LEVEL_TEXT, round1 } from "../shared/text.ts";
+import { TUTOR_LEVEL_TEXT, assistText, estimateRankText, rankEstimateText, round1, takenBackTry, takenBackTryText } from "../shared/text.ts";
 import type {
   ChatMessage,
   Color,
@@ -21,7 +21,9 @@ import type {
   ProblemsResponse,
   ProblemView,
   Profile,
+  RatingChange,
   SavedGame,
+  TakenBackMove,
   TeachingMoment,
   TutorCommand,
   TutorEvent,
@@ -59,8 +61,21 @@ function mistakesText(summary: GameSummary): string {
   const n = summary.mistakes.length;
   if (n === 0) return "no mistakes";
   const worst = summary.mistakes.reduce((a, b) => (b.pointLoss > a.pointLoss ? b : a));
-  return `${n} mistake${n === 1 ? "" : "s"}, worst move ${worst.moveNumber} (${num(worst.pointLoss)})`;
+  const firsts = summary.mistakes.filter((m) => m.takenBack !== undefined).length;
+  const taken = firsts ? ` (${firsts} taken back)` : "";
+  return `${n} mistake${n === 1 ? "" : "s"}${taken}, worst move ${worst.moveNumber} (${num(worst.pointLoss)})`;
 }
+
+/** A game's rating change: its rank estimate, the rating and the next bot. */
+export function ratingChangeText(r: RatingChange): string {
+  const next = `next bot ${r.nextBotRank}${r.nextHandicap ? ` with ${r.nextHandicap} handicap stones` : ""}`;
+  if (r.pending) return `rank estimate running; rating ${num(r.before)} for now`;
+  if (!r.rated) return `rating unchanged at ${num(r.after)} (games under 10 moves don't count); ${next}`;
+  const estimate = r.estimate ? `${lowerFirst(rankEstimateText(r.estimate))}; ` : "";
+  return `${estimate}rating ${num(r.before)} -> ${num(r.after)} (${signed(r.after - r.before)}, rank ${ratingToRank(r.after)}); ${next}`;
+}
+
+const lowerFirst = (s: string) => s.charAt(0).toLowerCase() + s.slice(1);
 
 export interface EventContext {
   /** Current time (ms epoch) for countdowns. Default Date.now(). */
@@ -136,13 +151,14 @@ function formatKnownEvent(e: TutorEvent, ctx: EventContext): string {
       return `FALLBACK ${e.momentId} (tutor too slow; KataGo answer shown)`;
     case "undo":
       return `UNDO game=${e.gameId} by ${e.by}: back to move ${e.moves}, ${e.toPlay} to play`;
-    case "game_end":
-      return (
-        `GAME_END ${e.gameId} ${resultText(e.result)} — ${mistakesText(e.summary)}, ` +
-        `total loss ${num(e.summary.totalPointLoss)} over ${e.summary.moves} moves` +
-        (e.summary.rating?.rated ? `, rating ${num(e.summary.rating.before)} -> ${num(e.summary.rating.after)}` : "") +
-        ` — run: review ${e.gameId}`
-      );
+    case "game_end": {
+      const r = e.summary.rating;
+      const rating = r?.pending ? ", rank estimate running (a RATING line follows)" : r?.rated ? `, rating ${num(r.before)} -> ${num(r.after)}` : "";
+      const help = e.summary.assistance ? `, help: ${assistText(e.summary.assistance)}` : "";
+      return `GAME_END ${e.gameId} ${resultText(e.result)} — ${mistakesText(e.summary)}, total loss ${num(e.summary.totalPointLoss)} over ${e.summary.moves} moves${help}${rating} — run: review ${e.gameId}`;
+    }
+    case "rating":
+      return `RATING ${e.gameId} ${ratingChangeText(e.rating)}`;
     case "problem_start": {
       const from = e.source ? `from ${e.source.gameId} move ${e.source.moveNumber}` : "built-in";
       return (
@@ -191,11 +207,12 @@ export function overlayText(o: Overlay, size: number): string {
   return parts.length > 0 ? parts.join("; ") : "none";
 }
 
-/** Compact move list: `14 B C3 -6.2!` for human moves with evals; `!` flags a mistake-sized loss. */
+/** Compact move list: `14 B C3 -6.2!` for human moves with evals; `!` flags a mistake-sized loss, `*` a move played with help. */
 export function moveListText(moves: MoveRecord[], size: number, threshold = 4, perLine = 10): string {
   const items = moves.map((r) => {
     let s = `${r.number} ${r.move.color} ${moveGtp(r.move, size)}`;
     if (r.eval) s += ` -${num(r.eval.pointLoss)}${r.eval.pointLoss >= threshold ? "!" : ""}`;
+    if (r.assist?.length) s += "*";
     return s;
   });
   const lines: string[] = [];
@@ -340,6 +357,13 @@ export function formatProfile(p: Profile, focus?: FocusRecommendation | null): s
       ? `, trend ${signed(p.rating - (first.rating - (first.delta ?? 0)))} over the last ${history.length} rated games`
       : "";
   out.push(`rank estimate ${ratingToRank(p.rating)} (rating ${num(p.rating)}${trend}), games ${p.gamesPlayed}, problems solved ${p.problemsSolved}`);
+  const last = [...p.ratingHistory].reverse().find((h) => h.estimate);
+  if (p.estimating?.length) out.push(`rank estimate for ${p.estimating.join(", ")} still running (a RATING line follows in watch)`);
+  if (last?.estimate) {
+    out.push(`last game's estimate (${last.gameId}): ${lowerFirst(rankEstimateText(last.estimate))}; the rating follows these move-quality estimates, the results only nudge it`);
+  } else if (p.ratingModel === 2) {
+    out.push("no rank estimate yet: one comes from each game of 10+ moves, from the moves played without help");
+  }
   const handicap = p.handicap >= 2 ? `, learner takes ${p.handicap} handicap stones on 9x9 (rating below 20k, the weakest bot)` : "";
   out.push(`bot plays ${p.botRank}${handicap}`);
   if (p.tutorLevel) out.push(levelLine(p.tutorLevel));
@@ -349,7 +373,10 @@ export function formatProfile(p: Profile, focus?: FocusRecommendation | null): s
       (change ? ` (last changed ${num(change.from)} -> ${num(change.to)} after ${change.gameId}: ${change.reason})` : ""),
   );
   if (history.length > 0) {
-    const games = history.map((h) => `${h.gameId} ${h.won ? "won" : "lost"} vs ${h.botRank}${h.handicap ? ` H${h.handicap}` : ""}${h.delta !== undefined ? ` (${signed(h.delta)})` : ""}`);
+    const games = history.map((h) => {
+      const estimate = h.estimate ? ` est ${estimateRankText(h.estimate)}/${h.estimate.moves} moves` : "";
+      return `${h.gameId} ${h.won ? "won" : "lost"} vs ${h.botRank}${h.handicap ? ` H${h.handicap}` : ""}${h.delta !== undefined ? ` (${signed(h.delta)}${estimate})` : ""}`;
+    });
     out.push(`recent rated games: ${games.join(", ")}`);
   }
   const trends = categoryTrends(p);
@@ -370,7 +397,8 @@ export function formatProfile(p: Profile, focus?: FocusRecommendation | null): s
   if (recent.length > 0) {
     out.push("recent mistakes:");
     for (const m of recent) {
-      out.push(`  ${m.gameId} move ${m.moveNumber} ${m.category} -${num(m.pointLoss)}${m.note ? ` ${quote(m.note)}` : ""}`);
+      const first = m.takenBack !== undefined ? " (first try, taken back)" : "";
+      out.push(`  ${m.gameId} move ${m.moveNumber}${first} ${m.category} -${num(m.pointLoss)}${m.note ? ` ${quote(m.note)}` : ""}`);
     }
   }
   if (focus) out.push(`recommended focus: ${focus.category}, as ${focus.suggestion === "problems" ? "practice problems" : "a game"} — ${focus.reason}`);
@@ -419,7 +447,7 @@ export function formatProblemList(r: ProblemsResponse, now = Date.now()): string
 }
 
 /** What a review reads of a saved game (GET /api/game/:id). */
-export type ReviewedGame = Pick<SavedGame, "id" | "settings" | "moves"> & Partial<Pick<SavedGame, "result" | "summary">>;
+export type ReviewedGame = Pick<SavedGame, "id" | "settings" | "moves"> & Partial<Pick<SavedGame, "result" | "summary" | "takenBack" | "assistance">>;
 
 /** Win-rate swings of at least this much (0..1, the learner's view) are listed in a review. */
 const SWING_MIN = 0.15;
@@ -454,14 +482,29 @@ export function winrateSwings(moves: MoveRecord[], human: Color, max = 5): { rec
 
 const pct = (n: number) => `${Math.round(n * 100)}%`;
 
-/** The board before move `n`, or null when the moves don't replay. */
-function boardBefore(g: ReviewedGame, n: number): string | null {
+/** The board before move `n` (or before a taken-back first attempt, from its own line), or null when the moves don't replay. */
+function boardBefore(g: ReviewedGame, n: number, first?: TakenBackMove): string | null {
   try {
-    const game = gameBefore(g.settings, g.moves, n);
+    const game = first ? gameFromLine(g.settings, first.before) : gameBefore(g.settings, g.moves, n);
     return toAscii(game.board, movePoint(game.lastMove?.move));
   } catch {
     return null;
   }
+}
+
+/** The taken-back first attempt a summary entry is about, if it is one. */
+function firstOf(g: ReviewedGame, m: { takenBack?: number }): TakenBackMove | undefined {
+  return m.takenBack !== undefined ? g.takenBack?.[m.takenBack] : undefined;
+}
+
+/**
+ * "(first try #2, taken back by the learner)" for a summary entry that is a first attempt: #n is
+ * its number among the tries taken back at that move, what `tag --taken-back <n>` takes.
+ */
+function firstTryText(g: ReviewedGame, m: { takenBack?: number }): string {
+  const first = firstOf(g, m);
+  if (!first) return "";
+  return ` (${takenBackTryText(takenBackTry(g.takenBack!, m.takenBack!))}, taken back by ${first.by === "tutor" ? "the tutor" : "the learner"})`;
 }
 
 /** A compact post-game review: result, rating change, mistakes with PVs, win-rate swings, boards before the worst mistakes, move list. */
@@ -472,34 +515,36 @@ export function formatReview(g: ReviewedGame, threshold = 4): string {
   const out: string[] = [];
   out.push(`game ${id} ${settingsText(g.settings)} result ${g.result ? resultText(g.result) : "unfinished"} moves ${g.moves.length}`);
   const rating = g.summary?.rating;
-  if (rating) {
-    const next = `next bot ${rating.nextBotRank}${rating.nextHandicap ? ` with ${rating.nextHandicap} handicap stones` : ""}`;
-    out.push(
-      rating.rated
-        ? `rating ${num(rating.before)} -> ${num(rating.after)} (${signed(rating.after - rating.before)}, rank ${ratingToRank(rating.after)}); ${next}`
-        : `rating unchanged at ${num(rating.after)} (games under 10 moves don't count); ${next}`,
-    );
+  if (rating) out.push(ratingChangeText(rating));
+  const help = g.summary?.assistance ?? g.assistance;
+  const assisted = g.moves.filter((r) => r.assist?.length);
+  if (help || assisted.length) {
+    const moves = assisted.map((r) => `${r.number} ${r.assist!.join("+")}`).join(", ");
+    out.push(`help: ${help ? assistText(help) : "?"}${moves ? `; moves played with help (* below, left out of the rank estimate): ${moves}` : ""}`);
   }
 
-  const mistakes =
+  const mistakes: GameSummary["mistakes"] =
     g.summary?.mistakes ??
     g.moves
       .filter((r) => r.move.color === human && r.eval && r.eval.pointLoss >= threshold)
       .sort((a, b) => b.eval!.pointLoss - a.eval!.pointLoss)
-      .map((r) => ({ moveNumber: r.number, move: moveGtp(r.move, size), pointLoss: r.eval!.pointLoss, bestMove: r.eval!.bestMove, category: undefined, categorySource: undefined }));
+      .map((r) => ({ moveNumber: r.number, move: moveGtp(r.move, size), pointLoss: r.eval!.pointLoss, bestMove: r.eval!.bestMove }));
   if (mistakes.length === 0) {
     out.push("mistakes: none");
   } else {
     const total = g.summary ? `, total loss ${num(g.summary.totalPointLoss)}` : "";
     out.push(`mistakes (${mistakes.length}, worst first${total}):`);
     for (const m of mistakes) {
-      const record = g.moves[m.moveNumber - 1];
+      const first = firstOf(g, m);
+      const record = first ? first.record : g.moves[m.moveNumber - 1];
       const category = m.category ? `[${m.category}${m.categorySource === "heuristic" ? ", heuristic" : ""}]` : "[untagged]";
       const line = record?.eval?.bestPv.length ? ` pv ${pv(record.eval.bestPv)}` : "";
-      out.push(`  move ${m.moveNumber} ${record?.move.color ?? human} ${m.move} -${num(m.pointLoss)} best ${m.bestMove} ${category}${line}`);
+      out.push(`  move ${m.moveNumber}${firstTryText(g, m)} ${record?.move.color ?? human} ${m.move} -${num(m.pointLoss)} best ${m.bestMove} ${category}${line}`);
     }
-    if (mistakes.some((m) => m.categorySource !== "tutor")) {
-      out.push(`  confirm or correct categories with: tag ${id} <move#> <category> [note]`);
+    const untagged = mistakes.filter((m) => m.categorySource !== "tutor");
+    if (untagged.length) {
+      const firsts = untagged.some((m) => m.takenBack !== undefined) ? " (add --taken-back <n> for first try #n)" : "";
+      out.push(`  confirm or correct categories with: tag ${id} <move#> <category> [note]${firsts}`);
     }
   }
 
@@ -514,11 +559,14 @@ export function formatReview(g: ReviewedGame, threshold = 4): string {
   }
 
   for (const m of mistakes.slice(0, REVIEW_BOARDS)) {
-    const board = boardBefore(g, m.moveNumber);
+    const first = firstOf(g, m);
+    const board = boardBefore(g, m.moveNumber, first);
     if (!board) continue;
-    out.push(`board before move ${m.moveNumber} (${g.moves[m.moveNumber - 1]?.move.color ?? human} played ${m.move}, best ${m.bestMove}):`, board);
+    const color = (first ? first.record : g.moves[m.moveNumber - 1])?.move.color ?? human;
+    out.push(`board before move ${m.moveNumber}${firstTryText(g, m)} (${color} played ${m.move}, best ${m.bestMove}):`, board);
   }
 
-  out.push(g.moves.length > 0 ? `moves (human loss in pts, ! = mistake):\n${moveListText(g.moves, size, threshold)}` : "moves: none");
+  const legend = g.moves.some((r) => r.assist?.length) ? ", * = played with help" : "";
+  out.push(g.moves.length > 0 ? `moves (human loss in pts, ! = mistake${legend}):\n${moveListText(g.moves, size, threshold)}` : "moves: none");
   return out.join("\n");
 }

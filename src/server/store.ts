@@ -2,8 +2,8 @@
 // and the tutor event log. Everything is synchronous: the app is local and single-user, and
 // sync writes keep the on-disk order identical to the order things happened in.
 
-import { appendFileSync, closeSync, existsSync, fstatSync, mkdirSync, openSync, readFileSync, readSync, readdirSync, renameSync, statSync, writeFileSync } from "node:fs";
-import { dirname, join, resolve } from "node:path";
+import { appendFileSync, closeSync, copyFileSync, existsSync, fstatSync, mkdirSync, openSync, readFileSync, readSync, readdirSync, renameSync, statSync, writeFileSync } from "node:fs";
+import { dirname, join, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { MISTAKE_CATEGORIES, TUTOR_LEVELS, type MistakeCategory, type Profile, type SavedGame, type TutorEvent, type TutorLevel } from "../shared/types.ts";
 import { withBuiltins, type StoredProblem } from "./problems.ts";
@@ -197,7 +197,13 @@ export class Store {
     try {
       const saved = JSON.parse(readFileSync(this.profilePath, "utf8")) as Partial<Profile>;
       const tutorLevel = TUTOR_LEVELS.includes(saved.tutorLevel as TutorLevel) ? saved.tutorLevel! : base.tutorLevel;
-      return { ...base, ...saved, mistakeCounts: { ...base.mistakeCounts, ...saved.mistakeCounts }, tutorLevel };
+      const profile: Profile = { ...base, ...saved, mistakeCounts: { ...base.mistakeCounts, ...saved.mistakeCounts }, tutorLevel };
+      // `estimating` held one game id before it became a list.
+      const estimating: unknown = saved.estimating;
+      const pending = typeof estimating === "string" ? [estimating] : Array.isArray(estimating) ? estimating.filter((id): id is string => typeof id === "string") : [];
+      if (pending.length) profile.estimating = pending;
+      else delete profile.estimating;
+      return profile;
     } catch {
       renameSync(this.profilePath, `${this.profilePath}.corrupt-${Date.now()}`);
       return base;
@@ -254,6 +260,17 @@ export class Store {
     if (!this.gameExists(id)) return null;
     try {
       return JSON.parse(readFileSync(join(this.gamesDir, `${id}.json`), "utf8")) as SavedGame;
+    } catch {
+      return null;
+    }
+  }
+
+  /** A saved game's SGF as written, or null. */
+  loadSgf(id: string): string | null {
+    const path = join(this.gamesDir, `${id}.sgf`);
+    if (!isValidGameId(id) || !existsSync(path)) return null;
+    try {
+      return readFileSync(path, "utf8");
     } catch {
       return null;
     }
@@ -328,6 +345,25 @@ export class Store {
     } catch {
       // The index is a cache; it is rebuilt from the games when missing.
     }
+  }
+
+  /**
+   * Copies data files (paths relative to the data dir, e.g. "profile.json", "games/<id>.json") into
+   * a new `backup-<stamp>/` folder, keeping their layout. Missing files are skipped. Returns the folder.
+   */
+  backup(paths: readonly string[], now = Date.now()): string {
+    const stamp = new Date(now).toISOString().replace(/[:.]/g, "-");
+    let dir = join(this.dir, `backup-${stamp}`);
+    for (let n = 2; existsSync(dir); n++) dir = join(this.dir, `backup-${stamp}-${n}`);
+    mkdirSync(dir, { recursive: true });
+    for (const rel of paths) {
+      const from = resolve(this.dir, rel);
+      if (!from.startsWith(this.dir + sep) || !existsSync(from)) continue;
+      const to = join(dir, rel);
+      mkdirSync(dirname(to), { recursive: true });
+      copyFileSync(from, to);
+    }
+    return dir;
   }
 
   // --- tutor event log -----------------------------------------------------

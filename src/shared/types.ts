@@ -33,6 +33,54 @@ export interface MoveRecord {
    * before levels existed, which meant coach). It decides whether the move can open a teaching moment.
    */
   tutorLevel?: TutorLevel;
+  /**
+   * Help the learner had for this move (human moves only; absent = none). Assisted moves don't count
+   * for the rank estimate.
+   */
+  assist?: AssistKind[];
+}
+
+/**
+ * Kinds of help for one human move: "hint" = played after a hint for that position was answered
+ * (by the tutor or KataGo); "retry" = replaces a move the learner took back (Try again, Take back);
+ * "rethink" = replaces a move the tutor took back; "shown" = played after the tutor drew on that
+ * position (show or mark) or a hint circled a point there, even if the learner hid the drawing.
+ */
+export const ASSIST_KINDS = ["hint", "retry", "rethink", "shown"] as const;
+export type AssistKind = (typeof ASSIST_KINDS)[number];
+
+/** A human move that was taken back, kept in the game record with its eval (its first attempt). */
+export interface TakenBackMove {
+  /** The move's number; its replacement, if one was played, has the same number. */
+  moveNumber: number;
+  /** The move as played, with its eval (when it arrived before the take-back), level and help. */
+  record: MoveRecord;
+  /** "human" = the learner's Try again or Take back; "tutor" = the tutor's rethink. */
+  by: "human" | "tutor";
+  ts: number;
+  /** The moves before it in GTP, colors alternating from the game's first mover: its position, which later take-backs can change. */
+  before: Gtp[];
+  /** Heuristic category, when it was a mistake. */
+  heuristic?: MistakeCategory;
+  /** The tutor's tag. */
+  tag?: { category: MistakeCategory; note?: string };
+}
+
+/** Help the learner had in one game: hint requests, their own take-backs, and the tutor's rethinks. */
+export interface AssistCounts {
+  hints: number;
+  takeBacks: number;
+  rethinks: number;
+}
+
+/** A game's rank estimate from the likelihood of the learner's unassisted moves under KataGo's human-SL model. */
+export interface RankEstimate extends AssistCounts {
+  /** On the rank scale (20k = 10), interpolated between the human-SL profiles, never below 10. */
+  rating: number;
+  /** The fit is at the weakest profile: "20k or weaker" (the model goes no lower). */
+  floor: boolean;
+  /** Unassisted human moves it was measured on (taken-back first attempts included). */
+  moves: number;
 }
 
 /** KataGo's verdict on one played move, always from the mover's perspective. */
@@ -206,7 +254,8 @@ export type ClientAction =
   | { type: "pass" }
   | { type: "resign" }
   | { type: "continue" } // dismiss a paused teaching moment and keep playing
-  | { type: "retry" } // take back the last human move (and bot reply) and try again
+  | { type: "retry" } // the moment banner's Try again: take back the last human move (and bot reply)
+  | { type: "take_back" } // the controls' Take back: the same, any time on the learner's turn or in a pause
   | { type: "chat"; text: string }
   | { type: "ask_tutor"; text?: string } // explicit "hint please" button
   | { type: "next_problem" } // enter problem mode, or go on to the next problem
@@ -235,7 +284,11 @@ export type TutorCommand =
   | { type: "claim"; momentId: string }
   | { type: "new_game"; settings?: Partial<GameSettings> }
   | { type: "start_problem"; problemId?: string }
-  | { type: "tag"; gameId: string; moveNumber: number; category: MistakeCategory; note?: string };
+  /**
+   * `takenBack`: a taken-back first attempt at that move number, not the move that stayed on the
+   * board: a number is the try's number there (review's "first try #2"), `true` the only one.
+   */
+  | { type: "tag"; gameId: string; moveNumber: number; category: MistakeCategory; note?: string; takenBack?: boolean | number };
 
 // ---------------------------------------------------------------------------
 // Server → tutor event stream (GET /api/tutor/events, SSE; one JSON object per event)
@@ -269,7 +322,10 @@ export type TutorEvent =
   | { seq: number; ts: number; type: "fallback"; momentId: string }
   /** Moves were taken back (browser Try again, or the tutor's rethink). `moves` is how many remain. */
   | { seq: number; ts: number; type: "undo"; gameId: string; moves: number; toPlay: Color; by: "human" | "tutor" }
+  /** `summary.rating` is `pending` while the rank estimate runs; a `rating` event follows. */
   | { seq: number; ts: number; type: "game_end"; gameId: string; result: GameResult; summary: GameSummary }
+  /** The finished game's rank estimate is in and the rating updated. */
+  | { seq: number; ts: number; type: "rating"; gameId: string; rating: RatingChange }
   /** A practice problem is on the board. `answers` are the accepted moves (for the tutor; the learner doesn't see them). */
   | {
       seq: number;
@@ -307,7 +363,7 @@ export type TutorEvent =
 
 export interface GameSummary {
   moves: number;
-  /** Human moves with pointLoss >= the mistake threshold, worst first. */
+  /** Human moves with pointLoss >= the mistake threshold, worst first, taken-back first attempts included. */
   mistakes: {
     moveNumber: number;
     move: Gtp;
@@ -316,8 +372,13 @@ export interface GameSummary {
     category?: MistakeCategory;
     /** Who chose the category: the tutor's `tag` (always wins) or the server's heuristic at game end. */
     categorySource?: "tutor" | "heuristic";
+    /** A taken-back move: its index in `SavedGame.takenBack`. */
+    takenBack?: number;
   }[];
+  /** Points lost by every evaluated human move, taken-back ones included. */
   totalPointLoss: number;
+  /** Help the learner had in the game. */
+  assistance?: AssistCounts;
   /** How the game moved the learner's rating. Present once the game finished (not abandoned). */
   rating?: RatingChange;
 }
@@ -328,6 +389,10 @@ export interface RatingChange {
   after: number;
   /** False when the game was too short to count (under 10 human moves). */
   rated: boolean;
+  /** The rank estimate is still running (game_end); `after` is then `before`. */
+  pending?: boolean;
+  /** The game's rank estimate from its moves; absent with too few unassisted moves or without KataGo. */
+  estimate?: RankEstimate;
   /** Bot rank and handicap stones (for the learner) that the next game defaults to. */
   nextBotRank: string;
   nextHandicap: number;
@@ -350,6 +415,10 @@ export interface SavedGame {
   heuristics?: Record<number, MistakeCategory>;
   /** The teaching moment as of the last save, so a restart can tell an open one from a dismissed one. */
   moment?: TeachingMoment | null;
+  /** Human moves that were taken back, in the order they were (absent in games saved before they were kept). */
+  takenBack?: TakenBackMove[];
+  /** Help the learner had so far. */
+  assistance?: AssistCounts;
 }
 
 // ---------------------------------------------------------------------------
@@ -370,8 +439,18 @@ export interface Profile {
    * below the weakest bot (20k), as a strength reducer for the bot.
    */
   handicap: number;
-  /** One entry per rated game, oldest first. `rating` is after the game, `delta` the change it made. */
-  ratingHistory: { ts: number; gameId: string; rating: number; botRank: string; won: boolean; handicap?: number; delta?: number }[];
+  /**
+   * One entry per rated game, oldest first. `rating` is after the game, `delta` the change it made,
+   * `estimate` the game's rank estimate from its moves (rating model 2).
+   */
+  ratingHistory: { ts: number; gameId: string; rating: number; botRank: string; won: boolean; handicap?: number; delta?: number; estimate?: RankEstimate }[];
+  /** 2 = the rating comes from rank estimates of the learner's moves (absent: the old win/loss Elo; re-estimated at startup). */
+  ratingModel?: 2;
+  /**
+   * Finished rated games whose rank estimate hasn't been applied yet, in the order they finished
+   * (it waits for KataGo, and for the migration while `ratingModel` isn't 2). Absent when none.
+   */
+  estimating?: string[];
   /** Mistake threshold in points for pausing a game (default 4; adapts between 2 and 6). */
   mistakeThreshold: number;
   /** Changes of mistakeThreshold, oldest first. */
@@ -379,7 +458,7 @@ export interface Profile {
   /** Running tally of mistakes by category (the tutor's tag, else the heuristic category). */
   mistakeCounts: Record<MistakeCategory, number>;
   /** Most recent categorized mistakes, newest first, capped at 50. */
-  recentMistakes: { ts: number; gameId: string; moveNumber: number; category: MistakeCategory; pointLoss: number; note?: string }[];
+  recentMistakes: { ts: number; gameId: string; moveNumber: number; category: MistakeCategory; pointLoss: number; note?: string; takenBack?: number }[];
   /**
    * Finished games, oldest first, capped at 20: evaluated human moves, average point loss per
    * move, mistakes (point loss >= `threshold`, the threshold the game was played with).

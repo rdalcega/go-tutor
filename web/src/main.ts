@@ -1,7 +1,7 @@
 import "./style.css";
 import { TUTOR_LEVELS, type ChatMessage, type ClientAction, type Color, type GameView, type GameSettings, type ProfileResponse, type TutorLevel } from "../../src/shared/types.ts";
 import { ratingToRank } from "../../src/shared/rank.ts";
-import { TUTOR_LEVEL_TEXT, categoryLabel, colorName, formatScore } from "../../src/shared/text.ts";
+import { TUTOR_LEVEL_TEXT, categoryLabel, colorName, formatScore, rankEstimateText } from "../../src/shared/text.ts";
 import { type ConnectionState, type Transport, httpTransport } from "./api.ts";
 import { BoardView } from "./board.ts";
 import { readCollapsed, writeCollapsed } from "./collapse.ts";
@@ -11,6 +11,7 @@ import {
   formatLoss,
   humanMoves,
   lastHumanMove,
+  latestEstimate,
   lossLevel,
   nextBotText,
   positionBefore,
@@ -50,6 +51,7 @@ const el = {
   tutorDot: $("tutor-dot"),
   tutorText: $("tutor-text"),
   pass: $<HTMLButtonElement>("pass"),
+  takeBack: $<HTMLButtonElement>("take-back"),
   hint: $<HTMLButtonElement>("hint"),
   practice: $<HTMLButtonElement>("practice"),
   resign: $<HTMLButtonElement>("resign"),
@@ -79,6 +81,7 @@ const el = {
   chatInput: $<HTMLInputElement>("chat-input"),
   progress: $("progress"),
   prRank: $("pr-rank"),
+  prEstimate: $("pr-estimate"),
   prBot: $("pr-bot"),
   prGames: $("pr-games"),
   prCats: $("pr-cats"),
@@ -279,6 +282,8 @@ function turnText(v: GameView): string {
 
 function renderControls(v: GameView | null): void {
   el.pass.disabled = !can(v, "pass");
+  // Take back: the learner's last move (and the bot's reply), on their turn or in a pause.
+  el.takeBack.disabled = !can(v, "take_back");
   // Hints are for the human's move, not while paused or while the bot is to move.
   el.hint.disabled = !can(v, "ask_tutor");
   el.resign.disabled = !can(v, "resign");
@@ -452,7 +457,10 @@ function renderProgress(): void {
   if (auto) auto.text = p ? `Auto (${nextBotText(p)})` : "Auto";
   if (!p) return;
   el.prRank.textContent = ratingToRank(p.rating);
-  el.prRank.title = `Estimated rank (rating ${p.rating.toFixed(1)})`;
+  el.prRank.title = `Estimated rank (rating ${p.rating.toFixed(1)}), mostly from how your own moves compare with players of each rank`;
+  const estimate = latestEstimate(p);
+  el.prEstimate.textContent = p.estimating?.length ? "estimating…" : (estimate?.short ?? "–");
+  el.prEstimate.title = estimate?.long ?? "Your rank estimated from the moves you play without help, after each game of 10+ moves.";
   el.prBot.textContent = nextBotText(p);
   el.prGames.textContent = String(p.gamesPlayed);
   const cats = topCategories(p.mistakeCounts);
@@ -464,7 +472,7 @@ function renderProgress(): void {
   const values = first ? [first.rating - (first.delta ?? 0), ...history.map((h) => h.rating)] : [];
   const dots = history.map((h) => ({
     class: h.won ? "dot-won" : "dot-lost",
-    title: `${h.won ? "Won" : "Lost"} vs ${h.botRank}: ${ratingToRank(h.rating)} (${h.rating.toFixed(1)})`,
+    title: `${h.won ? "Won" : "Lost"} vs ${h.botRank}: ${ratingToRank(h.rating)} (${h.rating.toFixed(1)})${h.estimate ? `. ${rankEstimateText(h.estimate)}` : ""}`,
   }));
   sparkline(el.prSpark, ratingSparkPoints(values, 300, 32), dots);
 }
@@ -477,8 +485,13 @@ function renderResultRating(): void {
     el.resultRating.hidden = true;
     return;
   }
-  const change = ratingChangeFor(p, gameId);
   el.resultRating.hidden = false;
+  // The rank estimate runs after the game ends; the profile arrives again when it is done.
+  if (p.estimating?.includes(gameId)) {
+    el.resultRating.textContent = "Estimating your rank from your moves…";
+    return;
+  }
+  const change = ratingChangeFor(p, gameId);
   if (!change) {
     el.resultRating.textContent = "Rating unchanged: games under 10 moves don't count.";
     return;
@@ -487,7 +500,8 @@ function renderResultRating(): void {
   delta.className = change.delta > 0 ? "up" : change.delta < 0 ? "down" : "";
   delta.textContent = `${change.delta >= 0 ? "+" : "−"}${Math.abs(change.delta).toFixed(1)}`;
   const rank = change.before === change.after ? `rank ${change.after}` : `rank ${change.before} → ${change.after}`;
-  el.resultRating.replaceChildren("Rating ", delta, ` (${rank}). Next bot: ${nextBotText(p)}.`);
+  const estimate = change.estimate ? ` ${change.estimate}.` : "";
+  el.resultRating.replaceChildren("Rating ", delta, ` (${rank}).${estimate} Next bot: ${nextBotText(p)}.`);
 }
 
 function renderResult(v: GameView | null): void {
@@ -521,7 +535,14 @@ function renderResult(v: GameView | null): void {
 // --- wiring --------------------------------------------------------------
 
 el.pass.addEventListener("click", () => void act({ type: "pass" }));
-el.hint.addEventListener("click", () => void act({ type: "ask_tutor" }));
+el.takeBack.addEventListener("click", () => void act({ type: "take_back" }));
+// Hint sits by the chat input: whatever the learner typed goes along as their question.
+el.hint.addEventListener("click", () => {
+  if (!can(view, "ask_tutor")) return; // keep the typed text when the hint can't go out
+  const text = el.chatInput.value.trim();
+  el.chatInput.value = "";
+  void act(text ? { type: "ask_tutor", text } : { type: "ask_tutor" });
+});
 el.continueBtn.addEventListener("click", () => void act({ type: "continue" }));
 el.retry.addEventListener("click", () => void act({ type: "retry" }));
 el.nextProblem.addEventListener("click", () => void act({ type: "next_problem" }));

@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { defaultProfile } from "../../src/server/store.ts";
 import {
   commandJson,
   commandOutput,
@@ -151,6 +152,19 @@ describe("formatEvent", () => {
     const rated = { ...end, summary: { ...end.summary, rating: { before: 10, after: 8.5, rated: true, nextBotRank: "20k", nextHandicap: 0 } } };
     expect(formatEvent(rated, ctx)).toBe(
       "GAME_END g12 W+3.5 — 2 mistakes, worst move 14 (6.2), total loss 15 over 61 moves, rating 10 -> 8.5 — run: review g12",
+    );
+    // Rating model 2: the estimate runs after game_end, and a RATING line follows.
+    const firsts = [{ moveNumber: 14, move: "C3", pointLoss: 6.2, bestMove: "D5", takenBack: 0 }];
+    const pending = {
+      ...end,
+      summary: { ...end.summary, mistakes: [...end.summary.mistakes, ...firsts], assistance: { hints: 2, takeBacks: 1, rethinks: 0 }, rating: { before: 10, after: 10, rated: true, pending: true, nextBotRank: "20k", nextHandicap: 0 } },
+    };
+    expect(formatEvent(pending, ctx)).toBe(
+      "GAME_END g12 W+3.5 — 3 mistakes (1 taken back), worst move 14 (6.2), total loss 15 over 61 moves, help: 2 hints, 1 take-back, rank estimate running (a RATING line follows) — run: review g12",
+    );
+    const estimate = { rating: 12.4, floor: false, moves: 25, hints: 2, takeBacks: 1, rethinks: 0 };
+    expect(formatEvent({ ...base, type: "rating", gameId: "g12", rating: { before: 10, after: 11.9, rated: true, nextBotRank: "18k", nextHandicap: 0, estimate } }, ctx)).toBe(
+      "RATING g12 rank estimate 18k from 25 unassisted moves (2 hints, 1 take-back); rating 10 -> 11.9 (+1.9, rank 18k); next bot 18k",
     );
   });
 
@@ -509,5 +523,53 @@ describe("summary and review", () => {
     expect(text).toContain("mistakes: none");
     const bare = formatReview({ id: "g14", settings, moves: view().moves });
     expect(bare).toContain("  move 3 B C3 -6.2 best D5 [untagged] pv D5 E4 C6");
+  });
+
+  it("reviews first attempts, help and the rank estimate", () => {
+    const moves = view().moves.map((r) => (r.number === 3 ? { ...r, assist: ["rethink" as const] } : r));
+    const firstTry = { ...moves[2]!, move: { color: "B" as const, point: { x: 8, y: 0 } }, assist: undefined };
+    const estimate = { rating: 12, floor: false, moves: 30, hints: 1, takeBacks: 0, rethinks: 1 };
+    const text = formatReview({
+      id: "g15",
+      settings,
+      moves,
+      takenBack: [{ moveNumber: 3, record: firstTry, by: "tutor", ts: 0, before: ["E5", "C7"], heuristic: "direction" }],
+      summary: {
+        moves: 3,
+        totalPointLoss: 15.5,
+        mistakes: [{ moveNumber: 3, move: "J9", pointLoss: 9, bestMove: "D5", category: "direction", categorySource: "heuristic", takenBack: 0 }],
+        assistance: { hints: 1, takeBacks: 0, rethinks: 1 },
+        rating: { before: 10, after: 11.6, rated: true, nextBotRank: "18k", nextHandicap: 0, estimate },
+      },
+    });
+    const lines = text.split("\n");
+    expect(lines[1]).toBe("rank estimate 18k from 30 unassisted moves (1 hint, 1 tutor take-back); rating 10 -> 11.6 (+1.6, rank 18k); next bot 18k");
+    expect(lines[2]).toBe("help: 1 hint, 1 tutor take-back; moves played with help (* below, left out of the rank estimate): 3 rethink");
+    expect(text).toContain("  move 3 (first try #1, taken back by the tutor) B J9 -9 best D5 [direction, heuristic]");
+    expect(text).toContain("tag g15 <move#> <category> [note] (add --taken-back <n> for first try #n)");
+    // The board before the first attempt, from its own line.
+    expect(text).toContain("board before move 3 (first try #1, taken back by the tutor) (B played J9, best D5):");
+    expect(lines.slice(-2)).toEqual(["moves (human loss in pts, ! = mistake, * = played with help):", "1 B E5 -0.3 | 2 W C7 | 3 B C3 -6.2!*"]);
+    expect(formatReview({ id: "g16", settings, moves, summary: { moves: 3, totalPointLoss: 0, mistakes: [], rating: { before: 10, after: 10, rated: true, pending: true, nextBotRank: "20k", nextHandicap: 0 } } })).toContain(
+      "rank estimate running; rating 10 for now",
+    );
+  });
+
+  it("shows the latest rank estimate and taken-back mistakes in the summary", () => {
+    const estimate = { rating: 10, floor: true, moves: 29, hints: 2, takeBacks: 3, rethinks: 6 };
+    const p: Profile = {
+      ...defaultProfile(),
+      rating: 11.2,
+      ratingModel: 2,
+      ratingHistory: [{ ts: 1, gameId: "g1", rating: 11.2, botRank: "18k", won: true, handicap: 0, delta: 1.2, estimate }],
+      recentMistakes: [{ ts: 1, gameId: "g1", moveNumber: 9, category: "tactics", pointLoss: 8.8, takenBack: 0 }],
+      mistakeCounts: { ...defaultProfile().mistakeCounts, tactics: 1 },
+    };
+    const text = formatProfile(p, null);
+    expect(text).toContain("last game's estimate (g1): rank estimate 20k or weaker from 29 unassisted moves (2 hints, 3 take-backs, 6 tutor take-backs)");
+    expect(text).toContain("recent rated games: g1 won vs 18k (+1.2 est 20k or weaker/29 moves)");
+    expect(text).toContain("  g1 move 9 (first try, taken back) tactics -8.8");
+    expect(formatProfile({ ...p, estimating: ["g2", "g3"] }, null)).toContain("rank estimate for g2, g3 still running");
+    expect(formatProfile({ ...defaultProfile(), ratingModel: 2 }, null)).toContain("no rank estimate yet");
   });
 });

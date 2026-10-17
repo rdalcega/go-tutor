@@ -201,6 +201,8 @@ function startEngine(engine: KataGo, controller: GameController): void {
     () => {
       console.log(`KataGo ready after ${((Date.now() - started) / 1000).toFixed(1)}s`);
       controller.setEngineState("ready");
+      // Once per data dir: re-estimate the rating from the saved games' moves (rating model 2).
+      void controller.migrateRatings();
     },
     (err: Error) => {
       console.error(`KataGo failed to start: ${err.message}`);

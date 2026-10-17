@@ -52,6 +52,20 @@ export function retryBlocked(s: Pick<ActionState, "humanColor" | "finished" | "m
   return null;
 }
 
+/**
+ * Why Take back can't take back a move now, or null when it can: as Try again, but also past a
+ * moment's move the tutor already took back (each press is deliberate), and only on the learner's
+ * turn or in a pause (not while their move is being evaluated or the bot is thinking), and not
+ * after two passes (the game is being scored).
+ */
+export function takeBackBlocked(
+  s: Pick<ActionState, "humanColor" | "finished" | "moves" | "toPlay" | "status">,
+): ReturnType<typeof retryBlocked> | "not_now" {
+  const blocked = retryBlocked({ ...s, moment: null });
+  if (blocked) return blocked;
+  return (s.toPlay === s.humanColor || s.status === "paused") && !twoPasses(s.moves) ? null : "not_now";
+}
+
 /** The browser actions accepted in this state. Always a fresh array. */
 export function allowedActions(s: ActionState): ActionType[] {
   if (s.mode === "problem") {
@@ -65,6 +79,7 @@ export function allowedActions(s: ActionState): ActionType[] {
   if (humanToPlay && !twoPasses(s.moves) && !paused && s.engineReady) allowed.push("play", "pass");
   if (paused) allowed.push("continue");
   if (retryBlocked(s) === null) allowed.push("retry");
+  if (takeBackBlocked(s) === null) allowed.push("take_back");
   if (humanToPlay && (s.tutorAttached || s.engineReady)) allowed.push("ask_tutor");
   return allowed;
 }

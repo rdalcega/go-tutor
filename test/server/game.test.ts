@@ -1,6 +1,7 @@
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { beforeEach, describe, expect, it } from "vitest";
+import { formatReview } from "../../src/cli/format.ts";
 import { UserError, type TutorEventInput } from "../../src/server/common.ts";
 import { GameController, passIsFine } from "../../src/server/game.ts";
 import type { Store } from "../../src/server/store.ts";
@@ -10,6 +11,7 @@ import { FakeClock, FakeEngine, flush, tempStore } from "./fakes.ts";
 const C3 = { x: 2, y: 6 };
 const E5 = { x: 4, y: 4 };
 const D4 = { x: 3, y: 5 };
+const round2 = (n: number) => Math.round(n * 100) / 100;
 
 let engine: FakeEngine;
 let clock: FakeClock;
@@ -21,6 +23,8 @@ function setup(opts: { tutor?: boolean } = {}): void {
   engine = new FakeEngine();
   clock = new FakeClock();
   store = tempStore();
+  // A learner already on rating model 2 (the server migrates a new data dir at the first engine-ready).
+  store.saveProfile({ ...store.loadProfile(), ratingModel: 2 });
   events = [];
   ctl = new GameController({ engine, store, clock, botDelayMs: 0, tutorTimeoutMs: 30_000 });
   ctl.onEvent((e) => events.push(e));
@@ -396,7 +400,7 @@ describe("GameController", () => {
     expect(ctl.view().moment?.state).toBe("fallback");
   });
 
-  it("Try again tells the tutor and drops tags on the moves taken back", async () => {
+  it("Try again tells the tutor and keeps the move taken back, with its tag, as a first attempt", async () => {
     await startGame();
     engine.lossAfter(["C3"], 9);
     ctl.play(C3);
@@ -406,9 +410,86 @@ describe("GameController", () => {
     expect(store.loadProfile().mistakeCounts.shape).toBe(1);
     await ctl.handleAction({ type: "retry" });
     expect(events.at(-1)).toEqual({ type: "undo", gameId, moves: 0, toPlay: "B", by: "human" });
-    expect(store.loadProfile().mistakeCounts.shape).toBe(0);
-    expect(store.loadProfile().recentMistakes).toEqual([]);
-    expect(store.loadGame(gameId)!.tags).toEqual({});
+    // The mistake still counts, now as the taken-back first attempt.
+    expect(store.loadProfile().mistakeCounts.shape).toBe(1);
+    expect(store.loadProfile().recentMistakes).toMatchObject([{ gameId, moveNumber: 1, category: "shape", takenBack: 0 }]);
+    ctl.flush();
+    const saved = store.loadGame(gameId)!;
+    expect(saved.tags).toEqual({});
+    expect(saved.takenBack).toMatchObject([{ moveNumber: 1, by: "human", before: [], tag: { category: "shape" }, record: { move: { color: "B", point: C3 } } }]);
+    expect(saved.takenBack![0]!.record.eval?.pointLoss).toBe(9);
+    expect(saved.assistance).toEqual({ hints: 0, takeBacks: 1, rethinks: 0 });
+  });
+
+  it("tags a taken-back first attempt apart from the move that replaced it", async () => {
+    await startGame();
+    engine.lossAfter(["C3"], 9);
+    ctl.play(C3);
+    await flush();
+    const gameId = ctl.view().gameId!;
+    await ctl.handleAction({ type: "retry" });
+    engine.lossAfter(["D4"], 5);
+    ctl.play(D4);
+    await flush();
+    await ctl.handleAction({ type: "continue" });
+    await ctl.handleAction({ type: "resign" });
+    const end = events.find((e) => e.type === "game_end");
+    if (end?.type !== "game_end") throw new Error("expected game_end");
+    expect(end.summary.mistakes.map((m) => [m.moveNumber, m.move, m.takenBack])).toEqual([
+      [1, "C3", 0],
+      [1, "D4", undefined],
+    ]);
+    await ctl.handleTutor({ type: "tag", gameId, moveNumber: 1, category: "opening", takenBack: true });
+    await ctl.handleTutor({ type: "tag", gameId, moveNumber: 1, category: "shape" });
+    ctl.flush();
+    const saved = store.loadGame(gameId)!;
+    expect(saved.takenBack![0]!.tag).toEqual({ category: "opening" });
+    expect(saved.tags[1]).toEqual({ category: "shape" });
+    expect(saved.summary!.mistakes.map((m) => [m.category, m.categorySource, m.takenBack])).toEqual([
+      ["opening", "tutor", 0],
+      ["shape", "tutor", undefined],
+    ]);
+    const tallies = store.loadProfile().recentMistakes.map((m) => [m.moveNumber, m.category, m.takenBack]);
+    expect(tallies).toEqual([
+      [1, "shape", undefined],
+      [1, "opening", 0],
+    ]);
+    await expect(ctl.handleTutor({ type: "tag", gameId, moveNumber: 3, category: "shape", takenBack: true })).rejects.toThrow(/no taken-back move 3/);
+  });
+
+  it("tags the taken-back try the tutor names when there are several at one move, as review numbers them", async () => {
+    await startGame();
+    const gameId = ctl.view().gameId!;
+    engine.lossAfter(["C3"], 9);
+    ctl.play(C3);
+    await flush();
+    await ctl.handleAction({ type: "retry" });
+    engine.lossAfter(["D4"], 5);
+    ctl.play(D4);
+    await flush();
+    await ctl.handleAction({ type: "retry" });
+    ctl.play(E5);
+    await flush();
+    await ctl.handleAction({ type: "resign" });
+    ctl.flush();
+    const review = formatReview(store.loadGame(gameId)!);
+    expect(review).toContain("move 1 (first try #1, taken back by the learner) B C3 -9");
+    expect(review).toContain("move 1 (first try #2, taken back by the learner) B D4 -5");
+    // Ambiguous without a number: the error lists the tries.
+    await expect(ctl.handleTutor({ type: "tag", gameId, moveNumber: 1, category: "shape", takenBack: true })).rejects.toThrow(
+      /2 taken-back tries at move 1 \(#1 C3 -9, #2 D4 -5\)\. Name one: --taken-back <n>/,
+    );
+    await expect(ctl.handleTutor({ type: "tag", gameId, moveNumber: 1, category: "shape", takenBack: 3 })).rejects.toThrow(/no taken-back first try #3 at move 1; it has #1 C3 -9, #2 D4 -5/);
+    // #2 is the second try, D4, even though C3 cost more.
+    await ctl.handleTutor({ type: "tag", gameId, moveNumber: 1, category: "shape", takenBack: 2 });
+    ctl.flush();
+    const saved = store.loadGame(gameId)!;
+    expect(saved.takenBack!.map((t) => t.tag?.category)).toEqual([undefined, "shape"]);
+    expect(saved.summary!.mistakes.map((m) => [m.move, m.category, m.categorySource, m.takenBack])).toEqual([
+      ["C3", "opening", "heuristic", 0],
+      ["D4", "shape", "tutor", 1],
+    ]);
+    expect(store.loadProfile().recentMistakes.find((m) => m.takenBack === 1)).toMatchObject({ category: "shape", pointLoss: 5 });
   });
 
   it("tag refuses the bot's moves", async () => {
@@ -517,6 +598,7 @@ describe("GameController", () => {
         moves: 4,
         mistakes: [],
         totalPointLoss: 0,
+        assistance: { hints: 0, takeBacks: 0, rethinks: 0 },
         rating: { before: 10, after: 10, rated: false, nextBotRank: "20k", nextHandicap: 0 },
       });
     }
@@ -833,7 +915,7 @@ describe("GameController and the learner profile", () => {
     expect(logs).toContainEqual(expect.stringMatching(/updating the profile after game .* failed: disk full/));
   });
 
-  it("Try again drops the heuristic category of the move taken back", async () => {
+  it("keeps the move Try again took back as a first attempt: its category, a mistake in the summary, a problem", async () => {
     await startGame();
     engine.lossAfter(["C3"], 6);
     ctl.play(C3);
@@ -842,26 +924,117 @@ describe("GameController and the learner profile", () => {
     ctl.play(E5);
     await flush();
     await ctl.handleAction({ type: "resign" });
-    const end = events.at(-1)!;
-    if (end.type !== "game_end") throw new Error("expected game_end");
-    expect(end.summary.mistakes).toEqual([]);
-    expect(store.loadGame(end.gameId)!.heuristics).toEqual({});
+    const end = events.find((e) => e.type === "game_end");
+    if (end?.type !== "game_end") throw new Error("expected game_end");
+    expect(end.summary.mistakes).toEqual([{ moveNumber: 1, move: "C3", pointLoss: 6, bestMove: "E5", category: "opening", categorySource: "heuristic", takenBack: 0 }]);
+    expect(end.summary.totalPointLoss).toBe(6);
+    expect(end.summary.assistance).toEqual({ hints: 0, takeBacks: 1, rethinks: 0 });
+    const saved = store.loadGame(end.gameId)!;
+    expect(saved.heuristics).toEqual({});
+    expect(saved.takenBack![0]!.heuristic).toBe("opening");
+    // The move that replaced it is the learner's second try.
+    expect(saved.moves[0]!.assist).toEqual(["retry"]);
+    expect(store.loadProfile().recentMistakes).toMatchObject([{ moveNumber: 1, category: "opening", takenBack: 0 }]);
+    await flush(10);
+    const problem = store.loadProblems().find((p) => p.kind === "game");
+    expect(problem?.source).toEqual({ gameId: end.gameId, moveNumber: 1, played: "C3", takenBack: 0 });
   });
 
-  it("updates the rating after a game of 10+ moves and offers the next bot", async () => {
+  it("estimates the rank from the unassisted moves after a game of 10+ moves, then updates the rating and the next bot", async () => {
     await startGame();
+    // The human-SL policy finds every move likeliest at 10k (and a little less likely each rank away).
+    engine.humanPolicy = (pos, profile) => {
+      const n = pos.size * pos.size + 1;
+      const rank = Number(/rank_(\d+)k/.exec(profile)?.[1] ?? 0);
+      return new Array(n).fill(1 / n).map((p) => p * Math.exp(-Math.abs(rank - 10) / 10));
+    };
     for (let i = 0; i < 10; i++) {
       ctl.play({ x: i % 9, y: 8 - Math.floor(i / 9) });
       await flush();
     }
     await ctl.handleAction({ type: "resign" });
-    const end = events.at(-1)!;
-    if (end.type !== "game_end") throw new Error("expected game_end");
-    expect(end.summary.rating).toEqual({ before: 10, after: 8.5, rated: true, nextBotRank: "20k", nextHandicap: 0 });
+    const end = events.find((e) => e.type === "game_end");
+    if (end?.type !== "game_end") throw new Error("expected game_end");
+    // game_end doesn't wait for the estimate.
+    expect(end.summary.rating).toEqual({ before: 10, after: 10, rated: true, pending: true, nextBotRank: "20k", nextHandicap: 0 });
+    expect(store.loadProfile().estimating).toEqual([end.gameId]);
+    const version = ctl.view().profileVersion;
+    await ctl.ratingIdle();
+    // Human moves 5, 7, …, 19 count (the first two are the opening): 8 moves, fit at 10k (20).
+    const estimate = { rating: 20, floor: false, moves: 8, hints: 0, takeBacks: 0, rethinks: 0 };
+    const after = Math.round((0.8 * 20 + 0.2 * 8.5) * 100) / 100;
+    const change = { before: 10, after, rated: true, nextBotRank: "12k", nextHandicap: 0, estimate };
+    expect(events.at(-1)).toEqual({ type: "rating", gameId: end.gameId, rating: change });
     const profile = store.loadProfile();
-    expect(profile.rating).toBe(8.5);
-    expect(profile.ratingHistory).toEqual([{ ts: clock.now(), gameId: end.gameId, rating: 8.5, botRank: "20k", won: false, handicap: 0, delta: -1.5 }]);
-    expect(store.loadGame(end.gameId)!.summary!.rating!.after).toBe(8.5);
+    expect(profile.rating).toBe(after);
+    expect(profile.estimating).toBeUndefined();
+    expect(profile.ratingHistory).toEqual([{ ts: clock.now(), gameId: end.gameId, rating: after, botRank: "20k", won: false, handicap: 0, delta: round2(after - 10), estimate }]);
+    expect(ctl.view().profileVersion).toBeGreaterThan(version);
+    ctl.flush();
+    expect(store.loadGame(end.gameId)!.summary!.rating).toEqual(change);
+    // One one-visit policy query per counted move and profile, below the game's queries in priority.
+    const policyCalls = engine.analyzeCalls.filter((c) => c.opts?.overrideSettings?.humanSLProfile);
+    expect(policyCalls).toHaveLength(8 * 13);
+    expect(policyCalls.every((c) => c.opts?.maxVisits === 1 && c.opts.includePolicy && (c.opts.priority ?? 0) < 0)).toBe(true);
+  });
+
+  /** Ten human moves, then resign: a rated game with 8 unassisted moves past the opening. */
+  async function ratedGame(): Promise<string> {
+    await startGame();
+    for (let i = 0; i < 10; i++) {
+      ctl.play({ x: i % 9, y: 8 - Math.floor(i / 9) });
+      await flush();
+    }
+    return ctl.view().gameId!;
+  }
+
+  it("without KataGo the game waits for its estimate, on disk, and gets it when KataGo is ready", async () => {
+    const gameId = await ratedGame();
+    ctl.setEngineState("failed");
+    await ctl.handleAction({ type: "resign" });
+    await ctl.ratingIdle();
+    // Not rated from the result alone: it waits.
+    let profile = store.loadProfile();
+    expect(profile).toMatchObject({ rating: 10, ratingHistory: [], estimating: [gameId] });
+    expect(store.loadGame(gameId)!.summary!.rating).toMatchObject({ pending: true });
+    expect(events.some((e) => e.type === "rating")).toBe(false);
+    // A restart: the next controller runs it once KataGo is ready.
+    const again = new GameController({ engine, store, clock, botDelayMs: 0 });
+    again.onEvent((e) => events.push(e));
+    again.setEngineState("ready");
+    await again.migrateRatings();
+    await again.ratingIdle();
+    profile = store.loadProfile();
+    expect(profile.estimating).toBeUndefined();
+    expect(profile.ratingHistory).toMatchObject([{ gameId, estimate: { moves: 8 } }]);
+    expect(store.loadGame(gameId)!.summary!.rating).toMatchObject({ rated: true, estimate: { moves: 8 } });
+    expect(events.at(-1)).toMatchObject({ type: "rating", gameId });
+  });
+
+  it("keeps a game waiting when KataGo fails its estimate, and later games wait behind it in order", async () => {
+    const logs: string[] = [];
+    ctl = new GameController({ engine, store, clock, botDelayMs: 0, log: (m) => logs.push(m) });
+    ctl.onEvent((e) => events.push(e));
+    ctl.setEngineState("ready");
+    const first = await ratedGame();
+    engine.failAnalyze = true;
+    await ctl.handleAction({ type: "resign" });
+    await ctl.ratingIdle();
+    expect(store.loadProfile()).toMatchObject({ rating: 10, ratingHistory: [], estimating: [first] });
+    expect(logs).toContainEqual(expect.stringMatching(/rank estimate for .* failed: fake analysis failure; it runs again/));
+    // KataGo answers again: the next game's end runs both, the older one first.
+    engine.failAnalyze = false;
+    clock.advance(60_000);
+    const second = await ratedGame();
+    expect(store.loadProfile().estimating).toEqual([first]);
+    await ctl.handleAction({ type: "resign" });
+    await ctl.ratingIdle();
+    const profile = store.loadProfile();
+    expect(profile.estimating).toBeUndefined();
+    expect(profile.ratingHistory.map((e) => [e.gameId, e.estimate?.moves])).toEqual([
+      [first, 8],
+      [second, 8],
+    ]);
   });
 
   it("gives the learner the profile's handicap stones on 9x9 unless the game picks its own bot", async () => {
@@ -894,7 +1067,7 @@ describe("GameController view contract", () => {
     expect(ctl.view().allowed).not.toContain("play"); // the bot is to move while the eval runs
     await flush();
     expect(ctl.view().status).toBe("paused");
-    expect(ctl.view().allowed).toEqual([...ALWAYS, "clear_overlay", "resign", "continue", "retry"]); // KataGo's line is drawn
+    expect(ctl.view().allowed).toEqual([...ALWAYS, "clear_overlay", "resign", "continue", "retry", "take_back"]); // KataGo's line is drawn
     await ctl.handleAction({ type: "next_problem" });
     expect(ctl.view().allowed).toEqual([...ALWAYS, "leave_problem", "play"]);
     await ctl.handleAction({ type: "leave_problem" });
@@ -1159,5 +1332,127 @@ describe("GameController tutor levels", () => {
     await ctl.handleAction({ type: "chat", text: "Is it the eye?" });
     await ctl.handleAction({ type: "leave_problem" });
     await expect(ctl.handleTutor({ type: "say", text: "Yes, the eye." })).rejects.toThrow(/chose Silent/);
+  });
+});
+
+describe("GameController take-backs and help", () => {
+  beforeEach(() => setup());
+
+  it("Take back removes the learner's last move and the bot's reply on their turn, at every tutor level", async () => {
+    await startGame();
+    engine.botMoves = ["G7"];
+    ctl.play(E5);
+    await flush();
+    expect(ctl.view().moves).toHaveLength(2);
+    expect(ctl.view().allowed).toContain("take_back");
+    await ctl.handleAction({ type: "set_tutor_level", level: "silent" });
+    await ctl.handleAction({ type: "take_back" });
+    const v = ctl.view();
+    expect(v.moves).toHaveLength(0);
+    expect(v.toPlay).toBe("B");
+    expect(events.at(-1)).toEqual({ type: "undo", gameId: v.gameId, moves: 0, toPlay: "B", by: "human" });
+    // Nothing left to take back.
+    expect(v.allowed).not.toContain("take_back");
+    await expect(ctl.handleAction({ type: "take_back" })).rejects.toThrow(/no move of yours/);
+    // The replacement is the learner's second try; the first attempt is kept.
+    engine.hold = true;
+    ctl.play(D4);
+    expect(ctl.view().moves[0]!.assist).toEqual(["retry"]);
+    ctl.flush();
+    expect(store.loadGame(v.gameId!)!.takenBack).toMatchObject([{ moveNumber: 1, by: "human", record: { move: { color: "B", point: E5 } } }]);
+  });
+
+  it("Take back waits while the move is evaluated or the bot is thinking", async () => {
+    await startGame();
+    engine.hold = true;
+    ctl.play(E5);
+    expect(ctl.view().allowed).not.toContain("take_back");
+    await expect(ctl.handleAction({ type: "take_back" })).rejects.toThrow(/Wait for the bot/);
+    expect(ctl.view().allowed).toContain("retry"); // Try again's rule is unchanged
+  });
+
+  it("Take back goes further back than a move the tutor already took back", async () => {
+    setup({ tutor: true });
+    await startGame();
+    engine.botMoves = ["G7"];
+    ctl.play(D4);
+    await flush();
+    engine.lossAfter(["D4", "G7", "C3"], 6);
+    ctl.play(C3);
+    await flush();
+    await ctl.handleTutor({ type: "rethink", text: "Look again." });
+    expect(ctl.view().moves).toHaveLength(2);
+    expect(ctl.view().allowed).not.toContain("retry");
+    expect(ctl.view().allowed).toContain("take_back");
+    await ctl.handleAction({ type: "take_back" });
+    expect(ctl.view().moves).toHaveLength(0);
+    expect(ctl.view().moment?.state).toBe("resolved");
+    ctl.flush();
+    const saved = store.loadGame(ctl.view().gameId!)!;
+    expect(saved.takenBack!.map((t) => [t.moveNumber, t.by, t.before])).toEqual([
+      [3, "tutor", ["D4", "G7"]],
+      [1, "human", []],
+    ]);
+    expect(saved.assistance).toEqual({ hints: 0, takeBacks: 1, rethinks: 1 });
+  });
+
+  it("marks a move played after KataGo's hint as hinted and shown, only in that position", async () => {
+    await startGame();
+    engine.botMoves = ["G7"];
+    await ctl.handleAction({ type: "ask_tutor", text: "where?" });
+    expect(ctl.view().chat.map((m) => m.from)).toContain("user");
+    expect(ctl.view().overlay?.marks).toHaveLength(1);
+    ctl.play(D4);
+    await flush();
+    expect(ctl.view().moves[0]!.assist).toEqual(["hint", "shown"]);
+    ctl.play(C3);
+    await flush();
+    expect(ctl.view().moves[2]!.assist).toBeUndefined();
+    ctl.flush();
+    expect(store.loadGame(ctl.view().gameId!)!.assistance).toEqual({ hints: 1, takeBacks: 0, rethinks: 0 });
+  });
+
+  it("marks a move hinted once the tutor answers the hint, and shown after a drawing", async () => {
+    setup({ tutor: true });
+    await startGame();
+    engine.botMoves = ["G7", "G3", "C7"];
+    await ctl.handleAction({ type: "ask_tutor" });
+    ctl.play(E5); // asked, but the tutor never answered: no help
+    await flush();
+    expect(ctl.view().moves[0]!.assist).toBeUndefined();
+    await ctl.handleAction({ type: "ask_tutor" });
+    await ctl.handleTutor({ type: "say", text: "Which corner is open?" });
+    ctl.play(D4);
+    await flush();
+    expect(ctl.view().moves[2]!.assist).toEqual(["hint"]);
+    // A drawing on the learner's turn, hidden before they play, still helped.
+    await ctl.handleTutor({ type: "mark", points: ["C3"] });
+    await ctl.handleAction({ type: "clear_overlay" });
+    ctl.play(C3);
+    await flush();
+    expect(ctl.view().moves[4]!.assist).toEqual(["shown"]);
+  });
+
+  it("marks the move after a rethink, and the help survives a restart", async () => {
+    setup({ tutor: true });
+    await startGame();
+    engine.lossAfter(["C3"], 6);
+    ctl.play(C3);
+    await flush();
+    await ctl.handleTutor({ type: "rethink", text: "Look again." });
+    await ctl.handleTutor({ type: "show", moves: ["E5"] });
+    engine.hold = true;
+    ctl.play(D4);
+    expect(ctl.view().moves[0]!.assist).toEqual(["rethink", "shown"]);
+    ctl.flush();
+    const restored = new GameController({ engine: new FakeEngine(), store, clock, botDelayMs: 0 });
+    expect(restored.restoreLastGame()).toBe(true);
+    expect(restored.view().moves[0]!.assist).toEqual(["rethink", "shown"]);
+    // Ending the restored game keeps the first attempt and the help.
+    await restored.handleAction({ type: "resign" });
+    const saved = store.lastGame({ finished: true })!;
+    expect(saved.takenBack).toHaveLength(1);
+    expect(saved.summary!.assistance).toEqual({ hints: 0, takeBacks: 0, rethinks: 1 });
+    expect(saved.summary!.mistakes).toMatchObject([{ moveNumber: 1, move: "C3", takenBack: 0 }]);
   });
 });

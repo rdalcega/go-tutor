@@ -85,6 +85,21 @@ describe("parseInvocation", () => {
     usage(["tag", "g12", "14", "laziness"]);
     usage(["tag", "g12", "x", "shape"]);
     usage(["tag", "g12"]);
+    // A taken-back first attempt at that move.
+    expect(cmd(["tag", "g12", "14", "shape", "--taken-back", "too", "slow"])).toEqual({
+      type: "tag",
+      gameId: "g12",
+      moveNumber: 14,
+      category: "shape",
+      note: "too slow",
+      takenBack: true,
+    });
+    usage(["tag", "g12", "14", "shape", "--taken-back=yes"]);
+    // A numbered try (review's "first try #2"), as the next token or with =.
+    expect(cmd(["tag", "g12", "14", "shape", "--taken-back", "2", "too", "slow"])).toMatchObject({ moveNumber: 14, note: "too slow", takenBack: 2 });
+    expect(cmd(["tag", "g12", "14", "shape", "--taken-back=1"])).toMatchObject({ takenBack: 1 });
+    expect(cmd(["tag", "g12", "14", "--taken-back", "shape"])).toMatchObject({ category: "shape", takenBack: true });
+    usage(["tag", "g12", "14", "shape", "--taken-back", "0"]);
   });
 
   it("rejects bad usage", () => {

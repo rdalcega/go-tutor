@@ -21,18 +21,20 @@ The contract for every boundary is `src/shared/types.ts`.
 |---|---|
 | `src/shared/types.ts` | All cross-boundary types. |
 | `src/shared/coords.ts` | `toGtp(point, size)`, `fromGtp(gtp, size)` (columns `A`–`T` skipping `I`; row 1 at the bottom), `movePoint(move)`, `moveGtp(move, size)`, `samePoint`. |
-| `src/shared/allowed.ts` | `allowedActions(state)`: the browser actions the server accepts in a given state (mode, status, result, moment, turn, engine, tutor, problem, drawing on the board), used by the controller and the UI mock. |
-| `src/shared/text.ts` | Wording shared by server, CLI and UI: `colorName`, `categoryLabel`, `round1`, `formatScore`, `TUTOR_LEVEL_TEXT` (each level's label, the learner's description and the tutor's), `tutorLevelChangedText` (the chat line for a level change), `comeBackText` (when a problem is due again). |
+| `src/shared/allowed.ts` | `allowedActions(state)`: the browser actions the server accepts in a given state (mode, status, result, moment, turn, engine, tutor, problem, drawing on the board), used by the controller and the UI mock; `retryBlocked` (Try again) and `takeBackBlocked` (Take back) say why a take-back can't happen. |
+| `src/shared/text.ts` | Wording shared by server, CLI and UI: `colorName`, `categoryLabel`, `round1`, `formatScore`, `TUTOR_LEVEL_TEXT` (each level's label, the learner's description and the tutor's), `tutorLevelChangedText` (the chat line for a level change), `comeBackText` (when a problem is due again), `assistText` ("3 hints, 2 take-backs"), `estimateRankText` and `rankEstimateText` ("Rank estimate 18k from 34 unassisted moves (3 hints, 2 take-backs)"). |
 | `src/shared/schedule.ts` | Leitner scheduling for practice problems (`BOX_INTERVALS`, `MAX_BOX`, `resultOf`, `nextBox`, `schedule`), used by the server's problems and the UI mock. |
 | `src/shared/rank.ts` | `rankToRating("20k") → 10`, `ratingToRank(10) → "20k"` on the scale 30k=0 … 1k=29, 1d=30 … 9d=38. |
-| `src/engine/` | Pure Go rules: `GoGame` class (play/pass/undo, captures, suicide illegal, positional superko; `before(n)` copies the game before move n from its history, `fromBoard` sets up a position), `gameBefore(settings, moves, n)` (replays a saved move list), `boardFromDiagram`, area scoring with komi, dead-stone input from KataGo ownership, `toAscii(board)`, SGF read/write. No I/O. |
+| `src/engine/` | Pure Go rules: `GoGame` class (play/pass/undo, captures, suicide illegal, positional superko; `before(n)` copies the game before move n from its history, `fromBoard` sets up a position), `gameBefore(settings, moves, n)` (replays a saved move list), `movesFromLine`/`gameFromLine` (a GTP move line, colors alternating from the first mover, e.g. a taken-back move's position), `boardFromDiagram`, area scoring with komi, dead-stone input from KataGo ownership, `toAscii(board)`, SGF read/write. No I/O. |
 | `src/server/katago.ts` | Long-lived `katago analysis` child process speaking the JSON analysis protocol; query queue with ids; `analyze(position, opts)`, `botMove(position, rank)`, `ownership`. |
 | `src/server/game.ts` | `GameController`: owns the current game, turns, bot replies, per-move evals, teaching-moment detection, pause + fallback timer, chat log, the profile and problem writes, producing `GameView` (with the actions it accepts) and `TutorEvent`s. Takes an engine interface so tests can use a fake. |
 | `src/server/practice.ts` | `PracticeSession`: the practice problem on the board (attempts, judging against KataGo, its overlay and view) while the game waits underneath; the controller delegates to it in problem mode and writes the problem's progress. |
 | `src/server/common.ts` | What the controller and the session share: `UserError`, the clock, and turning GTP into ghost stones and marks. |
 | `src/server/bridge.ts` | Tutor bridge: event sequence numbers, `data/events.jsonl` append log, SSE fan-out to `tutor watch` connections, `tutorAttached` tracking, applying `TutorCommand`s to the controller. |
-| `src/server/store.ts` | Persistence under `data/` (path overridable with `GO_TUTOR_DATA`): `games/<id>.sgf` + `games/<id>.json` (settings, moves with evals, result, summary), `games/index.json` (creation time and finished flag per game, so finding the last game reads one file; read and checked against the files once at startup, then kept in memory), `profile.json`, `problems.json`. The controller writes a game at the end of the tick that changed it (one action's burst of changes is one write), and at once for a new game, at game end and on shutdown (SIGINT, SIGTERM, SIGHUP, beforeExit). |
-| `src/server/profile.ts` | Learner memory, pure functions over `Profile`: rank adaptation (`applyGame`), heuristic mistake categories (`classifyMistake`), tutor tags (`applyTag`), the adaptive mistake threshold, and `recommendFocus`. See "Learner profile". |
+| `src/server/store.ts` | Persistence under `data/` (path overridable with `GO_TUTOR_DATA`): `games/<id>.sgf` + `games/<id>.json` (settings, moves with evals, result, summary), `games/index.json` (creation time and finished flag per game, so finding the last game reads one file; read and checked against the files once at startup, then kept in memory), `profile.json`, `problems.json`, and `backup(paths)` (copies data files into a new `backup-<time>/` folder before the migration rewrites them). The controller writes a game at the end of the tick that changed it (one action's burst of changes is one write), and at once for a new game, at game end and on shutdown (SIGINT, SIGTERM, SIGHUP, beforeExit). |
+| `src/server/profile.ts` | Learner memory, pure functions over `Profile`: a finished game's tallies and stats (`applyGame`), the rating from its rank estimate (`applyEstimate`, `combinedEstimate`), heuristic mistake categories (`classifyMistake`, `classifyPlayed` for a move on its replayed position), the summary pieces the controller and the migration share (`mistakeEntry`, `firstAttemptMistakes`, `totalPointLoss`, `noAssistance`), `mistakeKey` (which mistake: game, move, first-attempt index), tutor tags (`applyTag`), the adaptive mistake threshold, and `recommendFocus`. See "Learner profile". |
+| `src/server/estimate.ts` | The rank estimate from move quality: which human moves count (`rankSamples`), their human-SL probabilities at 13 rank profiles (`movePolicies`), the maximum-likelihood rank (`fitRank`, `peakRating`), `estimateRank`. See "Rank estimate". |
+| `src/server/migrate.ts` | The one-time re-estimate for data from before rating model 2: `reconstructGame` (first attempts and help from `events.jsonl`, pure) and `migrateRatingModel`. See "Rating model migration". |
 | `src/server/problems.ts` | Practice problems, pure functions over `StoredProblem`: problems from a finished game's mistakes, the built-in merge, position hashes, Leitner scheduling (`src/shared/schedule.ts`), which problem comes next, the `GET /api/problems` body. See "Practice problems". |
 | `src/server/builtin-problems.ts` | The built-in starter set: a dozen classic 9×9 problems as readable board diagrams with their answers (verified against real KataGo in `test/server/katago.integration.test.ts`). |
 | `src/server/index.ts` | `node:http` server on port 4747 (`PORT` env): JSON API, SSE, serves `dist/` in production. |
@@ -81,9 +83,35 @@ The contract for every boundary is `src/shared/types.ts`.
      move is evaluated and recorded, and the bot replies.
 4. When not paused, the bot replies (with a small delay so it feels natural). Emit `move` (by bot).
 5. Game ends on two consecutive passes (score with KataGo ownership to remove dead stones) or resign.
-   Build the `GameSummary` (mistakes categorized), update the profile (its `RatingChange` goes into
-   `summary.rating`), save the game, emit `game_end`. Then, in the background, each mistake becomes a
-   practice problem (see "Practice problems").
+   Build the `GameSummary` (mistakes categorized, taken-back first attempts included, the help the
+   learner had), update the profile's tallies and stats, save the game, emit `game_end` (a rated
+   game's `summary.rating` is `pending`, and the game id joins the profile's `estimating` list).
+   Then, in the background, each mistake becomes a practice problem (see "Practice problems"), and
+   the rank estimates of the games in `estimating` run in order (see "Rank estimate"): each rating
+   change goes into the profile, the game's `summary.rating` and a `rating` event, and bumps
+   `profileVersion`. A game waits in `estimating` (on disk, so a restart resumes it) while KataGo
+   isn't ready or fails its estimate, and while the rating migration hasn't run (it covers the
+   game); the next engine-ready or game end runs it. Only a game with too few unassisted moves for
+   an estimate is rated from its result alone.
+
+**Take-backs.** Try again (the moment banner, `retry`) and Take back (the controls, `take_back`)
+take back the learner's last move and the bot's reply if it came; the tutor's `rethink` does the
+same for a moment's move. Try again needs a move of the learner's and stops once the open moment's
+move is already taken back (so a slow double press can't undo more); Take back works at any tutor
+level, on the learner's turn or in a pause (not while their move is evaluated or the bot thinks, and
+not after two passes), and also past a moment the tutor took back. Every take-back emits `undo`
+(`by: "human"` for both learner buttons, `"tutor"` for rethink). The taken-back human move is not
+lost: it goes into `SavedGame.takenBack` (`TakenBackMove`: move number, the record with its eval and
+level, who took it back, when, the moves before it as GTP so its position survives later
+take-backs, its heuristic category and tag), and a tag the profile already counted moves with it.
+
+**Help** (`MoveRecord.assist`, human moves): `"hint"` when the move was played after a hint for that
+position was answered (KataGo's, or a tutor `say`/`show`/`mark` after a hint request on the
+learner's turn), `"retry"`/`"rethink"` when it replaces a taken-back move, `"shown"` when the tutor
+drew on that position on the learner's turn (or KataGo's hint circled a point), even if the learner
+hid the drawing. Help is kept per position (move count) and cleared by the next move or take-back.
+`SavedGame.assistance` / `GameSummary.assistance` count hint requests, the learner's take-backs and
+the tutor's rethinks. Assisted moves don't count for the rank estimate.
 
 A move's point loss is KataGo's root lead before it minus the root lead after it, except for a move
 KataGo searched well (50+ visits) in the position before: that one loses its candidate's lead below
@@ -124,8 +152,9 @@ level, not the current one), and a moment keeps its move's level as `TeachingMom
   or leaving a problem drop an unanswered question). Hints work as usual. Practice
   problems, a moment opened before the switch, and the post-game review are not restricted.
 
-`ask_tutor` emits `hint_request` (with the current ASCII board). With no tutor attached the server
-answers with KataGo's top move marked as a hint.
+`ask_tutor` (the Hint button next to the chat input, with any typed text as `text`, or the H key)
+emits `hint_request` (with the current ASCII board) and adds the text to the chat. With no tutor
+attached the server answers with KataGo's top move marked as a hint.
 
 `chat` from the user emits `user_message`. On a practice problem it carries `problemId` (and no moment
 id), since the message is about the problem on the board, not the game waiting underneath. With no
@@ -151,7 +180,7 @@ tutor attached, the server adds a system reply saying the tutor isn't connected.
   actions `POST /api/action` accepts right now (the same checks it makes; the rules are the pure
   `allowedActions` in `src/shared/allowed.ts`, shared with the UI's `?mock` server), which the UI uses for its
   buttons, board input and keys; and `profileVersion`, bumped by every profile change (a game or
-  problem ends, a tag), so the UI knows when to fetch the profile again. Move, teaching-moment and
+  problem ends, a rank estimate arrives, a tag), so the UI knows when to fetch the profile again. Move, teaching-moment and
   hint events carry the board `size`, so `tutor watch` names points in GTP without a lookup. For an
   older logged event without `size`, `watch` uses the size from that game's `game_start` if it saw
   one, else prints the move as `(coords unavailable)`; it never fails on an event it can't read.
@@ -164,18 +193,28 @@ tutor attached, the server adds a system reply saying the tutor isn't connected.
 
 ## Learner profile
 
-`data/profile.json`, updated by `src/server/profile.ts` when a game finishes (not when abandoned) and
-when the tutor tags a mistake.
+`data/profile.json`, updated by `src/server/profile.ts` when a game finishes (not when abandoned),
+when its rank estimate is in, and when the tutor tags a mistake.
 
-- **Rating** (rank scale, 20k = 10). Expected score `1 / (1 + 10^((bot - rating) / 3))` (one rank ≈ 68%),
+- **Rating** (rank scale, 20k = 10; `ratingModel: 2`). Mostly the quality of the learner's moves:
+  each rated game (played to a result, 10+ human moves; resignations count) gets a rank estimate
+  (see "Rank estimate"), and `combinedEstimate` averages the games' estimates weighted by
+  `0.8^age × unassisted moves` (age 0 = the newest estimated game). The result adds a light Elo
+  nudge: rating = `(1 − w) × combined + w × (before + Elo change)`, with `w = 0.2 × (1 − share of the
+  learner's moves with help)`. The Elo change: expected score `1 / (1 + 10^((bot - rating) / 3))` (one rank ≈ 68%),
   where `bot` is the bot's rank minus handicap stones given to the learner (1.5 ranks per stone on 9×9,
-  1.25 on 13×13, 1 on 19×19; rough). Change = `2 × step × (score − expected)`, with step 1.5 for the
-  first five rated games, then 1.25, 1, 0.75 and 0.5 from then on, so an even win early moves 1.5
-  ranks. Resignations count; games under 10 human moves don't change the rating. Each rated game
-  appends to `ratingHistory` (rating after, delta, bot rank, handicap); the step counts only entries
-  with a `delta` (older profiles logged every game without one, and those never moved the rating).
-  A game already in `ratingHistory` or `recentGames` is never applied twice (the profile is saved
-  just before the finished game, so a crash between the two writes can bring the game back).
+  1.25 on 13×13, 1 on 19×19; rough); change = `2 × step × (score − expected)`, with step 1.5 for the
+  first five rated games, then 1.25, 1, 0.75 and 0.5 from then on. Before any game has an estimate
+  the Elo change alone moves the rating. A floor estimate ("20k or weaker") is an upper bound, not
+  a value: in `combinedEstimate` it counts as `min(10, the Elo rating)`, so below 20k the results
+  decide and the handicap stones still apply. `applyGame` (at game end) adds the game to the
+  profile's `estimating` list; `applyEstimate` (when the estimate is in) takes it off, appends to
+  `ratingHistory` (rating after, delta, bot rank, handicap, `estimate`: rank, floor, unassisted
+  moves, hints, take-backs, rethinks) and sets the next bot; it never sets `ratingModel` (only the
+  migration does). The step counts only entries with a `delta` (older profiles
+  logged every game without one, and those never moved the rating). Neither applies a game twice
+  (the profile is saved just before the finished game, so a crash between the two writes can bring
+  the game back).
 - **Next bot**: `round(rating)` as a rank, clamped to KataGo's human-SL range 20k … 9d. Below 20k the
   bot stays at 20k and `profile.handicap` is 2–4 stones when that is the nearer match for the
   learner's strength. A new 9×9 game as Black without an explicit bot rank or handicap uses them, with
@@ -190,9 +229,66 @@ when the tutor tags a mistake.
   direction (loss ≥ 1.5× threshold with the best move 4+ lines away), else other. Heuristic categories
   are counted in `mistakeCounts`/`recentMistakes` (cap 50) at game end; tags are counted when made
   and replace whatever the move was counted as. A tag also marks the category as practiced.
+  Taken-back first attempts count like any move: their mistakes are in the summary (with
+  `takenBack`, the index in `SavedGame.takenBack`), the tallies (`recentMistakes[].takenBack`) and
+  the tutor tags them with `takenBack: n`, the try's number among those taken back at that move
+  number (review's "first try #n"; `true` for the only one, an error listing them when there are
+  several). One key names a mistake everywhere (`mistakeKey`: game, move number, and `#t<index>`
+  for a first attempt): tallies, tags, problem sources and the migration.
 - **Threshold**: after a 9×9 game with more than 6 mistakes, +0.5 (max 6). After three games at the
   current threshold whose average loss per human move is under 1.5, −0.5 (min 2). Changes go to
-  `thresholdHistory`; `recentGames` (cap 20) keeps the per-game stats.
+  `thresholdHistory`; `recentGames` (cap 20) keeps the per-game stats (first attempts included).
+
+## Rank estimate
+
+`src/server/estimate.ts`, run by the controller in the background after a rated game (one at a
+time, queued with the migration). The samples are the learner's moves without help (`assist`
+empty), the final ones and the taken-back first attempts (each in its own position), leaving out
+passes and the opening (moves 1–4 on 9×9, 1–8 on 13×13, 1–16 on 19×19: every rank opens alike on a
+small board, and one odd opening move swung a 5k bot's game from 5k to 1d in the validation runs).
+With fewer than 5 samples there is no estimate. For each sample and each of 13 human-SL profiles
+(20k, 18k, 15k, 12k, 10k, 8k, 5k, 3k, 1k, 1d, 3d, 5d, 9d) one query with
+`overrideSettings.humanSLProfile`, `includePolicy`, `maxVisits: 1` and `BACKGROUND_PRIORITY` (−10,
+below the game's queries; problem generation's deeper analyses and the migration use it too), at
+most twice KataGo's concurrency in flight (about 4 ms each; a 9×9 game is a few seconds). The first
+failed query fails the estimate and stops the other workers. The log-likelihood per profile is the sum of `log(max(0.001, humanPolicy[move]))`;
+the estimate is the best profile moved toward its better neighbor by a parabola through the three
+(unevenly spaced on the rank scale), clamped to them; at the 20k end it is 10 with `floor: true`
+("20k or weaker", the model goes no lower). Validated against real KataGo
+(`test/server/rank-estimate.integration.test.ts`): human-SL bots at known ranks playing 9×9 games
+against a 12k bot read, per game, 18k → 20k…14k, 12k → 16k…10k, 5k → 6k…4k, 1d → 2k…5d (one game
+is noisy; the weak end leans toward the floor: 18k games pooled read 20k).
+
+## Rating model migration
+
+Profiles without `ratingModel: 2` are re-estimated once, when KataGo is first ready
+(`GameController.migrateRatings`, from `index.ts`; afterwards it only runs the estimates still in
+`estimating`). Games finished before it ran wait in `estimating` and are part of it. All its KataGo
+work (at `BACKGROUND_PRIORITY`) comes before any write; if any query fails (an engine error or
+crash, no human policy) it throws `MigrationAborted` having written nothing (no backup, games,
+profile or problems; `ratingModel` unchanged), and the controller logs it and tries again after 1,
+4 and 16 minutes or at the next engine-ready, at most 4 times per server run. `migrateRatingModel`:
+- reads every finished (not abandoned) game and `events.jsonl` (both rotations). `reconstructGame`
+  replays the game's events: `move` events rebuild the move stack, `teaching_moment` events carry the
+  evals of moves later taken back, `undo` events (by human or tutor) pop them into first attempts
+  (with the moves before them) and mark the next human move `retry`/`rethink`, and a `hint_request`
+  marks the next move `hint` when the saved chat has a tutor message or KataGo's hint between the
+  request and that move. The rebuild counts only when its moves replay to exactly the saved game;
+  otherwise the saved moves are used without help flags (and any first attempts found are kept).
+- categorizes each taken-back mistake (`classifyPlayed`, as the controller does, with ownership
+  from 100-visit analyses), rank-estimates each rated game, works out the practice problems for the
+  taken-back mistakes on a scratch copy, and replays the rating from 20k through `applyEstimate` in
+  game order. With fewer than 10 unassisted moves in all (every estimate ran; the games just have
+  too few moves without help), the rating starts over at 20k (botRank 20k).
+- then, synchronously: backs up `profile.json`, `problems.json` and the game files to
+  `backup-<time>/`, writes the games (first attempts, help, summaries with the taken-back mistakes,
+  built with the controller's helpers, and the new rating change), the profile as it is on disk now
+  (rating, history, next bot, `ratingModel: 2`; only the migrated games leave `estimating`, so a
+  game that finished meanwhile keeps waiting; taken-back mistakes added to the tallies once, by
+  `mistakeKey`; `recentGames` stats recomputed with them) and the new problems with fresh ids
+  (deduplicated by position and source move).
+- logs one line and adds a system chat line ("Your rank was re-estimated from your 2 games: 19k (was
+  17k) …"). Running it again gives the same result.
 - **Focus** (`recommendFocus`): recent mistakes weighted 0.75^age per game (newest game = 1), plus a
   coverage boost of 0.1 per game since a category was last practiced (max 0.5, never practiced = 0.5).
   `other` is never recommended. Suggests `problems` for a local category (life and death, capturing
@@ -216,7 +312,8 @@ which merges in the built-in set) holds every problem with its spaced-repetition
   visits first (as many at once as KataGo runs queries), and so is a position where a ko ban applied (some empty point illegal only by positional superko, not just the immediate retake; the problem drops the history, so the
   recapture is legal there and the game's answers may not hold); if that analysis fails, a ko
   position gets no problem. No problem when KataGo's best is a pass. One problem per position (`positionHash` of board and side to move) and per source
-  move. Ids are `p1`, `p2`, …
+  move (`mistakeKey`: game, move number, and for a taken-back first attempt its index, `source.takenBack`;
+  such a problem is set up from the first attempt's own position). Ids are `p1`, `p2`, …
 - **Built-ins** (`b-…`): 12 classic 9×9 positions (life and death, snapbacks, a ladder, a net, a
   connection, capturing races) with the rest of the board settled so the local answer decides the
   game. Their definitions come from the source file (parsed once at startup); only progress and answers found
@@ -247,7 +344,7 @@ which merges in the built-in set) holds every problem with its spaced-repetition
   number, first try, point loss, whether the answer is now shown, KataGo's best and PV). An attempt
   KataGo can't check doesn't count. In problem mode `show` and `mark` draw on the problem position
   (`show` starts with the learner's color), `say` works, and game-only actions (pass, resign, hint,
-  Try again, rethink) are refused with a message. The game waiting underneath stays quiet: a move
+  Try again, Take back, rethink) are refused with a message. The game waiting underneath stays quiet: a move
   evaluated during practice opens its teaching moment, and a tutor timeout's fallback is shown, only
   when the learner goes back to the game. A tutor who attaches again while that fallback waits gets a
   fresh 30 s to take the moment instead.
@@ -265,8 +362,14 @@ unless `--json`).
   `clear`, `resume` (with a drawing up it prints a second line, "still paused: …", since the pause
   then waits for the learner's Continue; `--json` adds `stillPaused` to the view, and `state` shows the
   moment "waiting for the learner to press Continue"), `claim <momentId>`, `new-game [--size 9] [--rank 20k] [--color B]`,
-  `problem [id]` (start a practice problem, the next due one without an id), `tag <gameId> <move#> <category> [note]`.
-- `summary` — learner profile: rank estimate with the trend over the last 5 rated games, bot rank (and
+  `problem [id]` (start a practice problem, the next due one without an id), `tag <gameId> <move#> <category> [note] [--taken-back [n]]`
+  (`--taken-back n`: the taken-back try #n at that move, as review numbers them; bare `--taken-back`
+  when there is only one).
+- `watch` prints `GAME_END …` with the help the learner had and "rank estimate running (a RATING line
+  follows)" for a rated game, then `RATING <gameId> rank estimate 18k from 25 unassisted moves (1 hint);
+  rating 10 -> 11.9 (+1.9, rank 18k); next bot 18k`.
+- `summary` — learner profile: rank estimate with the trend over the last 5 rated games, the last
+  game's move-quality estimate (rank, unassisted moves, help), each recent rated game's estimate, bot rank (and
   handicap), the tutor level and what it means for the tutor, threshold and its last change, mistake counts by category with the last 3 games and a
   rising/falling trend, recent mistakes, the recommended focus and its reason, and practice problems
   (counts from games and built-in, due now by category, per box, and the next few due). Used at
@@ -281,10 +384,12 @@ unless `--json`).
 - `watch` prints `PROBLEM_START <id> <category> <color> to play (<source>, box N) answers … — "<prompt>"`
   and `PROBLEM <id> attempt N <move> correct, first try | wrong, lost X (…; another attempt left | out of
   attempts, answer shown) — best …, pv …` with a hint of what to do next.
-- `review <gameId|last>` — compact post-game review: result, rating change and next bot, one line per
-  mistake (move, played, best, loss, category and whether it is the heuristic's, KataGo's PV), win-rate
-  swings of 15+ points (the learner's moves and the bot's), the ASCII board before each of the 3 worst
-  mistakes, and the compact move list.
+- `review <gameId|last>` — compact post-game review: result, rank estimate, rating change and next
+  bot, the help (counts, and which moves had help), one line per mistake (move, played, best, loss,
+  category and whether it is the heuristic's, KataGo's PV; a taken-back first attempt says "first try #n,
+  taken back by the tutor/learner"), win-rate swings of 15+ points (the learner's moves and the bot's),
+  the ASCII board before each of the 3 worst mistakes (a first attempt's from its own position), and
+  the compact move list (`*` = played with help).
 
 ASCII board format (used by `toAscii` and in events): column letters on top and bottom, row numbers on
 both sides, `X` black, `O` white, `.` empty, `+` star points, the last move wrapped in parentheses.
@@ -292,12 +397,17 @@ both sides, `X` black, `O` white, `.` empty, `+` star points, the last move wrap
 ## UI
 
 One screen: board on the left (canvas, scales to fit, wood background, star points, coordinates), side
-panel on the right with: game controls (New game, Pass, Hint, Practice, Resign), a status line (whose turn, captures,
+panel on the right with: game controls (New game, Pass, Take back, Practice, Resign), a status line (whose turn, captures,
 bot rank, tutor connected or not), an eval strip (point loss of the last human move), the teaching-moment
-banner (Continue / Try again buttons, countdown while waiting for the tutor), a Progress card (rank
-estimate, next bot with any handicap, games, top 2 mistake categories, rating sparkline; fetched from
-`GET /api/profile` on load and whenever the view's `profileVersion` changes), and the chat panel. The result dialog shows the
-game's rating change. The new-game form's bot defaults to "Auto" (the profile's rank and handicap). Mobile
+banner (Continue / Try again buttons, countdown while waiting for the tutor), a Progress card (rank,
+the last game's estimate ("18k · 34 moves", the full sentence in its tooltip, "estimating…" while it
+runs), next bot with any handicap, games, top 2 mistake categories, rating sparkline; fetched from
+`GET /api/profile` on load and whenever the view's `profileVersion` changes), and the chat panel,
+whose form has the Hint button between the input and Send (the typed text, if any, goes with the
+hint as the question; H still asks for one). Take back follows `allowed` (`take_back`). The result
+dialog shows "Estimating your rank from your moves…" until the estimate is in, then the game's
+rating change with its rank estimate ("Rank estimate 18k from 34 unassisted moves (3 hints, 2
+take-backs)"). The new-game form's bot defaults to "Auto" (the profile's rank and handicap). Mobile
 width stacks the panel under the board. Ghost stones and marks from `overlay` are drawn on the board;
 KataGo's highlighted move too (`overlay.best`): the UI draws only what the overlay holds, so hiding
 it hides everything. While one is up, a "✕ Hide" button next to the board caption (and Esc, unless
@@ -315,7 +425,7 @@ Practice (or the tutor's `problem`) switches to problem mode: a problem card rep
 with the category and source, the prompt, attempts left, the verdict (correct, or the point loss of
 the attempt and, once out of attempts, the answer; once the problem is over, when it comes back), and
 Next problem / Back to playing buttons. The
-board takes clicks and shows the hover stone as in games; Pass, Hint and Resign are disabled.
+board takes clicks and shows the hover stone as in games; Pass, Take back, Hint and Resign are disabled.
 Live updates arrive over `GET /api/events` (SSE of `GameView`; each connection starts with the current
 view, and `GET /api/state` is fetched only if the stream never opens). Controls follow the view's
 `allowed` actions. The canvas draws the scene into an offscreen layer once per change; the hover
