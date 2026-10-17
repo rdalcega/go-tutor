@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   applyEstimate,
   applyGame,
+  maxMoments,
   applyProblemResult,
   applyTag,
   MIN_BOT_RATING,
@@ -407,6 +408,41 @@ describe("mistake threshold", () => {
     const low = { ...defaultProfile(), mistakeThreshold: 2 };
     for (const id of ["a", "b", "c"]) applyGame(low, game({ gameId: id, loss: 0.5, threshold: 2 }));
     expect(low.mistakeThreshold).toBe(2);
+  });
+
+  it("scales the too-many-moments limit with the board: more than 6 on 9×9, 9 on 13×13, 12 on 19×19", () => {
+    expect(([9, 13, 19] as const).map(maxMoments)).toEqual([6, 9, 12]);
+    for (const [size, limit] of [[9, 6], [13, 9], [19, 12]] as const) {
+      const at = defaultProfile();
+      const sized = (n: number) => game({ settings: { ...settings, size }, summary: { moves: 200, mistakes: mistakes(n), totalPointLoss: 5 * n } });
+      expect(applyGame(at, sized(limit)).threshold).toBeUndefined();
+      expect(at.mistakeThreshold).toBe(4);
+      const over = defaultProfile();
+      expect(applyGame(over, sized(limit + 1)).threshold).toEqual({ from: 4, to: 4.5, reason: `${limit + 1} teaching moments in one ${size}×${size} game` });
+      // The one 9×9 value moves, so every board's threshold moves with it.
+      expect(over.mistakeThreshold).toBe(4.5);
+    }
+  });
+
+  it("lowers on the average loss per move scaled to 9×9", () => {
+    // 2.5 points per move on 19×19 is 1.25 on the 9×9 scale: careful enough to lower.
+    const big = defaultProfile();
+    const on19 = (id: string, loss: number) => game({ gameId: id, loss, settings: { ...settings, size: 19 } });
+    expect(applyGame(big, on19("a", 2.5)).threshold).toBeUndefined();
+    expect(applyGame(big, on19("b", 2.5)).threshold).toBeUndefined();
+    expect(applyGame(big, on19("c", 2.5)).threshold).toEqual({ from: 4, to: 3.5, reason: "average loss 1.3 pts per move (scaled to 9×9) over the last 3 games" });
+    // 2 points per move on 13×13 is 1.33: lowers; 2.4 is 1.6: doesn't. Unscaled, both would stay.
+    const mid = defaultProfile();
+    for (const id of ["a", "b", "c"]) applyGame(mid, game({ gameId: id, loss: 2, settings: { ...settings, size: 13 } }));
+    expect(mid.mistakeThreshold).toBe(3.5);
+    const careless = defaultProfile();
+    for (const id of ["a", "b", "c"]) applyGame(careless, game({ gameId: id, loss: 2.4, settings: { ...settings, size: 13 } }));
+    expect(careless.mistakeThreshold).toBe(4);
+    // Mixed sizes: each game is scaled by its own board, 1, 2 / 2 = 1 and 2 / 1.5 = 1.33: under 1.5.
+    const mixed = defaultProfile();
+    applyGame(mixed, game({ gameId: "a", loss: 1 }));
+    applyGame(mixed, game({ gameId: "b", loss: 2, settings: { ...settings, size: 19 } }));
+    expect(applyGame(mixed, game({ gameId: "c", loss: 2, settings: { ...settings, size: 13 } })).threshold).toMatchObject({ from: 4, to: 3.5 });
   });
 });
 

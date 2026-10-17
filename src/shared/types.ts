@@ -202,6 +202,14 @@ export interface GameView {
   profileVersion: number;
   /** The browser actions the server accepts right now (the same checks POST /api/action enforces). */
   allowed: ClientAction["type"][];
+  /**
+   * The mistake threshold in points for this view: a game's (`thresholdFor` of the profile's 9×9
+   * threshold on its board), a finished game's own (`playedThreshold`), and in idle or problem mode
+   * the current game's or else the next 9×9 game's.
+   */
+  mistakeThreshold: number;
+  /** A finished game's summary (its mistakes worst first, as the server counted them); absent otherwise. */
+  summary?: GameSummary;
 }
 
 /** POST /api/action and POST /api/tutor. */
@@ -363,7 +371,12 @@ export type TutorEvent =
 
 export interface GameSummary {
   moves: number;
-  /** Human moves with pointLoss >= the mistake threshold, worst first, taken-back first attempts included. */
+  /**
+   * The mistake threshold the game was played with, in points on its board (the profile's 9×9
+   * threshold scaled by `thresholdFor`). Absent on games saved before thresholds scaled by size.
+   */
+  threshold?: number;
+  /** Human moves with pointLoss >= `threshold`, worst first, taken-back first attempts included. */
   mistakes: {
     moveNumber: number;
     move: Gtp;
@@ -451,7 +464,10 @@ export interface Profile {
    * (it waits for KataGo, and for the migration while `ratingModel` isn't 2). Absent when none.
    */
   estimating?: string[];
-  /** Mistake threshold in points for pausing a game (default 4; adapts between 2 and 6). */
+  /**
+   * Mistake threshold in points for pausing a game, on 9×9 (default 4; adapts between 2 and 6).
+   * Other sizes scale it (src/shared/threshold.ts: ×1.5 on 13×13, ×2 on 19×19).
+   */
   mistakeThreshold: number;
   /** Changes of mistakeThreshold, oldest first. */
   thresholdHistory: { ts: number; gameId: string; from: number; to: number; reason: string }[];
@@ -461,9 +477,11 @@ export interface Profile {
   recentMistakes: { ts: number; gameId: string; moveNumber: number; category: MistakeCategory; pointLoss: number; note?: string; takenBack?: number }[];
   /**
    * Finished games, oldest first, capped at 20: evaluated human moves, average point loss per
-   * move, mistakes (point loss >= `threshold`, the threshold the game was played with).
+   * move, mistakes (point loss >= the threshold the game was played with), and `threshold`, the
+   * profile's 9×9 threshold during the game (the game's own is `thresholdFor(threshold, size)`;
+   * games before thresholds scaled by size used `threshold` itself on every size).
    */
-  recentGames: { ts: number; gameId: string; size: number; humanMoves: number; avgPointLoss: number; mistakes: number; threshold: number }[];
+  recentGames: { ts: number; gameId: string; size: GameSettings["size"]; humanMoves: number; avgPointLoss: number; mistakes: number; threshold: number }[];
   /** `gamesPlayed` when each category was last worked on (the tutor tagged it, or a practice problem). */
   practiced: Partial<Record<MistakeCategory, number>>;
   gamesPlayed: number;

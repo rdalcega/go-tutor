@@ -5,6 +5,7 @@ import { toAscii } from "../engine/ascii.ts";
 import { gameBefore, gameFromLine } from "../engine/game.ts";
 import { moveGtp, movePoint, toGtp } from "../shared/coords.ts";
 import { ratingToRank } from "../shared/rank.ts";
+import { playedThreshold, sizeText, thresholdNum, thresholdText } from "../shared/threshold.ts";
 import { TUTOR_LEVEL_TEXT, assistText, estimateRankText, rankEstimateText, round1, takenBackTry, takenBackTryText } from "../shared/text.ts";
 import type {
   ChatMessage,
@@ -208,7 +209,7 @@ export function overlayText(o: Overlay, size: number): string {
 }
 
 /** Compact move list: `14 B C3 -6.2!` for human moves with evals; `!` flags a mistake-sized loss, `*` a move played with help. */
-export function moveListText(moves: MoveRecord[], size: number, threshold = 4, perLine = 10): string {
+export function moveListText(moves: MoveRecord[], size: number, threshold: number, perLine = 10): string {
   const items = moves.map((r) => {
     let s = `${r.number} ${r.move.color} ${moveGtp(r.move, size)}`;
     if (r.eval) s += ` -${num(r.eval.pointLoss)}${r.eval.pointLoss >= threshold ? "!" : ""}`;
@@ -248,6 +249,7 @@ export function statusLine(v: GameView, now = Date.now()): string {
   if (v.problem) parts.push(`problem=${v.problem.id}`);
   parts.push(`mode=${v.mode}`, `status=${v.status}`);
   if (v.tutorLevel) parts.push(`level=${v.tutorLevel}`);
+  if (v.mode === "game") parts.push(`threshold=${thresholdNum(v.mistakeThreshold)}`);
   if (v.status !== "finished" && v.mode !== "idle") parts.push(`toPlay=${v.toPlay}`);
   if (v.problem) {
     const p = v.problem;
@@ -294,12 +296,15 @@ export function formatState(v: GameView, now = Date.now(), chatTail = 8): string
     ].join(" "),
   );
   if (v.tutorLevel) out.push(levelLine(v.tutorLevel));
+  if (v.mode === "game") {
+    out.push(`mistake threshold ${thresholdNum(v.mistakeThreshold)} pts on ${sizeText(size)} (a move losing this much or more is a teaching moment)`);
+  }
   if (v.result) out.push(`result ${resultText(v.result)}`);
   if (v.problem) out.push(...problemLines(v.problem));
   if (v.board.length > 0) {
     out.push("", toAscii(v.board, movePoint(v.moves.at(-1)?.move)), "");
   }
-  out.push(v.moves.length > 0 ? `moves (human loss in pts, ! = mistake):\n${moveListText(v.moves, size)}` : "moves: none");
+  out.push(v.moves.length > 0 ? `moves (human loss in pts, ! = mistake):\n${moveListText(v.moves, size, v.mistakeThreshold)}` : "moves: none");
 
   const last = v.moves[v.moves.length - 1];
   if (last?.eval) {
@@ -322,6 +327,14 @@ export function formatState(v: GameView, now = Date.now(), chatTail = 8): string
 // ---------------------------------------------------------------------------
 // Summary and review
 // ---------------------------------------------------------------------------
+
+/**
+ * The mistake threshold a saved game was played with, on its board (`playedThreshold` with the
+ * profile's threshold and recent games); without a profile, `formatReview`'s default applies.
+ */
+export function reviewThreshold(g: Pick<ReviewedGame, "id" | "settings" | "summary">, p: Profile | null | undefined): number | undefined {
+  return p ? playedThreshold(g, p.mistakeThreshold, p.recentGames) : undefined;
+}
 
 const signed = (n: number) => `${n >= 0 ? "+" : ""}${num(n)}`;
 
@@ -369,7 +382,7 @@ export function formatProfile(p: Profile, focus?: FocusRecommendation | null): s
   if (p.tutorLevel) out.push(levelLine(p.tutorLevel));
   const change = p.thresholdHistory?.at(-1);
   out.push(
-    `mistake threshold ${num(p.mistakeThreshold)} pts` +
+    `mistake threshold ${thresholdText(p.mistakeThreshold)}` +
       (change ? ` (last changed ${num(change.from)} -> ${num(change.to)} after ${change.gameId}: ${change.reason})` : ""),
   );
   if (history.length > 0) {
@@ -508,7 +521,7 @@ function firstTryText(g: ReviewedGame, m: { takenBack?: number }): string {
 }
 
 /** A compact post-game review: result, rating change, mistakes with PVs, win-rate swings, boards before the worst mistakes, move list. */
-export function formatReview(g: ReviewedGame, threshold = 4): string {
+export function formatReview(g: ReviewedGame, threshold = playedThreshold(g)): string {
   const id = g.id;
   const size = g.settings.size;
   const human = g.settings.humanColor;

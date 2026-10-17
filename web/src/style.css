@@ -320,8 +320,9 @@ select, input[type="text"] {
 
 .progress .rank { font-weight: 700; font-size: 1.15rem; font-variant-numeric: tabular-nums; }
 .progress .facts dd { font-size: 0.9rem; }
-/* Four facts: two per row. */
+/* Two facts per row; an odd last one (Work on, the longest) spans the row. */
 .progress .facts { grid-template-columns: repeat(2, auto); }
+.progress .facts div:last-child:nth-child(odd) { grid-column: 1 / -1; }
 .rating-spark { height: 32px; }
 .rating-spark .line { stroke: var(--accent); }
 .rating-spark .dot-won { fill: var(--good); }

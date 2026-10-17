@@ -16,9 +16,10 @@ import type {
 } from "../../src/shared/types.ts";
 import type { ConnectionState, Transport } from "./api.ts";
 import { allowedActions } from "../../src/shared/allowed.ts";
-import { fromGtp, toGtp, tryFromGtp } from "../../src/shared/coords.ts";
+import { fromGtp, moveGtp, toGtp, tryFromGtp } from "../../src/shared/coords.ts";
 import { BOX_INTERVALS, nextBox, resultOf } from "../../src/shared/schedule.ts";
 import { colorName, round1, tutorLevelChangedText } from "../../src/shared/text.ts";
+import { thresholdFor } from "../../src/shared/threshold.ts";
 import { BUILTIN_PROBLEMS, type BuiltinProblem } from "../../src/server/builtin-problems.ts";
 
 function fakeEval(size: number, pointLoss: number, bestMove: string, lead: number, line?: string[]): MoveEval {
@@ -232,6 +233,7 @@ class MockServer implements Transport {
       problem: null,
       profileVersion: this.view?.profileVersion ?? 0,
       allowed: [],
+      mistakeThreshold: thresholdFor(4, settings.size),
     };
   }
 
@@ -460,6 +462,12 @@ class MockServer implements Transport {
     const v = this.view;
     v.status = "finished";
     v.result = result;
+    // The server's summary, as far as the result dialog reads it: the human's mistakes, worst first.
+    const mistakes = (this.game?.moves ?? [])
+      .filter((r) => r.move.color === v.settings?.humanColor && r.eval && r.eval.pointLoss >= v.mistakeThreshold)
+      .map((r) => ({ moveNumber: r.number, move: moveGtp(r.move, v.board.length), pointLoss: r.eval!.pointLoss, bestMove: r.eval!.bestMove }))
+      .sort((a, b) => b.pointLoss - a.pointLoss);
+    v.summary = { moves: this.game?.moves.length ?? 0, threshold: v.mistakeThreshold, mistakes, totalPointLoss: mistakes.reduce((n, m) => n + m.pointLoss, 0) };
     v.moment = null;
     v.engineBusy = false;
     v.profileVersion++;

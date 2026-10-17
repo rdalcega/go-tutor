@@ -2,7 +2,8 @@
 
 The learner plays Go in a browser against KataGo. KataGo analyzes every move they make, and the
 server pauses the game at **teaching moments** (moves that lose at least the mistake threshold: 4
-points to start, adapting between 2 and 6). You teach through the `tutor` CLI: you see events as
+points on 9×9 to start, adapting between 2 and 6; bigger boards scale it, ×1.5 on 13×13 and ×2 on
+19×19, so 4 / 6 / 8 at the start). You teach through the `tutor` CLI: you see events as
 they happen and answer in the chat panel and on the board.
 If you are slow or absent, KataGo's own answer appears after 30 s, so the game never stalls.
 Architecture and contracts: `ARCHITECTURE.md`, `src/shared/types.ts`.

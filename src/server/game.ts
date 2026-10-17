@@ -12,6 +12,7 @@ import { allowedActions, retryBlocked, takeBackBlocked, type ActionState } from 
 import { moveGtp, movePoint, samePoint, toGtp, tryFromGtp } from "../shared/coords.ts";
 import { normalizeBotRank } from "../shared/rank.ts";
 import { colorName, formatScore, round1, takenBackTryText, tutorLevelChangedText } from "../shared/text.ts";
+import { playedThreshold, thresholdFor } from "../shared/threshold.ts";
 import {
   ASSIST_KINDS,
   type AssistCounts,
@@ -263,9 +264,12 @@ export class GameController {
       engineBusy: this.engineState !== "ready" || this.busy > 0,
       profileVersion: this.profileVersion,
       allowed: this.allowed(),
+      // A problem shows the current game's threshold, or the next one's on the last game's board.
+      mistakeThreshold: this.threshold,
     };
     if (this.practice) return this.practice.view(common, this.settings?.botRank ?? this.profile.botRank);
     const game = this.game;
+    const finished = this.result && this.gameId && this.settings ? { id: this.gameId, settings: this.settings, summary: this.summary } : null;
     return {
       gameId: this.gameId,
       mode: game ? "game" : "idle",
@@ -280,7 +284,15 @@ export class GameController {
       overlay: this.overlay,
       ...common,
       problem: null,
+      // A finished game keeps the threshold it was played with (the profile's may have just moved).
+      ...(finished && { mistakeThreshold: playedThreshold(finished, this.profile.mistakeThreshold, this.profile.recentGames) }),
+      ...(finished?.summary && { summary: finished.summary }),
     };
+  }
+
+  /** The mistake threshold in points on the current game's board (the profile's 9×9 threshold, scaled; 9×9 when no game). */
+  private get threshold(): number {
+    return thresholdFor(this.profile.mistakeThreshold, this.settings?.size ?? DEFAULT_SETTINGS.size);
   }
 
   /** The game's teaching moment, also while a practice problem is on the board (whose view shows none). */
@@ -360,7 +372,7 @@ export class GameController {
     const loss = human?.eval?.pointLoss;
     // A move played on Silent gets no moment, whatever it cost (it is still evaluated and recorded).
     const quiet = human?.tutorLevel === "silent";
-    if (human && loss !== undefined && loss >= this.profile.mistakeThreshold && !quiet && !game.isOver && !this.momentShown.has(human)) {
+    if (human && loss !== undefined && loss >= this.threshold && !quiet && !game.isOver && !this.momentShown.has(human)) {
       this.startMoment(human);
       return;
     }
@@ -730,7 +742,7 @@ export class GameController {
       const [before, after] = await this.busyWhile(Promise.all([this.analysisOf(movesBefore), this.analysisOf([...movesBefore, record.move])]));
       if (!this.isCurrent(gen, record)) return;
       record.eval = moveEvalFrom(before, after, moveGtp(record.move, game.size));
-      if (record.eval.pointLoss >= this.profile.mistakeThreshold) {
+      if (record.eval.pointLoss >= this.threshold) {
         try {
           this.heuristics[record.number] = this.classify(record, before, after);
         } catch (err) {
@@ -747,7 +759,7 @@ export class GameController {
     this.save();
     const loss = record.eval?.pointLoss;
     // The moment opens now, or once the learner is back from a practice problem.
-    if (loss !== undefined && loss >= this.profile.mistakeThreshold) this.resumeTurn();
+    if (loss !== undefined && loss >= this.threshold) this.resumeTurn();
     else this.maybeBotMove();
     this.changed();
   }
@@ -1394,7 +1406,7 @@ export class GameController {
   private buildSummary(): GameSummary {
     const game = this.game!;
     const settings = this.settings!;
-    const threshold = this.profile.mistakeThreshold;
+    const threshold = this.threshold;
     const final = game.moves
       .filter((r) => r.move.color === settings.humanColor && r.eval && r.eval.pointLoss >= threshold)
       .map((r) => {
@@ -1405,6 +1417,7 @@ export class GameController {
     const firsts = firstAttemptMistakes(this.takenBack, settings.size, threshold, (t) => (t.heuristic ??= this.classifyOrOther(t.record, t)));
     return {
       moves: game.moves.length,
+      threshold,
       mistakes: worstFirst([...final, ...firsts]),
       totalPointLoss: totalPointLoss(game.moves, settings.humanColor, this.takenBack),
       assistance: { ...this.assistance },
@@ -1417,7 +1430,7 @@ export class GameController {
    * `replay` is the game before the move (default: from the current game's moves).
    */
   private classify(record: MoveRecord, before?: Analysis, after?: Analysis, replay: GoGame = this.game!.before(record.number)): MistakeCategory {
-    return classifyPlayed(replay, record, this.profile.mistakeThreshold, before, after);
+    return classifyPlayed(replay, record, this.threshold, before, after);
   }
 
   /** `classify` (of a taken-back move, with `takenBack`), or "other" (logged) when it fails, so a bad replay can't stop the game from ending. */

@@ -13,6 +13,7 @@ import {
   rowLabel,
   secondsLeft,
   sparklinePoints,
+  thresholdFact,
 } from "../../web/src/geometry.ts";
 
 describe("layout", () => {
@@ -60,6 +61,24 @@ describe("eval helpers", () => {
     expect(lossLevel(1)).toBe("inaccuracy");
     expect(lossLevel(3.9)).toBe("inaccuracy");
     expect(lossLevel(4)).toBe("mistake");
+  });
+
+  it("scales the color cutoffs with the board", () => {
+    // 13×13 at threshold 6: green below 1.5, red from 6.
+    expect([1.4, 1.5, 5.9, 6].map((l) => lossLevel(l, 6, 13))).toEqual(["good", "inaccuracy", "inaccuracy", "mistake"]);
+    // 19×19 at threshold 8: green below 2, red from 8.
+    expect([1.9, 2, 7.9, 8].map((l) => lossLevel(l, 8, 19))).toEqual(["good", "inaccuracy", "inaccuracy", "mistake"]);
+    // A lowered 9×9 threshold.
+    expect([0.9, 2.9, 3].map((l) => lossLevel(l, 3, 9))).toEqual(["good", "inaccuracy", "mistake"]);
+  });
+
+  it("describes the threshold for the progress card", () => {
+    expect(thresholdFact(6, 13, 4)).toEqual({
+      short: "6 pts",
+      long: "The game pauses for a teaching moment when a move loses this many points or more on 13×13. Bigger boards have bigger mistakes: 4 pts on 9×9 (6 on 13×13, 8 on 19×19).",
+    });
+    // A finished game's own threshold, whatever the profile's is now.
+    expect(thresholdFact(6.75, 13, 4).short).toBe("6.75 pts");
   });
 
   it("formats loss", () => {

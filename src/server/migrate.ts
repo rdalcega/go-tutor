@@ -267,7 +267,8 @@ export async function migrateRatingModel(deps: MigrationDeps): Promise<Migration
   const rebuiltGames: { saved: SavedGame; rebuilt: Reconstruction; threshold: number; report: GameReport; summary: GameSummary }[] = [];
   for (const saved of games) {
     const rebuilt = reconstructGame(saved, events);
-    const threshold = original.recentGames.find((g) => g.gameId === saved.id)?.threshold ?? deps.threshold;
+    // The game's own threshold on its board; older games used the profile's threshold on every size.
+    const threshold = saved.summary?.threshold ?? original.recentGames.find((g) => g.gameId === saved.id)?.threshold ?? deps.threshold;
     // Keep what an earlier (interrupted) run or the live game already knew about the first attempts.
     const known = saved.takenBack ?? [];
     rebuilt.takenBack.forEach((t, i) => {

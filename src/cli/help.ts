@@ -7,7 +7,9 @@ commands: watch, state, say, rethink, show, mark, clear, resume, claim, new-game
 run "npm run -s tutor -- help" for details and examples`;
 
 export const HELP = `Go Tutor CLI: you (Claude) are the teacher. The learner plays Go in a browser against KataGo;
-KataGo analyzes every human move and the server pauses the game at teaching moments.
+KataGo analyzes every human move and the server pauses the game at teaching moments: moves that
+lose at least the mistake threshold. The profile keeps it for 9×9 (4 points to start, adapting
+between 2 and 6); bigger boards scale it (×1.5 on 13×13, ×2 on 19×19: 4 / 6 / 8 at the start).
 
 Run as: npm run -s tutor -- <command> [args]     (server: $TUTOR_SERVER, default http://localhost:4747)
 Coordinates are GTP: column letters A-T without I, row 1 at the bottom (e.g. D4). Colors: B or W.
@@ -76,7 +78,8 @@ COMMANDS
   state
       The current board as ASCII (X black, O white, + star point, (X) last move), the move list with the
       human's point loss per move (! = mistake), KataGo's best move and candidates for the last move,
-      the tutor level, the teaching moment, the overlay currently drawn, and the last chat lines.
+      the tutor level, the mistake threshold on this board, the teaching moment, the overlay currently
+      drawn, and the last chat lines.
       Example: npm run -s tutor -- state
 
   claim <momentId>
@@ -156,7 +159,8 @@ COMMANDS
   summary
       Learner profile: rank estimate and rating trend, the last game's move-quality estimate (from how
       many unassisted moves, and the help left out), the bot's rank (and handicap stones while the
-      learner is below 20k), the tutor level, the mistake threshold, mistake counts by category with the last 3 games,
+      learner is below 20k), the tutor level, the mistake threshold on each board size and its last
+      change, mistake counts by category with the last 3 games,
       recent mistakes (taken-back first tries marked), the recommended focus with its reason, and
       practice problems (how many, how many are due, by category, and the next few due).
       Example: npm run -s tutor -- summary
@@ -173,4 +177,5 @@ COMMANDS
       This text.
 
 Every command that changes something prints "ok" and a one-line status, e.g.
-  ok game=g12 mode=game status=paused level=coach toPlay=B moves=14 moment m3 move 14 lost 6.2 state=tutor`;
+  ok game=g12 mode=game status=paused level=coach threshold=4 toPlay=B moves=14 moment m3 move 14 lost 6.2 state=tutor
+(threshold = the mistake threshold in points on this game's board).`;

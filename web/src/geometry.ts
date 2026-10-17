@@ -5,6 +5,7 @@ import { gameBefore } from "../../src/engine/game.ts";
 import { GTP_COLUMNS, movePoint } from "../../src/shared/coords.ts";
 import { ratingToRank } from "../../src/shared/rank.ts";
 import { categoryLabel, comeBackText, estimateRankText, rankEstimateText } from "../../src/shared/text.ts";
+import { sizeText, thresholdMultiplier, thresholdNum, thresholdText } from "../../src/shared/threshold.ts";
 import type { Board, Color, GameSettings, MistakeCategory, MoveRecord, Point, ProblemView, Profile } from "../../src/shared/types.ts";
 
 export interface BoardLayout {
@@ -53,11 +54,26 @@ export function rowLabel(y: number, size: number): string {
 
 export type LossLevel = "good" | "inaccuracy" | "mistake";
 
-/** Color coding for a move's point loss: green < 1, amber < 4, red >= 4. */
-export function lossLevel(pointLoss: number): LossLevel {
-  if (pointLoss < 1) return "good";
-  if (pointLoss < 4) return "inaccuracy";
+/**
+ * Color coding for a move's point loss on a `size` board: red at the mistake `threshold` (on that
+ * board) or more, green below 1 point scaled like the threshold (1.5 on 13×13, 2 on 19×19), amber
+ * in between. With the defaults: green < 1, amber < 4, red >= 4.
+ */
+export function lossLevel(pointLoss: number, threshold = 4, size: GameSettings["size"] = 9): LossLevel {
+  if (pointLoss < thresholdMultiplier(size)) return "good";
+  if (pointLoss < threshold) return "inaccuracy";
   return "mistake";
+}
+
+/**
+ * The progress card's threshold fact: `points` (the threshold on a `size` board) as "4 pts", and
+ * the profile's 9×9 threshold `base` on every board.
+ */
+export function thresholdFact(points: number, size: GameSettings["size"], base: number): { short: string; long: string } {
+  return {
+    short: `${thresholdNum(points)} pts`,
+    long: `The game pauses for a teaching moment when a move loses this many points or more on ${sizeText(size)}. Bigger boards have bigger mistakes: ${thresholdText(base)}.`,
+  };
 }
 
 export function formatLoss(pointLoss: number): string {

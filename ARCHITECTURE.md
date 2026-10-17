@@ -24,6 +24,7 @@ The contract for every boundary is `src/shared/types.ts`.
 | `src/shared/allowed.ts` | `allowedActions(state)`: the browser actions the server accepts in a given state (mode, status, result, moment, turn, engine, tutor, problem, drawing on the board), used by the controller and the UI mock; `retryBlocked` (Try again) and `takeBackBlocked` (Take back) say why a take-back can't happen. |
 | `src/shared/text.ts` | Wording shared by server, CLI and UI: `colorName`, `categoryLabel`, `round1`, `formatScore`, `TUTOR_LEVEL_TEXT` (each level's label, the learner's description and the tutor's), `tutorLevelChangedText` (the chat line for a level change), `comeBackText` (when a problem is due again), `assistText` ("3 hints, 2 take-backs"), `estimateRankText` and `rankEstimateText` ("Rank estimate 18k from 34 unassisted moves (3 hints, 2 take-backs)"). |
 | `src/shared/schedule.ts` | Leitner scheduling for practice problems (`BOX_INTERVALS`, `MAX_BOX`, `resultOf`, `nextBox`, `schedule`), used by the server's problems and the UI mock. |
+| `src/shared/threshold.ts` | The mistake threshold by board size: `THRESHOLD_MULTIPLIERS` (9×9 ×1, 13×13 ×1.5, 19×19 ×2), `thresholdMultiplier(size)`, `thresholdFor(base, size)` (the profile's 9×9 threshold on a board), `sizeText`. Used by the controller, the profile's adaptation, the CLI and the UI so they agree. |
 | `src/shared/rank.ts` | `rankToRating("20k") → 10`, `ratingToRank(10) → "20k"` on the scale 30k=0 … 1k=29, 1d=30 … 9d=38. |
 | `src/engine/` | Pure Go rules: `GoGame` class (play/pass/undo, captures, suicide illegal, positional superko; `before(n)` copies the game before move n from its history, `fromBoard` sets up a position), `gameBefore(settings, moves, n)` (replays a saved move list), `movesFromLine`/`gameFromLine` (a GTP move line, colors alternating from the first mover, e.g. a taken-back move's position), `boardFromDiagram`, area scoring with komi, dead-stone input from KataGo ownership, `toAscii(board)`, SGF read/write. No I/O. |
 | `src/server/katago.ts` | Long-lived `katago analysis` child process speaking the JSON analysis protocol; query queue with ids; `analyze(position, opts)`, `botMove(position, rank)`, `ownership`. |
@@ -67,8 +68,8 @@ The contract for every boundary is `src/shared/types.ts`.
    no handicap; while the learner rates below 20k, 9×9 as Black gets the profile's handicap stones). Emits `game_start`.
 2. Human `play` → legality check in the rules engine → record → emit `move` → ask KataGo to analyze the
    position before and after (positions are cached, so "before" is usually ready).
-3. Eval arrives → attach `MoveEval` to the record. If `pointLoss >= profile.mistakeThreshold` (default 4)
-   it is a **teaching moment**: status `paused`, moment state `waiting`, emit `teaching_moment`.
+3. Eval arrives → attach `MoveEval` to the record. If `pointLoss >= thresholdFor(profile.mistakeThreshold, size)`
+   (default 4 on 9×9, 6 on 13×13, 8 on 19×19) it is a **teaching moment**: status `paused`, moment state `waiting`, emit `teaching_moment`.
    - If a tutor is attached: wait up to 30 s (`TUTOR_TIMEOUT_MS`) for any tutor command about the moment
      (`claim`, `say`, `rethink`, `show`, `mark`). Any of them sets state `tutor` and cancels the timer.
    - If no tutor is attached or the timer fires: state `fallback`, overlay draws KataGo's PV as a variation
@@ -219,7 +220,17 @@ when its rank estimate is in, and when the tutor tags a mistake.
   bot stays at 20k and `profile.handicap` is 2–4 stones when that is the nearer match for the
   learner's strength. A new 9×9 game as Black without an explicit bot rank or handicap uses them, with
   komi 0.5, and the new-game chat line says why.
-- **Mistake categories**: each mistake in `GameSummary` (point loss ≥ threshold) gets a category and a
+- **Threshold by board size**: `profile.mistakeThreshold` is the 9×9 value; every use scales it with
+  `thresholdFor(base, size)` (×1.5 on 13×13, ×2 on 19×19): teaching moments, the summary's mistakes
+  (first attempts included) and so the problems made from them, the heuristic's "twice / 1.5× the
+  threshold", the review's `!` marks and the UI's loss colors. `GameSummary.threshold` records the
+  game's own (scaled) threshold, so a review uses what the game was played with; games saved before
+  this have none and used the profile's threshold unscaled on every size (`recentGames[].threshold`,
+  which keeps the profile's 9×9 value; `playedThreshold` applies this rule). Every `GameView` carries
+  `mistakeThreshold`: the current game's, a finished game's own, and otherwise (idle, a problem) the
+  current or next game's; a finished game's view also carries its `summary`, whose mistakes the
+  result dialog lists.
+- **Mistake categories**: each mistake in `GameSummary` (point loss ≥ the game's threshold) gets a category and a
   `categorySource`. The tutor's `tag` wins; otherwise the heuristic, checked in order: capturing race
   (adjacent opposing groups of 2+ stones with ≤ 3 liberties each, the played or best move on one of
   their liberties), life and death (a 2+ stone group's average ownership flips sign by ≥ 1), tactics
@@ -235,9 +246,12 @@ when its rank estimate is in, and when the tutor tags a mistake.
   number (review's "first try #n"; `true` for the only one, an error listing them when there are
   several). One key names a mistake everywhere (`mistakeKey`: game, move number, and `#t<index>`
   for a first attempt): tallies, tags, problem sources and the migration.
-- **Threshold**: after a 9×9 game with more than 6 mistakes, +0.5 (max 6). After three games at the
-  current threshold whose average loss per human move is under 1.5, −0.5 (min 2). Changes go to
-  `thresholdHistory`; `recentGames` (cap 20) keeps the per-game stats (first attempts included).
+- **Threshold**: after a game with too many mistakes (teaching moments) for its board, +0.5 (max 6):
+  more than 6 on 9×9, scaled by the multiplier (`maxMoments`: 9 on 13×13, 12 on 19×19), not by the
+  game's length, which would let a 19×19 game pause about 27 times before reacting. After three games at the
+  current threshold whose average loss per human move, each divided by its board's multiplier (so on
+  the 9×9 scale), is under 1.5, −0.5 (min 2). Both move the one 9×9 value, so all sizes move together.
+  Changes go to `thresholdHistory`; `recentGames` (cap 20) keeps the per-game stats (first attempts included).
 
 ## Rank estimate
 
@@ -303,7 +317,7 @@ profile or problems; `ratingModel` unchanged), and the controller logs it and tr
 which merges in the built-in set) holds every problem with its spaced-repetition state.
 
 - **From mistakes**: when a game finishes, each mistake in its summary (point loss ≥ the threshold the
-  game was played with) becomes a problem: the position before the move as setup stones (no move
+  game was played with, scaled to its board) becomes a problem: the position before the move as setup stones (no move
   history, so ko is not carried over), the learner to play, a prompt by category (`promptFor`), the
   accepted answers (KataGo's candidates from the move's eval within `ANSWER_MARGIN` = 1 point of its
   best, never a pass or the move played; besides the best, only candidates with 50+ visits), source game and move, category (the tutor's tag, else the
@@ -357,7 +371,8 @@ unless `--json`).
 - `watch` — long-running. Connects to the event stream and prints **one line per event** (that is what Claude Code's
   Monitor tool turns into notifications). Teaching moments and hint requests print a single line with
   the essentials: moment id, move, point loss, best move, PV. Reconnects with `since=` on drop.
-- `state` — the current position as ASCII plus move list with evals, moment, and chat tail.
+- `state` — the current position as ASCII plus move list with evals, the mistake threshold on this
+  board, moment, and chat tail. In a game every command's status line has `threshold=<pts>` too.
 - `say <text>`, `rethink <text>`, `show <moves...> [--label L] [--start B|W]`, `mark <pts...> [--kind circle] [--text T]`,
   `clear`, `resume` (with a drawing up it prints a second line, "still paused: …", since the pause
   then waits for the learner's Continue; `--json` adds `stillPaused` to the view, and `state` shows the
@@ -370,7 +385,8 @@ unless `--json`).
   rating 10 -> 11.9 (+1.9, rank 18k); next bot 18k`.
 - `summary` — learner profile: rank estimate with the trend over the last 5 rated games, the last
   game's move-quality estimate (rank, unassisted moves, help), each recent rated game's estimate, bot rank (and
-  handicap), the tutor level and what it means for the tutor, threshold and its last change, mistake counts by category with the last 3 games and a
+  handicap), the tutor level and what it means for the tutor, the threshold on each board size ("4 pts on
+  9×9 (6 on 13×13, 8 on 19×19)") and its last change, mistake counts by category with the last 3 games and a
   rising/falling trend, recent mistakes, the recommended focus and its reason, and practice problems
   (counts from games and built-in, due now by category, per box, and the next few due). Used at
   session start.
@@ -398,10 +414,13 @@ both sides, `X` black, `O` white, `.` empty, `+` star points, the last move wrap
 
 One screen: board on the left (canvas, scales to fit, wood background, star points, coordinates), side
 panel on the right with: game controls (New game, Pass, Take back, Practice, Resign), a status line (whose turn, captures,
-bot rank, tutor connected or not), an eval strip (point loss of the last human move), the teaching-moment
+bot rank, tutor connected or not), an eval strip (point loss of the last human move, colored green
+below 1 point, amber below the mistake threshold, red at or above it; both cutoffs scale with the board,
+so green is below 1.5 on 13×13 and 2 on 19×19), the teaching-moment
 banner (Continue / Try again buttons, countdown while waiting for the tutor), a Progress card (rank,
 the last game's estimate ("18k · 34 moves", the full sentence in its tooltip, "estimating…" while it
-runs), next bot with any handicap, games, top 2 mistake categories, rating sparkline; fetched from
+runs), next bot with any handicap, games, "Pauses at" (the mistake threshold on the current board,
+every size in its tooltip), top 2 mistake categories, rating sparkline; fetched from
 `GET /api/profile` on load and whenever the view's `profileVersion` changes), and the chat panel,
 whose form has the Hint button between the input and Send (the typed text, if any, goes with the
 hint as the question; H still asks for one). Take back follows `allowed` (`take_back`). The result

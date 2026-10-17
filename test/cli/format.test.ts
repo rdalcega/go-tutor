@@ -13,9 +13,11 @@ import {
   num,
   problemLines,
   resultText,
+  reviewThreshold,
   statusLine,
   winrateSwings,
 } from "../../src/cli/format.ts";
+import { thresholdText } from "../../src/shared/threshold.ts";
 import type {
   Board,
   GameSettings,
@@ -280,6 +282,7 @@ const view = (over: Partial<GameView> = {}): GameView => ({
   engineBusy: false,
   profileVersion: 0,
   allowed: ["new_game", "chat", "next_problem", "resign", "continue", "retry"],
+  mistakeThreshold: 4,
   ...over,
 });
 
@@ -338,13 +341,13 @@ describe("formatState", () => {
     const awaiting = view({ moment: { id: "m3", moveNumber: 3, pointLoss: 6.2, state: "tutor", awaitingLearner: true } });
     const out = commandOutput({ type: "resume" }, awaiting).split("\n");
     expect(out[0]).toBe(
-      "ok game=g12 mode=game status=paused level=coach toPlay=W moves=3 moment m3 move 3 lost 6.2 state=tutor (you resumed; still paused with the drawing, waiting for the learner to press Continue)",
+      "ok game=g12 mode=game status=paused level=coach threshold=4 toPlay=W moves=3 moment m3 move 3 lost 6.2 state=tutor (you resumed; still paused with the drawing, waiting for the learner to press Continue)",
     );
     expect(out[1]).toMatch(/^still paused: your drawing stays on the board until the learner presses Continue/);
     // Other commands, and a resume that ended the pause, print the status only.
     expect(commandOutput({ type: "say", text: "hi" }, awaiting)).toBe(out[0]);
     expect(commandOutput({ type: "resume" }, view({ status: "playing", moment: { id: "m3", moveNumber: 3, pointLoss: 6.2, state: "resolved" } }))).toBe(
-      "ok game=g12 mode=game status=playing level=coach toPlay=W moves=3",
+      "ok game=g12 mode=game status=playing level=coach threshold=4 toPlay=W moves=3",
     );
     expect(formatState(awaiting)).toContain("tutor level coach: full coaching");
     expect(formatState(awaiting)).toContain("waiting for the learner to press Continue");
@@ -360,9 +363,24 @@ describe("formatState", () => {
     expect(commandJson({ type: "say", text: "hi" }, awaiting)).toBe(JSON.stringify(awaiting));
   });
 
+  it("shows the mistake threshold on the game's board in state and the status line", () => {
+    // 6.2 is a mistake on 9×9 (threshold 4) but not on 19×19 (8): no "!" there.
+    const nine = view({ mistakeThreshold: 4 });
+    expect(formatState(nine)).toContain("mistake threshold 4 pts on 9×9 (a move losing this much or more is a teaching moment)");
+    expect(formatState(nine)).toContain("3 B C3 -6.2!");
+    expect(statusLine(nine)).toContain(" level=coach threshold=4 toPlay=W ");
+    const big = view({ settings: { ...settings, size: 19 }, board: emptyBoard(19), mistakeThreshold: 8, moment: null });
+    expect(formatState(big)).toContain("mistake threshold 8 pts on 19×19");
+    expect(formatState(big)).toContain("3 B C13 -6.2\n");
+    expect(statusLine(big)).toContain(" threshold=8 ");
+    expect(statusLine(view({ settings: { ...settings, size: 13 }, mistakeThreshold: 6.75 }))).toContain(" threshold=6.75 ");
+    // Outside a game (a problem on the board) the threshold isn't shown.
+    expect(statusLine(view({ mode: "problem" }))).not.toContain("threshold");
+  });
+
   it("statusLine is a single line", () => {
     expect(statusLine(view({ moment: { id: "m3", moveNumber: 3, pointLoss: 6.2, state: "tutor" } }))).toBe(
-      "game=g12 mode=game status=paused level=coach toPlay=W moves=3 moment m3 move 3 lost 6.2 state=tutor",
+      "game=g12 mode=game status=paused level=coach threshold=4 toPlay=W moves=3 moment m3 move 3 lost 6.2 state=tutor",
     );
   });
 });
@@ -399,7 +417,7 @@ describe("summary and review", () => {
       "rank estimate 18k (rating 11.6, trend +1.6 over the last 2 rated games), games 11, problems solved 2",
       "bot plays 18k",
       "tutor level coach: full coaching: say, show, mark, and rethink to let them find the move",
-      "mistake threshold 4 pts (last changed 4.5 -> 4 after g11: average loss 1.2 pts per move over the last 3 games)",
+      "mistake threshold 4 pts on 9×9 (6 on 13×13, 8 on 19×19) (last changed 4.5 -> 4 after g11: average loss 1.2 pts per move over the last 3 games)",
       "recent rated games: g10 won vs 20k (+0.4), g11 won vs 19k (+1.2)",
       "mistakes by category (total, in the last 3 games): shape 5 (2, rising), life_and_death 3 (0, falling), opening 1 (0, steady)",
       "recent mistakes:",
@@ -412,8 +430,10 @@ describe("summary and review", () => {
 
   it("mentions handicap stones while the learner is below 20k", () => {
     const text = formatProfile(profile({ botRank: "20k", rating: 7, handicap: 2, ratingHistory: [], thresholdHistory: [] }));
+    expect(thresholdText(4.5)).toBe("4.5 pts on 9×9 (6.75 on 13×13, 9 on 19×19)");
+    expect(thresholdText(2)).toBe("2 pts on 9×9 (3 on 13×13, 4 on 19×19)");
     expect(text).toContain("bot plays 20k, learner takes 2 handicap stones on 9x9 (rating below 20k, the weakest bot)");
-    expect(text).toContain("mistake threshold 4 pts\n");
+    expect(text).toContain("mistake threshold 4 pts on 9×9 (6 on 13×13, 8 on 19×19)\n");
   });
 
   const NOW = 1_000_000_000;
@@ -510,6 +530,33 @@ describe("summary and review", () => {
     expect(lines[9]).toBe("board before move 3 (B played C3, best D5):");
     expect(text).toContain("(O)"); // the board before move 3 ends with White's C7
     expect(lines.slice(-2)).toEqual(["moves (human loss in pts, ! = mistake):", "1 B E5 -0.3 | 2 W C7 | 3 B C3 -6.2!"]);
+  });
+
+  it("reviews with the threshold the game was played with on its board", () => {
+    const big = { ...settings, size: 19 as const };
+    const moves = view().moves; // the learner's C13 lost 6.2
+    const p = { ...defaultProfile(), recentGames: [{ ts: 0, gameId: "old", size: 19 as const, humanMoves: 2, avgPointLoss: 3, mistakes: 1, threshold: 4 }] };
+    const summary = { moves: 3, totalPointLoss: 6.5, mistakes: [] };
+    // A game saved with its own threshold uses it.
+    expect(reviewThreshold({ id: "new", settings: big, summary: { ...summary, threshold: 8 } }, p)).toBe(8);
+    // An older finished game used the profile's threshold unscaled on every size.
+    expect(reviewThreshold({ id: "old", settings: big, summary }, p)).toBe(4);
+    expect(reviewThreshold({ id: "older", settings: big, summary }, { ...p, mistakeThreshold: 3.5 })).toBe(3.5);
+    // An unfinished game: the profile's threshold on its board.
+    expect(reviewThreshold({ id: "now", settings: big }, p)).toBe(8);
+    expect(reviewThreshold({ id: "now", settings: { ...settings, size: 13 } }, p)).toBe(6);
+    expect(reviewThreshold({ id: "now", settings: big }, null)).toBeUndefined();
+
+    // Unfinished on 19×19: 6.2 is under 8, so it isn't a mistake; on 9×9 it is.
+    const unfinished = formatReview({ id: "now", settings: big, moves }, reviewThreshold({ id: "now", settings: big }, p));
+    expect(unfinished).toContain("mistakes: none");
+    expect(unfinished).toContain("3 B C13 -6.2");
+    expect(unfinished).not.toContain("-6.2!");
+    expect(formatReview({ id: "now", settings: big, moves })).toContain("mistakes: none");
+    // Without a profile, an older finished game defaults to the unscaled starting threshold, 4.
+    expect(formatReview({ id: "old", settings: big, moves, summary })).toContain("3 B C13 -6.2!");
+    expect(formatReview({ id: "old", settings: big, moves, summary }, reviewThreshold({ id: "old", settings: big, summary }, p))).toContain("3 B C13 -6.2!");
+    expect(formatReview({ id: "new", settings: big, moves, summary: { ...summary, threshold: 8 } })).not.toContain("-6.2!");
   });
 
   it("reviews a game without a summary from its moves, and says when a game didn't count", () => {

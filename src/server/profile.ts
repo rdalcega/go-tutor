@@ -6,6 +6,7 @@ import { GoGame, getCell, groupAt, neighbors, opponent } from "../engine/index.t
 import { moveGtp, movePoint, pointKey, tryFromGtp } from "../shared/coords.ts";
 import { clampRating, rankToRating, ratingToRank } from "../shared/rank.ts";
 import { categoryLabel, round1 } from "../shared/text.ts";
+import { sizeText, thresholdMultiplier } from "../shared/threshold.ts";
 import type {
   AssistCounts,
   Board,
@@ -104,9 +105,15 @@ export function botFor(rating: number): { botRank: string; handicap: number } {
 
 export const MIN_THRESHOLD = 2;
 export const MAX_THRESHOLD = 6;
-/** A 9×9 game with more teaching moments than this interrupts too often: raise the threshold. */
+/**
+ * A 9×9 game with more teaching moments than this interrupts too often: raise the threshold. Other
+ * sizes scale the limit like the threshold (`maxMoments`: 9 on 13×13, 12 on 19×19).
+ */
 const MAX_MOMENTS_9X9 = 6;
-/** Average loss per human move over the last 3 games below this: lower the threshold. */
+/**
+ * Average loss per human move over the last 3 games below this: lower the threshold. Each game's
+ * average is first divided by its board's threshold multiplier, so it is on the 9×9 scale.
+ */
 const LOW_AVG_LOSS = 1.5;
 const RECENT_MISTAKES_CAP = 50;
 const RECENT_GAMES_CAP = 20;
@@ -121,7 +128,7 @@ export interface FinishedGame {
   takenBack?: readonly TakenBackMove[];
   /** With categories filled in (tutor tags, else heuristics), taken-back mistakes included. */
   summary: GameSummary;
-  /** The mistake threshold the game was played with. */
+  /** The profile's (9×9) mistake threshold the game was played with; its board's is `thresholdFor(threshold, size)`. */
   threshold: number;
 }
 
@@ -374,22 +381,38 @@ export function applyEstimate(profile: Profile, game: EstimatedGame): RatingChan
   return { before, after, rated: true, nextBotRank: next.botRank, nextHandicap: next.handicap, ...(estimate && { estimate }) };
 }
 
-/** One gentle step of the mistake threshold, or nothing. Mutates profile.mistakeThreshold. */
+/**
+ * Teaching moments in one game above which it interrupted too often: 6 on 9×9, scaled like the
+ * threshold (9 on 13×13, 12 on 19×19). A bigger board's game is longer, so it may pause a little
+ * more often, but scaling by its length (moves or area: about 27 on 19×19) would let a game stop
+ * far too often before the threshold reacts, and would never react to a short or resigned game.
+ */
+export function maxMoments(size: GameSettings["size"]): number {
+  return Math.round(MAX_MOMENTS_9X9 * thresholdMultiplier(size));
+}
+
+/**
+ * One gentle step of the mistake threshold, or nothing. Mutates profile.mistakeThreshold, the 9×9
+ * value, so every board size moves together.
+ */
 function adaptThreshold(profile: Profile, game: FinishedGame): GameUpdate["threshold"] {
   const from = profile.mistakeThreshold;
   const moments = game.summary.mistakes.length;
-  if (game.settings.size === 9 && moments > MAX_MOMENTS_9X9 && from < MAX_THRESHOLD) {
+  const { size } = game.settings;
+  if (moments > maxMoments(size) && from < MAX_THRESHOLD) {
     profile.mistakeThreshold = Math.min(MAX_THRESHOLD, from + 0.5);
-    return { from, to: profile.mistakeThreshold, reason: `${moments} teaching moments in one 9×9 game` };
+    return { from, to: profile.mistakeThreshold, reason: `${moments} teaching moments in one ${sizeText(size)} game` };
   }
   // Lower only after three games at the current threshold, so it moves at most every third game.
   const last = profile.recentGames.slice(-3);
   if (last.length < 3 || from <= MIN_THRESHOLD || last.some((g) => g.threshold !== from)) return undefined;
+  // Each game's loss on the 9×9 scale: a 19×19 move that loses 2 points is like a 9×9 move losing 1.
   const moves = last.reduce((n, g) => n + g.humanMoves, 0);
-  const avg = last.reduce((sum, g) => sum + g.avgPointLoss * g.humanMoves, 0) / moves;
+  const avg = last.reduce((sum, g) => sum + (g.avgPointLoss * g.humanMoves) / thresholdMultiplier(g.size), 0) / moves;
   if (avg >= LOW_AVG_LOSS) return undefined;
   profile.mistakeThreshold = Math.max(MIN_THRESHOLD, from - 0.5);
-  return { from, to: profile.mistakeThreshold, reason: `average loss ${avg.toFixed(1)} pts per move over the last 3 games` };
+  const scaled = last.some((g) => thresholdMultiplier(g.size) !== 1) ? " (scaled to 9×9)" : "";
+  return { from, to: profile.mistakeThreshold, reason: `average loss ${avg.toFixed(1)} pts per move${scaled} over the last 3 games` };
 }
 
 /**
@@ -607,7 +630,7 @@ export function classifyMistake(ctx: MistakeContext): MistakeCategory {
 // What to teach next
 // ---------------------------------------------------------------------------
 
-/** Categories worth a focus, in the order a 9×9 beginner benefits from them (ties go to the earlier one). */
+/** Categories worth a focus, in the order a beginner benefits from them (ties go to the earlier one). */
 const FOCUS_ORDER: readonly MistakeCategory[] = ["life_and_death", "capturing_race", "tactics", "opening", "shape", "direction", "endgame"];
 /** Local skills that practice problems train well. */
 const PROBLEM_FRIENDLY = new Set<MistakeCategory>(["life_and_death", "capturing_race", "tactics", "shape"]);
@@ -669,7 +692,7 @@ export function recommendFocus(profile: Profile): FocusRecommendation {
   if (profile.recentMistakes.length === 0) {
     return {
       category: best,
-      reason: `No mistakes recorded yet. A game shows KataGo where points go; ${label} is a good first topic on 9×9.`,
+      reason: `No mistakes recorded yet. A game shows KataGo where points go; ${label} is a good first topic.`,
       suggestion: "game",
     };
   }

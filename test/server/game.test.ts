@@ -5,6 +5,7 @@ import { formatReview } from "../../src/cli/format.ts";
 import { UserError, type TutorEventInput } from "../../src/server/common.ts";
 import { GameController, passIsFine } from "../../src/server/game.ts";
 import type { Store } from "../../src/server/store.ts";
+import type { GameSummary } from "../../src/shared/types.ts";
 import { FakeClock, FakeEngine, flush, tempStore } from "./fakes.ts";
 
 // 9x9 points used below.
@@ -596,6 +597,7 @@ describe("GameController", () => {
       // Two human moves: too short to change the rating.
       expect(end.summary).toEqual({
         moves: 4,
+        threshold: 4,
         mistakes: [],
         totalPointLoss: 0,
         assistance: { hints: 0, takeBacks: 0, rethinks: 0 },
@@ -1454,5 +1456,85 @@ describe("GameController take-backs and help", () => {
     expect(saved.takenBack).toHaveLength(1);
     expect(saved.summary!.assistance).toEqual({ hints: 0, takeBacks: 0, rethinks: 1 });
     expect(saved.summary!.mistakes).toMatchObject([{ moveNumber: 1, move: "C3", takenBack: 0 }]);
+  });
+});
+
+describe("GameController mistake threshold by board size", () => {
+  beforeEach(() => setup());
+
+  // The profile's 4 points is the 9×9 threshold: 6 on 13×13, 8 on 19×19.
+  it.each([
+    [9, 4],
+    [13, 6],
+    [19, 8],
+  ] as const)("on %i×%i pauses at %i points, and the summary and its problems use that threshold", async (size, threshold) => {
+    ctl.newGame({ size });
+    await flush();
+    expect(ctl.view().mistakeThreshold).toBe(threshold);
+    // Exactly the threshold is a teaching moment.
+    engine.lossAfter(["C3"], threshold);
+    ctl.play({ x: 2, y: size - 3 });
+    await flush();
+    expect(ctl.view().status).toBe("paused");
+    expect(ctl.view().moment).toMatchObject({ moveNumber: 1, pointLoss: threshold });
+    // Just under it is not, though on 13×13 and 19×19 that is more than the 9×9 threshold.
+    await ctl.handleAction({ type: "retry" });
+    engine.lossAfter(["D4"], threshold - 0.5);
+    ctl.play({ x: 3, y: size - 4 });
+    await flush();
+    expect(ctl.view().moves[0]!.eval?.pointLoss).toBe(threshold - 0.5);
+    expect(ctl.view().status).toBe("playing");
+    expect(types().filter((t) => t === "teaching_moment")).toHaveLength(1);
+
+    await ctl.handleAction({ type: "resign" });
+    const end = events.find((e) => e.type === "game_end");
+    if (end?.type !== "game_end") throw new Error("expected game_end");
+    // The taken-back C3 is a mistake at this board's threshold; D4 isn't.
+    expect(end.summary.threshold).toBe(threshold);
+    expect(end.summary.mistakes.map((m) => [m.move, m.takenBack])).toEqual([["C3", 0]]);
+    expect(store.loadGame(end.gameId)!.summary?.threshold).toBe(threshold);
+    // The profile keeps the 9×9 value.
+    expect(store.loadProfile().recentGames.at(-1)).toMatchObject({ size, mistakes: 1, threshold: 4 });
+    await flush(10);
+    const problems = store.loadProblems().filter((p) => p.kind === "game");
+    expect(problems.map((p) => p.source)).toEqual([{ gameId: end.gameId, moveNumber: 1, played: "C3", takenBack: 0 }]);
+  });
+
+  it("raises the threshold after too many moments on 13×13, and the finished game keeps the one it was played with", async () => {
+    ctl.newGame({ size: 13 });
+    await flush();
+    engine.lossAfter(["C3"], 6);
+    // Ten first attempts at C3, each a teaching moment and taken back: more than 9 on 13×13.
+    for (let i = 0; i < 10; i++) {
+      ctl.play({ x: 2, y: 10 });
+      await flush();
+      expect(ctl.view().status).toBe("paused");
+      await ctl.handleAction({ type: "retry" });
+    }
+    ctl.play({ x: 3, y: 9 });
+    await flush();
+    await ctl.handleAction({ type: "resign" });
+    const profile = store.loadProfile();
+    expect(profile.mistakeThreshold).toBe(4.5);
+    expect(profile.thresholdHistory.at(-1)).toMatchObject({ from: 4, to: 4.5, reason: "10 teaching moments in one 13×13 game" });
+    expect(ctl.view().mistakeThreshold).toBe(6);
+    expect(ctl.view().summary?.mistakes).toHaveLength(10);
+    // A problem after the game shows the next game's threshold on the last game's board.
+    await ctl.handleAction({ type: "next_problem" });
+    expect(ctl.view()).toMatchObject({ mode: "problem", mistakeThreshold: 6.75 });
+    expect(ctl.view().summary).toBeUndefined();
+    await ctl.handleAction({ type: "leave_problem" });
+    // A finished game saved before thresholds scaled by size reports the unscaled one it was played with.
+    delete (ctl as unknown as { summary: GameSummary }).summary.threshold;
+    expect(ctl.view().mistakeThreshold).toBe(4);
+    // The next 13×13 game uses the new 9×9 value, scaled.
+    ctl.newGame({ size: 13 });
+    await flush();
+    expect(ctl.view().mistakeThreshold).toBe(6.75);
+    expect(ctl.view().summary).toBeUndefined();
+  });
+
+  it("sends the next 9×9 game's threshold before any game", () => {
+    expect(ctl.view()).toMatchObject({ mode: "idle", mistakeThreshold: 4 });
   });
 });

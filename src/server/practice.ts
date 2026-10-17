@@ -154,7 +154,7 @@ export class PracticeSession {
     return { revealed: this.revealed, checking: this.checking };
   }
 
-  view(common: Pick<GameView, "chat" | "tutorAttached" | "tutorLevel" | "engineBusy" | "profileVersion" | "allowed">, botRank: string): GameView {
+  view(common: Pick<GameView, "chat" | "tutorAttached" | "tutorLevel" | "engineBusy" | "profileVersion" | "allowed" | "mistakeThreshold">, botRank: string): GameView {
     const { problem } = this;
     return {
       gameId: null,

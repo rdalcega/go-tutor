@@ -3,7 +3,7 @@
 import type { FocusRecommendation, ProblemsResponse, Profile, ProfileResponse, SavedGame } from "../shared/types.ts";
 import { parseInvocation, UsageError, type Invocation } from "./args.ts";
 import { Client, ServerError, serverUrl } from "./client.ts";
-import { commandJson, commandOutput, formatProblemList, formatProblems, formatProfile, formatReview, formatState } from "./format.ts";
+import { commandJson, commandOutput, formatProblemList, formatProblems, formatProfile, formatReview, formatState, reviewThreshold } from "./format.ts";
 import { HELP, USAGE } from "./help.ts";
 import { watch } from "./watch.ts";
 
@@ -51,10 +51,8 @@ async function review(client: Client, gameId: string, json: boolean): Promise<vo
     print(JSON.stringify(game));
     return;
   }
-  // The threshold the game was played with decides what counted as a mistake.
-  const p = profile?.profile;
-  const threshold = p?.recentGames?.find((g) => g.gameId === game.id)?.threshold ?? p?.mistakeThreshold;
-  print(formatReview(game, threshold));
+  // The threshold the game was played with, on its board, decides what counted as a mistake.
+  print(formatReview(game, reviewThreshold(game, profile?.profile)));
 }
 
 async function run(inv: Invocation, client: Client): Promise<void> {

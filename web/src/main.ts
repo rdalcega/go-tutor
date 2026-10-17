@@ -21,8 +21,10 @@ import {
   ratingSparkPoints,
   secondsLeft,
   sparklinePoints,
+  thresholdFact,
   topCategories,
 } from "./geometry.ts";
+import { thresholdFor } from "../../src/shared/threshold.ts";
 
 const RANKS = [
   ...Array.from({ length: 20 }, (_, i) => `${20 - i}k`),
@@ -85,6 +87,7 @@ const el = {
   prBot: $("pr-bot"),
   prGames: $("pr-games"),
   prCats: $("pr-cats"),
+  prThreshold: $("pr-threshold"),
   prSpark: $<SVGSVGElement>("pr-spark"),
   resultRating: $("result-rating"),
   resultDialog: $<HTMLDialogElement>("result-dialog"),
@@ -375,6 +378,7 @@ function renderEval(v: GameView | null): void {
     return;
   }
   const size = v.board.length;
+  const level = (loss: number) => lossLevel(loss, v.mistakeThreshold, v.settings!.size);
   const last = lastHumanMove(v.moves, human);
   if (!last) {
     clearEval();
@@ -386,13 +390,13 @@ function renderEval(v: GameView | null): void {
     const e = last.eval;
     const played = moveGtp(last.move, size);
     el.evalLoss.textContent = `${formatLoss(e.pointLoss)} pts`;
-    el.evalLoss.className = `loss card-summary ${lossLevel(e.pointLoss)}`;
+    el.evalLoss.className = `loss card-summary ${level(e.pointLoss)}`;
     const best = e.pointLoss >= 0.05 && e.bestMove !== played ? ` · best ${e.bestMove}` : "";
     el.evalDetail.textContent = `Move ${last.number} · ${played}${best} · win ${Math.round(e.winrateAfter * 100)}%`;
   }
   const losses = humanMoves(v.moves, human).flatMap((m) => (m.eval ? [m.eval.pointLoss] : []));
   const base = svg("line", { class: "base", x1: "0", x2: "300", y1: "3", y2: "3" });
-  sparkline(el.spark, sparklinePoints(losses, 300, 44), losses.map((l) => ({ class: lossLevel(l), title: `${formatLoss(l)} pts` })), [base]);
+  sparkline(el.spark, sparklinePoints(losses, 300, 44), losses.map((l) => ({ class: level(l), title: `${formatLoss(l)} pts` })), [base]);
 }
 
 const SVG_NS = "http://www.w3.org/2000/svg";
@@ -465,6 +469,13 @@ function renderProgress(): void {
   el.prGames.textContent = String(p.gamesPlayed);
   const cats = topCategories(p.mistakeCounts);
   el.prCats.textContent = cats.length ? cats.join(", ") : "–";
+  // In a game (also once it's over), the threshold it is played with, as the eval colors use it;
+  // otherwise the next game's, on the board size picked in the new-game form.
+  const game = view?.mode === "game" && view.settings ? { size: view.settings.size, points: view.mistakeThreshold } : null;
+  const size = game?.size ?? (Number(el.ngSize.value) as GameSettings["size"]);
+  const fact = thresholdFact(game?.points ?? thresholdFor(p.mistakeThreshold, size), size, p.mistakeThreshold);
+  el.prThreshold.textContent = fact.short;
+  el.prThreshold.title = fact.long;
   el.prCats.title = profile?.focus ? `Suggested focus: ${categoryLabel(profile.focus.category)}. ${profile.focus.reason}` : "";
   // Start from the rating before the first shown game, so one game already draws a line.
   const history = p.ratingHistory.slice(-20);
@@ -515,17 +526,13 @@ function renderResult(v: GameView | null): void {
   el.resultTitle.textContent = r.winner === null ? "Draw" : won ? "You won" : "You lost";
   el.resultText.textContent = r.winner === null ? "The game ended in a draw." : `${formatScore(r)}.`;
 
-  const size = v.board.length;
-  const mistakes = human
-    ? humanMoves(v.moves, human)
-        .filter((m) => m.eval && lossLevel(m.eval.pointLoss) === "mistake")
-        .sort((a, b) => b.eval!.pointLoss - a.eval!.pointLoss)
-        .slice(0, 3)
-    : [];
+  // The server's mistakes (worst first, at the threshold the game was played with).
+  const mistakes = (v.summary?.mistakes ?? []).slice(0, 3);
   el.resultMistakes.replaceChildren(
     ...mistakes.map((m) => {
       const li = document.createElement("li");
-      li.textContent = `Move ${m.number} (${moveGtp(m.move, size)}): ${formatLoss(m.eval!.pointLoss)} pts, best ${m.eval!.bestMove}`;
+      const tried = m.takenBack !== undefined ? ", taken back" : "";
+      li.textContent = `Move ${m.moveNumber} (${m.move}${tried}): ${formatLoss(m.pointLoss)} pts, best ${m.bestMove}`;
       return li;
     }),
   );
@@ -586,7 +593,10 @@ function disarmResign(): void {
 }
 
 for (const s of [el.ngSize, el.ngRank, el.ngColor]) {
-  s.addEventListener("change", () => (ngFormTouched = true));
+  s.addEventListener("change", () => {
+    ngFormTouched = true;
+    renderProgress(); // the next game's threshold follows the size picked
+  });
 }
 function startNewGame(): void {
   ngFormTouched = false;
