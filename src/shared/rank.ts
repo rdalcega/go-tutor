@@ -44,3 +44,11 @@ export function normalizeBotRank(rank: string): string {
   if (rating < MIN_HUMAN_SL_RATING) throw new RangeError(`Bot rank "${rank.trim()}" is outside KataGo's human profiles (20k … 9d)`);
   return ratingToRank(rating);
 }
+
+/**
+ * The reference rank for judging moves "at level": one rank above the learner's displayed rank
+ * (the rating rounded), raised to the weakest human-SL profile (20k) and capped at 9d.
+ */
+export function atLevelRankFor(rating: number): string {
+  return ratingToRank(Math.max(MIN_HUMAN_SL_RATING, Math.round(clampRating(rating)) + 1));
+}

@@ -5,12 +5,14 @@
 import { randomBytes } from "node:crypto";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import {
+  JUDGE_MODES,
   MARK_KINDS,
   MISTAKE_CATEGORIES,
   TUTOR_LEVELS,
   type ClientAction,
   type Color,
   type GameSettings,
+  type JudgeMode,
   type MarkKind,
   type MistakeCategory,
   type TutorCommand,
@@ -332,6 +334,11 @@ export function parseClientAction(body: unknown): ClientAction {
       const level = str(o, "level", true);
       if (!(TUTOR_LEVELS as readonly string[]).includes(level)) throw new UserError(`Tutor level must be one of ${TUTOR_LEVELS.join(", ")}.`);
       return { type: "set_tutor_level", level: level as TutorLevel };
+    }
+    case "set_judge_mode": {
+      const mode = str(o, "mode", true);
+      if (!(JUDGE_MODES as readonly string[]).includes(mode)) throw new UserError(`Judge mode must be one of ${JUDGE_MODES.join(", ")}.`);
+      return { type: "set_judge_mode", mode: mode as JudgeMode };
     }
     case "chat":
       return { type: "chat", text: str(o, "text", true) };

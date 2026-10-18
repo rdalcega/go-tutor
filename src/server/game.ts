@@ -9,9 +9,10 @@
 import { randomBytes } from "node:crypto";
 import { GoGame, deadStonesFromOwnership, emptyBoard, gameFromLine, opponent, scoreArea, toAscii, writeSgf } from "../engine/index.ts";
 import { allowedActions, retryBlocked, takeBackBlocked, type ActionState } from "../shared/allowed.ts";
-import { moveGtp, movePoint, samePoint, toGtp, tryFromGtp } from "../shared/coords.ts";
-import { normalizeBotRank } from "../shared/rank.ts";
-import { colorName, formatScore, round1, takenBackTryText, tutorLevelChangedText } from "../shared/text.ts";
+import { gtpMove, moveGtp, movePoint, samePoint, toGtp, tryFromGtp } from "../shared/coords.ts";
+import { atLevelOf, judgedLoss } from "../shared/judge.ts";
+import { atLevelRankFor, normalizeBotRank, toHumanSLProfile } from "../shared/rank.ts";
+import { colorName, formatScore, judgeModeChangedText, round1, takenBackTryText, tutorLevelChangedText } from "../shared/text.ts";
 import { playedThreshold, thresholdFor } from "../shared/threshold.ts";
 import {
   ASSIST_KINDS,
@@ -26,6 +27,7 @@ import {
   type GameSummary,
   type GameView,
   type Gtp,
+  type JudgeMode,
   type MistakeCategory,
   type Move,
   type MoveRecord,
@@ -53,7 +55,7 @@ import {
   type TutorEventInput,
 } from "./common.ts";
 import { estimateRank, rankSamples } from "./estimate.ts";
-import { moveEvalFrom, type Analysis, type Engine, type Position } from "./katago.ts";
+import { atLevelEvalFrom, moveEvalFrom, needsReferenceAnalysis, topHumanMove, type Analysis, type Engine, type Position } from "./katago.ts";
 import { migrateRatingModel } from "./migrate.ts";
 import { PracticeSession, type PracticeDeps } from "./practice.ts";
 import { generateProblems, pickNextProblem, promptFor, resultOf, schedule, type StoredProblem } from "./problems.ts";
@@ -103,6 +105,8 @@ const DEFAULT_PROBLEM_VISITS = 600;
 const HANDICAP_KOMI = 0.5;
 /** Analyses kept: the recent positions, which cover an open moment and a Try again. */
 const ANALYSIS_CACHE_SIZE = 16;
+/** The at-level reference move's query (one network evaluation): ahead of the live game's searches, behind the bot. */
+const REFERENCE_PRIORITY = 5;
 
 /** Rating-migration attempts per server run that KataGo may fail before it waits for a restart. */
 export const MAX_MIGRATION_ATTEMPTS = 4;
@@ -164,6 +168,10 @@ export class GameController {
   private game: GoGame | null = null;
   private gameId: string | null = null;
   private settings: GameSettings | null = null;
+  /** The game's reference rank for judging moves at level: one rank above the learner when it started. */
+  private atLevelRank: string | null = null;
+  /** The learner was told this game that a move couldn't be judged at level (it says so once). */
+  private atLevelFailureNoted = false;
   private createdAt = 0;
   private status: GameStatus = "playing";
   private result: GameResult | null = null;
@@ -261,6 +269,7 @@ export class GameController {
       chat: this.chat.slice(-VIEW_CHAT_LIMIT),
       tutorAttached: this.tutorAttached,
       tutorLevel: this.level,
+      judgeMode: this.judgeMode,
       engineBusy: this.engineState !== "ready" || this.busy > 0,
       profileVersion: this.profileVersion,
       allowed: this.allowed(),
@@ -283,6 +292,7 @@ export class GameController {
       moment: this.moment ? { ...this.moment } : null,
       overlay: this.overlay,
       ...common,
+      ...(this.atLevelRank && { atLevelRank: this.atLevelRank }),
       problem: null,
       // A finished game keeps the threshold it was played with (the profile's may have just moved).
       ...(finished && { mistakeThreshold: playedThreshold(finished, this.profile.mistakeThreshold, this.profile.recentGames) }),
@@ -307,6 +317,11 @@ export class GameController {
   /** How much the tutor steps in during games (the profile's setting). */
   private get level(): TutorLevel {
     return this.profile.tutorLevel ?? "coach";
+  }
+
+  /** How the learner's moves are judged (the profile's setting). */
+  private get judgeMode(): JudgeMode {
+    return this.profile.judgeMode ?? "optimal";
   }
 
   /** The browser actions handleAction accepts right now: the same checks it makes (src/shared/allowed.ts). */
@@ -369,7 +384,7 @@ export class GameController {
     if (this.settleWaitingMoment() || this.practice) return;
     const last = game.lastMove;
     const human = last && last.move.color === settings.humanColor ? last : null;
-    const loss = human?.eval?.pointLoss;
+    const loss = human ? judgedLoss(human) : undefined;
     // A move played on Silent gets no moment, whatever it cost (it is still evaluated and recorded).
     const quiet = human?.tutorLevel === "silent";
     if (human && loss !== undefined && loss >= this.threshold && !quiet && !game.isOver && !this.momentShown.has(human)) {
@@ -406,6 +421,8 @@ export class GameController {
       if (evaluation) record.eval = evaluation;
       const level = saved.moves[i]?.tutorLevel;
       if (level) record.tutorLevel = level;
+      const judge = saved.moves[i]?.judge;
+      if (judge) record.judge = judge;
       const assist = saved.moves[i]?.assist;
       if (assist?.length) record.assist = assist;
     });
@@ -413,6 +430,7 @@ export class GameController {
     this.game = game;
     this.gameId = saved.id;
     this.settings = saved.settings;
+    this.atLevelRank = saved.atLevelRank ?? atLevelRankFor(this.profile.rating);
     this.createdAt = saved.createdAt;
     this.tags = saved.tags ?? {};
     this.heuristics = saved.heuristics ?? {};
@@ -445,6 +463,8 @@ export class GameController {
         return this.leaveProblem();
       case "set_tutor_level":
         return this.setTutorLevel(action.level);
+      case "set_judge_mode":
+        return this.setJudgeMode(action.mode);
       case "clear_overlay":
         // The learner hides the drawing (the game's, or the problem's). A pause stays: Continue ends it.
         this.activeOverlay = null;
@@ -583,6 +603,18 @@ export class GameController {
     this.system(tutorLevelChangedText(level));
   }
 
+  /** The learner picked how their moves are judged. It applies from their next move. */
+  private setJudgeMode(mode: JudgeMode): void {
+    if (mode === this.judgeMode) return;
+    this.updateProfile((profile) => {
+      profile.judgeMode = mode;
+    });
+    // The current game's reference rank; the next game's waits for the rating (an estimate may be running).
+    const rank = this.game && !this.result ? this.atLevelRank : null;
+    this.emit({ type: "judge_mode", mode, gameId: this.gameId, ...(rank && { atLevelRank: rank }) });
+    this.system(judgeModeChangedText(mode, rank ?? undefined));
+  }
+
   /** The overlay on the board: the problem's in problem mode, else the game's. */
   private get activeOverlay(): Overlay | null {
     return this.practice ? this.practice.overlay : this.overlay;
@@ -608,9 +640,10 @@ export class GameController {
     const now = this.clock.now();
     this.gameId = this.newGameId(now);
     this.settings = settings;
+    this.atLevelRank = atLevelRankFor(this.profile.rating);
     this.createdAt = now;
     this.game = new GoGame(settings.size, settings.komi, settings.handicap);
-    this.emit({ type: "game_start", gameId: this.gameId, settings, tutorLevel: this.level });
+    this.emit({ type: "game_start", gameId: this.gameId, settings, tutorLevel: this.level, judgeMode: this.judgeMode, atLevelRank: this.atLevelRank });
     const handicap = settings.handicap >= 2 ? `, ${settings.handicap} handicap stones` : "";
     const why =
       settings.handicap >= 2 && fromProfile
@@ -629,6 +662,8 @@ export class GameController {
     this.invalidatePending();
     this.analyses.clear();
     this.game = null;
+    this.atLevelRank = null;
+    this.atLevelFailureNoted = false;
     this.result = null;
     this.summary = null;
     this.moment = null;
@@ -706,6 +741,7 @@ export class GameController {
     const record = result.record;
     // A level change applies from the learner's next move: each move keeps the level it was played at.
     record.tutorLevel = this.level;
+    record.judge = this.judgeMode;
     // Help the learner had in this position (a hint, a drawing, a take-back) marks the move as assisted.
     const help = this.help?.at === at ? this.help.kinds : null;
     if (help?.size) record.assist = ASSIST_KINDS.filter((k) => help.has(k));
@@ -738,10 +774,33 @@ export class GameController {
     const game = this.game!;
     const movesBefore = game.moves.slice(0, record.number - 1).map((r) => r.move);
     this.evaluating = record;
+    const rank = record.judge === "at_level" ? this.atLevelRank : null;
+    const played = moveGtp(record.move, game.size);
     try {
-      const [before, after] = await this.busyWhile(Promise.all([this.analysisOf(movesBefore), this.analysisOf([...movesBefore, record.move])]));
+      const pendingBefore = this.analysisOf(movesBefore);
+      const [before, after, reference] = await this.busyWhile(
+        Promise.all([
+          pendingBefore,
+          this.analysisOf([...movesBefore, record.move]),
+          rank ? this.referenceFor(movesBefore, pendingBefore, played, record.move.color, rank) : null,
+        ]),
+      );
       if (!this.isCurrent(gen, record)) return;
-      record.eval = moveEvalFrom(before, after, moveGtp(record.move, game.size));
+      const evaluation = moveEvalFrom(before, after, played);
+      if (rank && reference) {
+        try {
+          if (reference instanceof Error) throw reference;
+          evaluation.atLevel = atLevelEvalFrom(evaluation, before, after, played, { rank, move: reference.move }, reference.after);
+        } catch (err) {
+          this.log(`judging move ${record.number} at level failed: ${(err as Error).message}`);
+          // Once per game: a lasting failure would otherwise fill the chat.
+          if (!this.atLevelFailureNoted) {
+            this.atLevelFailureNoted = true;
+            this.system(`KataGo couldn't compare move ${record.number} with a ${rank}'s move, so it is judged against KataGo's best.`);
+          }
+        }
+      }
+      record.eval = evaluation;
       if (record.eval.pointLoss >= this.threshold) {
         try {
           this.heuristics[record.number] = this.classify(record, before, after);
@@ -757,7 +816,7 @@ export class GameController {
       if (this.evaluating === record) this.evaluating = null;
     }
     this.save();
-    const loss = record.eval?.pointLoss;
+    const loss = judgedLoss(record);
     // The moment opens now, or once the learner is back from a practice problem.
     if (loss !== undefined && loss >= this.threshold) this.resumeTurn();
     else this.maybeBotMove();
@@ -778,7 +837,7 @@ export class GameController {
     this.moment = {
       id: `${record.number}-${randomBytes(2).toString("hex")}`,
       moveNumber: record.number,
-      pointLoss: round1(record.eval!.pointLoss),
+      pointLoss: round1(judgedLoss(record)!),
       state: "waiting",
       ...(this.tutorAttached && { deadline: this.clock.now() + this.tutorTimeoutMs }),
       level: record.tutorLevel ?? "coach",
@@ -840,25 +899,28 @@ export class GameController {
     const evaluation = record?.eval;
     if (record && evaluation) {
       const played = moveGtp(record.move, game.size);
-      // KataGo's line is an alternative to the move, so it is drawn on the board from before it,
-      // with the move actually played marked so the learner can find it.
-      const moves = lineStones(game.before(record.number), evaluation.bestPv, PV_STONES);
+      // Judged at level, the answer is the reference move (a stronger player's), else KataGo's best.
+      const atLevel = atLevelOf(record);
+      const answer = atLevel ? { move: atLevel.move, pv: atLevel.pv } : { move: evaluation.bestMove, pv: evaluation.bestPv };
+      // The line is an alternative to the move, so it is drawn on the board from before it, with
+      // the move actually played marked so the learner can find it.
+      const moves = lineStones(game.before(record.number), answer.pv, PV_STONES);
       const playedPoint = movePoint(record.move);
       const marks: NonNullable<Overlay["marks"]> = playedPoint && !moves.some((m) => samePoint(m.point, playedPoint)) ? [{ point: playedPoint, kind: "x" }] : [];
-      // KataGo's move is highlighted as part of the drawing, so hiding the drawing hides it too.
-      const bestPoint = evaluation.bestMove === "pass" ? undefined : tryFromGtp(evaluation.bestMove, game.size);
+      // The answer is highlighted as part of the drawing, so hiding the drawing hides it too.
+      const bestPoint = answer.move === "pass" ? undefined : tryFromGtp(answer.move, game.size);
+      const label = atLevel ? `A ${atLevel.rank}'s line instead of ${played}` : `KataGo's line instead of ${played}`;
       this.overlay = moves.length
-        ? { variation: { label: `KataGo's line instead of ${played}`, moves, fromMove: record.number }, ...(marks.length && { marks }), ...(bestPoint && { best: bestPoint }) }
+        ? { variation: { label, moves, fromMove: record.number }, ...(marks.length && { marks }), ...(bestPoint && { best: bestPoint }) }
         : null;
       const playedText = played === "pass" ? "Passing" : `Your move at ${played}`;
-      const best = evaluation.bestMove === "pass" ? "passing" : evaluation.bestMove;
+      const best = answer.move === "pass" ? "passing" : answer.move;
       const where = playedPoint ? ` (your move is marked ✕)` : "";
       const line = moves.length > 1 ? ` The board shows the position before your move${where}; the numbered stones show how play might go instead.` : "";
-      this.system(
-        `${playedText} cost about ${round1(evaluation.pointLoss)} points. KataGo would have played ${best}.${line} ` +
-          `Press Continue to play on, or Try again to take your move back.`,
-        moment.id,
-      );
+      const verdict = atLevel
+        ? `${playedText} cost about ${round1(judgedLoss(record)!)} points compared with ${best}, the move a ${atLevel.rank} player would most likely play.`
+        : `${playedText} cost about ${round1(evaluation.pointLoss)} points. KataGo would have played ${best}.`;
+      this.system(`${verdict}${line} Press Continue to play on, or Try again to take your move back.`, moment.id);
     }
     this.emit({ type: "fallback", momentId: moment.id });
   }
@@ -1658,6 +1720,7 @@ export class GameController {
       moment: this.moment,
       takenBack: this.takenBack,
       assistance: this.assistance,
+      ...(this.atLevelRank && { atLevelRank: this.atLevelRank }),
     };
     try {
       this.store.saveGame(record, this.sgfFor(settings, moves, this.result, this.tags));
@@ -1714,6 +1777,33 @@ export class GameController {
       if (this.analyses.get(key) === pending) this.analyses.delete(key);
     });
     return pending;
+  }
+
+  /**
+   * The at-level reference for the move `played` after `moves`: the human-SL net's most likely move
+   * at `rank` (one network evaluation, no search) and, when judging needs it
+   * (`needsReferenceAnalysis`), the main net's analysis of the position after that move. It runs
+   * alongside the move's own "after" analysis. A failure comes back as the error, so the move's
+   * own eval still stands.
+   */
+  private async referenceFor(moves: Move[], before: Promise<Analysis>, played: Gtp, color: Color, rank: string): Promise<{ move: Gtp; after?: Analysis } | Error> {
+    try {
+      const size = this.game!.size;
+      const policy = await this.engine.analyze(this.position(moves), {
+        maxVisits: 1,
+        includePolicy: true,
+        overrideSettings: { humanSLProfile: toHumanSLProfile(rank) },
+        priority: REFERENCE_PRIORITY,
+      });
+      const move = topHumanMove(policy, size);
+      if (!needsReferenceAnalysis(await before, played, move)) return { move };
+      // Not cached: nobody plays the reference move, and the cache is for the game's real positions.
+      const position = this.position([...moves, gtpMove(move, color, size)]);
+      const after = await this.engine.analyze(position, this.analysisVisits !== undefined ? { maxVisits: this.analysisVisits } : {});
+      return { move, after };
+    } catch (err) {
+      return err as Error;
+    }
   }
 
   /** Analyze the current position in the background, so the next human move's "before" is ready. */

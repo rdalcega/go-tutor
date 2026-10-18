@@ -62,3 +62,9 @@ export function movePoint(move: Move | null | undefined): Point | null {
 export function moveGtp(move: Move, size: number): Gtp {
   return toGtp(movePoint(move), size);
 }
+
+/** A `color` move at a GTP coordinate (fromGtp's errors for anything off the board). */
+export function gtpMove(gtp: Gtp, color: Move["color"], size: number): Move {
+  const point = fromGtp(gtp, size);
+  return point ? { color, point } : { color, pass: true };
+}

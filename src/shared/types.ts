@@ -34,6 +34,11 @@ export interface MoveRecord {
    */
   tutorLevel?: TutorLevel;
   /**
+   * How the learner chose to have this move judged when they played it (human moves only; absent =
+   * "optimal"). It decides the score the learner sees and whether the move opens a teaching moment.
+   */
+  judge?: JudgeMode;
+  /**
    * Help the learner had for this move (human moves only; absent = none). Assisted moves don't count
    * for the rank estimate.
    */
@@ -99,6 +104,25 @@ export interface MoveEval {
   bestPv: Gtp[];
   /** Up to 5 candidate moves KataGo considered in the position before. */
   candidates: { move: Gtp; lead: number; winrate: number; visits: number; pv: Gtp[] }[];
+  /** The move judged "at level": against the human-SL net's top move one rank above the learner. */
+  atLevel?: AtLevelEval;
+}
+
+/**
+ * A move compared with the reference move: the human-SL net's most likely move at `rank` (one rank
+ * above the learner, fixed for the game), both valued by KataGo's main net.
+ */
+export interface AtLevelEval {
+  /** The reference rank, e.g. "17k". */
+  rank: string;
+  /** The reference move and KataGo's line after it (starting with the move). */
+  move: Gtp;
+  pv: Gtp[];
+  /**
+   * Points the played move is worse than the reference move: negative when it is better (a gain).
+   * Never above `MoveEval.pointLoss` (the reference is no better than KataGo's best).
+   */
+  loss: number;
 }
 
 export type GameStatus = "playing" | "paused" | "finished";
@@ -126,6 +150,7 @@ export interface TeachingMoment {
   id: string;
   /** Move number of the human move that triggered it. */
   moveNumber: number;
+  /** The loss that opened it: `judgedLoss` of the move (against the reference move when judged at level). */
   pointLoss: number;
   /** "waiting" = paused, waiting for the tutor; "tutor" = tutor has engaged; "fallback" = tutor timed out or absent, KataGo answer shown. */
   state: "waiting" | "tutor" | "fallback" | "resolved";
@@ -163,6 +188,15 @@ export interface Overlay {
 export const TUTOR_LEVELS = ["silent", "point_out", "coach"] as const;
 export type TutorLevel = (typeof TUTOR_LEVELS)[number];
 
+/**
+ * How a learner's move is judged for the score they see and for teaching moments (the learner's
+ * choice, kept in the profile): "optimal" = against KataGo's best move; "at_level" = against the
+ * move a player one rank above them would most likely play (`AtLevelEval`). Mistakes for the review,
+ * practice problems and the profile are always judged against KataGo's best.
+ */
+export const JUDGE_MODES = ["optimal", "at_level"] as const;
+export type JudgeMode = (typeof JUDGE_MODES)[number];
+
 /** Marks the tutor can draw with `mark` (the UI also draws "label" marks). */
 export const MARK_KINDS = ["circle", "triangle", "square", "x"] as const;
 export type MarkKind = (typeof MARK_KINDS)[number];
@@ -194,6 +228,10 @@ export interface GameView {
   tutorAttached: boolean;
   /** How much the tutor steps in during games (the profile's setting). */
   tutorLevel: TutorLevel;
+  /** How the learner's moves are judged (the profile's setting). */
+  judgeMode: JudgeMode;
+  /** The game's reference rank for "at_level" judging (one rank above the learner when it started). */
+  atLevelRank?: string;
   /** True while KataGo is thinking (bot move or analysis). */
   engineBusy: boolean;
   /** Present in problem mode. */
@@ -269,7 +307,8 @@ export type ClientAction =
   | { type: "next_problem" } // enter problem mode, or go on to the next problem
   | { type: "leave_problem" } // back to the game (or the idle board)
   | { type: "clear_overlay" } // hide the drawing on the board (the tutor's, KataGo's or a hint)
-  | { type: "set_tutor_level"; level: TutorLevel }; // applies from the learner's next move
+  | { type: "set_tutor_level"; level: TutorLevel } // applies from the learner's next move
+  | { type: "set_judge_mode"; mode: JudgeMode }; // applies from the learner's next move
 
 // ---------------------------------------------------------------------------
 // Tutor → server (the `tutor` CLI posts these to POST /api/tutor)
@@ -303,7 +342,7 @@ export type TutorCommand =
 // ---------------------------------------------------------------------------
 
 export type TutorEvent =
-  | { seq: number; ts: number; type: "game_start"; gameId: string; settings: GameSettings; tutorLevel?: TutorLevel }
+  | { seq: number; ts: number; type: "game_start"; gameId: string; settings: GameSettings; tutorLevel?: TutorLevel; judgeMode?: JudgeMode; atLevelRank?: string }
   | { seq: number; ts: number; type: "move"; gameId: string; size: number; record: MoveRecord; by: "human" | "bot" }
   | {
       seq: number;
@@ -324,6 +363,8 @@ export type TutorEvent =
     }
   /** The learner changed the tutor level; it applies from their next move. */
   | { seq: number; ts: number; type: "tutor_level"; level: TutorLevel; gameId: string | null }
+  /** The learner changed how their moves are judged; it applies from their next move. */
+  | { seq: number; ts: number; type: "judge_mode"; mode: JudgeMode; gameId: string | null; atLevelRank?: string }
   /** `problemId` is set when the learner wrote while a practice problem was on the board (the message is about it). */
   | { seq: number; ts: number; type: "user_message"; text: string; momentId?: string; gameId: string | null; problemId?: string }
   | { seq: number; ts: number; type: "hint_request"; text?: string; gameId: string; size: number; board: string; toPlay: Color }
@@ -432,6 +473,8 @@ export interface SavedGame {
   takenBack?: TakenBackMove[];
   /** Help the learner had so far. */
   assistance?: AssistCounts;
+  /** The reference rank for "at_level" judging, fixed when the game started (absent before judge modes existed). */
+  atLevelRank?: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -488,6 +531,8 @@ export interface Profile {
   problemsSolved: number;
   /** How much the tutor steps in during games (default "coach"). */
   tutorLevel: TutorLevel;
+  /** How the learner's moves are judged (default "optimal"). */
+  judgeMode: JudgeMode;
 }
 
 /** What to teach next (`recommendFocus` in src/server/profile.ts). */

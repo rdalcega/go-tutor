@@ -1,5 +1,15 @@
 import { describe, expect, it } from "vitest";
-import { normalizeBotRank, rankToRating, ratingToRank, toHumanSLProfile } from "../../src/shared/rank.ts";
+import { atLevelRankFor, normalizeBotRank, rankToRating, ratingToRank, toHumanSLProfile } from "../../src/shared/rank.ts";
+
+describe("atLevelRankFor", () => {
+  it("is one rank above the displayed rank, within the human-SL profiles", () => {
+    expect(atLevelRankFor(11.6)).toBe("17k"); // displayed 18k
+    expect(atLevelRankFor(11.4)).toBe("18k"); // displayed 19k
+    expect(atLevelRankFor(29)).toBe("1d");
+    expect(atLevelRankFor(4)).toBe("20k"); // the weakest profile
+    expect(atLevelRankFor(38)).toBe("9d");
+  });
+});
 
 describe("rankToRating", () => {
   it("maps the scale anchors", () => {

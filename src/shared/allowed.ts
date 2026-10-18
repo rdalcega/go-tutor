@@ -25,7 +25,7 @@ export interface ActionState {
 }
 
 /** Actions the browser can send in any mode. */
-const ALWAYS: readonly ActionType[] = ["new_game", "chat", "next_problem", "set_tutor_level"];
+const ALWAYS: readonly ActionType[] = ["new_game", "chat", "next_problem", "set_tutor_level", "set_judge_mode"];
 
 /** ALWAYS, plus hiding the drawing when there is one. */
 function always(s: Pick<ActionState, "overlay">): ActionType[] {

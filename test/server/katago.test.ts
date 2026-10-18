@@ -8,6 +8,7 @@ import { afterAll, afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
   KATAGO_RULES,
   KataGo,
+  atLevelEvalFrom,
   chooseBotMove,
   coremlTempDirs,
   isPidAlive,
@@ -15,8 +16,10 @@ import {
   sweepStaleCoreMLModels,
   TRUSTED_CANDIDATE_VISITS,
   moveEvalFrom,
+  needsReferenceAnalysis,
   policyIndexToGtp,
   sideToMove,
+  topHumanMove,
   type Analysis,
   type Position,
 } from "../../src/server/katago.ts";
@@ -147,6 +150,64 @@ describe("moveEvalFrom", () => {
 
   it("rejects mismatched positions", () => {
     expect(() => moveEvalFrom(analysis("B", 0, 0.5), analysis("B", 0, 0.5))).toThrow();
+  });
+});
+
+describe("judging at level", () => {
+  const analysis = (toPlay: "B" | "W", scoreLead: number, moves: { move: string; lead: number; visits: number }[] = []): Analysis => ({
+    id: "x",
+    toPlay,
+    rootInfo: { scoreLead, winrate: 0.5, visits: 400 },
+    moveInfos: moves.map((m, order) => ({ move: m.move, scoreLead: m.lead, winrate: 0.5, visits: m.visits, order, prior: 0.1, pv: [m.move, "D4"] })),
+  });
+  const ref = (move: string) => ({ rank: "17k", move });
+
+  it("finds the human policy's top legal move, pass included", () => {
+    const policy = new Array(82).fill(0.001);
+    policy[0] = -1; // illegal entries are -1
+    policy[40] = 0.3; // E5
+    expect(topHumanMove({ humanPolicy: policy }, 9)).toBe("E5");
+    policy[81] = 0.5;
+    expect(topHumanMove({ humanPolicy: policy }, 9)).toBe("pass");
+    expect(() => topHumanMove({}, 9)).toThrow(/humanPolicy/);
+  });
+
+  it("compares two well-searched moves within the one search", () => {
+    const before = analysis("B", 2, [
+      { move: "E5", lead: 2, visits: 300 },
+      { move: "D5", lead: 1, visits: 200 },
+      { move: "C3", lead: -2, visits: 100 },
+    ]);
+    const after = analysis("W", 9); // a noisy separate search, not used
+    const ev = moveEvalFrom(before, after, "C3");
+    expect(ev.pointLoss).toBe(4);
+    expect(needsReferenceAnalysis(before, "C3", "D5")).toBe(false);
+    expect(atLevelEvalFrom(ev, before, after, "C3", ref("D5"))).toEqual({ rank: "17k", move: "D5", pv: ["D5", "D4"], loss: 3 });
+    // Better than the reference: a gain.
+    expect(atLevelEvalFrom(moveEvalFrom(before, after, "D5"), before, after, "D5", ref("C3")).loss).toBe(-3);
+  });
+
+  it("compares the positions after each move when either wasn't searched well", () => {
+    const before = analysis("B", 2, [{ move: "E5", lead: 2, visits: 300 }]);
+    const after = analysis("W", 5); // C3: White leads by 5
+    const afterRef = analysis("W", 1, [{ move: "G7", lead: 1, visits: 300 }]); // D5: White leads by 1
+    const ev = moveEvalFrom(before, after, "C3");
+    expect(needsReferenceAnalysis(before, "C3", "D5")).toBe(true);
+    expect(atLevelEvalFrom(ev, before, after, "C3", ref("D5"), afterRef)).toEqual({ rank: "17k", move: "D5", pv: ["D5", "G7", "D4"], loss: 4 });
+    expect(() => atLevelEvalFrom(ev, before, after, "C3", ref("D5"))).toThrow(/needed/);
+  });
+
+  it("scores the reference move itself as no loss, and never above the loss against KataGo's best", () => {
+    const before = analysis("B", 2, [{ move: "E5", lead: 2, visits: 300 }]);
+    const after = analysis("W", 5);
+    const ev = moveEvalFrom(before, after, "C3"); // 7 below the root
+    expect(needsReferenceAnalysis(before, "C3", "C3")).toBe(false);
+    expect(atLevelEvalFrom(ev, before, after, "C3", ref("C3"))).toMatchObject({ move: "C3", loss: 0 });
+    // KataGo's own best as the reference: valued in its search, so the loss is pointLoss itself.
+    expect(needsReferenceAnalysis(before, "C3", "E5")).toBe(false);
+    expect(atLevelEvalFrom(ev, before, after, "C3", ref("E5")).loss).toBe(ev.pointLoss);
+    // A separate search rates the reference above KataGo's best: capped at pointLoss.
+    expect(atLevelEvalFrom(ev, before, after, "C3", ref("D5"), analysis("W", -4)).loss).toBe(ev.pointLoss);
   });
 });
 

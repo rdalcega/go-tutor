@@ -27,7 +27,7 @@ import { fileURLToPath } from "node:url";
 import { opponent } from "../engine/board.ts";
 import { toGtp } from "../shared/coords.ts";
 import { toHumanSLProfile } from "../shared/rank.ts";
-import type { Color, Gtp, MoveEval } from "../shared/types.ts";
+import type { AtLevelEval, Color, Gtp, MoveEval } from "../shared/types.ts";
 
 /** A position as KataGo needs it. Moves are replayed from the initial stones. */
 export interface Position {
@@ -164,11 +164,7 @@ export function chooseBotMove(
   const passIndex = size * size;
   const regularPass = analysis.policy?.[passIndex] ?? 0;
 
-  let argmax = -1;
-  for (let i = 0; i < human.length; i++) {
-    if (argmax < 0 || human[i]! > human[argmax]!) argmax = i;
-  }
-  if (argmax === passIndex || regularPass >= PASS_POLICY_THRESHOLD) return "pass";
+  if (topHumanMove(analysis, size) === "pass" || regularPass >= PASS_POLICY_THRESHOLD) return "pass";
 
   const candidates: { index: number; p: number }[] = [];
   let total = 0;
@@ -201,6 +197,11 @@ export function chooseBotMove(
  */
 export const TRUSTED_CANDIDATE_VISITS = 50;
 
+/** `move` as a candidate of the `before` search, when KataGo searched it well (TRUSTED_CANDIDATE_VISITS). */
+export function trustedCandidate(before: Pick<Analysis, "moveInfos">, move: Gtp): MoveInfo | undefined {
+  return before.moveInfos.find((m) => m.move === move && m.visits >= TRUSTED_CANDIDATE_VISITS);
+}
+
 /**
  * Combines analyses of the position before and after a move into a MoveEval (mover's perspective).
  * With `played`, a move KataGo searched well in the "before" position loses its candidate's
@@ -213,7 +214,7 @@ export function moveEvalFrom(before: Analysis, after: Analysis, played?: Gtp): M
   }
   const leadBefore = before.rootInfo.scoreLead;
   const best = before.moveInfos[0];
-  const candidate = played && best ? before.moveInfos.find((m) => m.move === played && m.visits >= TRUSTED_CANDIDATE_VISITS) : undefined;
+  const candidate = played && best ? trustedCandidate(before, played) : undefined;
   let leadAfter = -after.rootInfo.scoreLead;
   let winrateAfter = 1 - after.rootInfo.winrate;
   if (candidate && best) {
@@ -236,6 +237,66 @@ export function moveEvalFrom(before: Analysis, after: Analysis, played?: Gtp): M
       pv: m.pv,
     })),
   };
+}
+
+/** The human policy's most likely move, pass included (entries of -1 are illegal). */
+export function topHumanMove(analysis: Pick<Analysis, "humanPolicy">, size: number): Gtp {
+  const human = analysis.humanPolicy;
+  if (!human || human.length !== size * size + 1) {
+    throw new Error("KataGo response has no humanPolicy; is the human model loaded?");
+  }
+  let best = -1;
+  for (let i = 0; i < human.length; i++) {
+    if (human[i]! >= 0 && (best < 0 || human[i]! > human[best]!)) best = i;
+  }
+  return best < 0 ? "pass" : policyIndexToGtp(best, size);
+}
+
+/**
+ * Whether judging `played` against the reference move `reference` needs the analysis of the
+ * position after the reference move: unless it is the played move, or KataGo searched it well in
+ * the "before" position (then that search values it).
+ */
+export function needsReferenceAnalysis(before: Analysis, played: Gtp, reference: Gtp): boolean {
+  return played !== reference && !trustedCandidate(before, reference);
+}
+
+/**
+ * The played move against the reference move `reference.move` (the human-SL net's top move at
+ * `reference.rank`), both valued by the main net, from the mover's perspective. The played move's
+ * value is `evaluation.leadAfter`; the reference is valued the same way (`moveEvalFrom`): by its
+ * shortfall from the best candidate when searched well in `before`, otherwise by the root lead
+ * after it, so `afterReference` (the position after the reference move) is then required
+ * (`needsReferenceAnalysis`). The loss is capped at `evaluation.pointLoss`: the reference can't
+ * beat KataGo's best.
+ */
+export function atLevelEvalFrom(
+  evaluation: MoveEval,
+  before: Analysis,
+  after: Analysis,
+  played: Gtp,
+  reference: { rank: string; move: Gtp },
+  afterReference?: Analysis,
+): AtLevelEval {
+  const { rank, move } = reference;
+  const fromSearch = trustedCandidate(before, move);
+  const line = (a: Analysis) => [move, ...(a.moveInfos[0]?.pv ?? [])];
+  if (move === played) return { rank, move, pv: fromSearch?.pv ?? line(after), loss: 0 };
+  const best = before.moveInfos[0];
+  let leadAfterReference: number;
+  let pv: Gtp[];
+  if (fromSearch && best) {
+    leadAfterReference = before.rootInfo.scoreLead - Math.max(0, best.scoreLead - fromSearch.scoreLead);
+    pv = fromSearch.pv;
+  } else {
+    if (!afterReference) throw new Error("atLevelEvalFrom: the analysis after the reference move is needed");
+    if (afterReference.toPlay !== opponent(before.toPlay)) {
+      throw new Error("atLevelEvalFrom: 'afterReference' must be the position right after one move from 'before'");
+    }
+    leadAfterReference = -afterReference.rootInfo.scoreLead; // the opponent is to move there
+    pv = line(afterReference);
+  }
+  return { rank, move, pv, loss: Math.min(leadAfterReference - evaluation.leadAfter, evaluation.pointLoss) };
 }
 
 /** Locates the binary, config and nets. Throws a message a person can act on. */

@@ -4,9 +4,10 @@
 import { toAscii } from "../engine/ascii.ts";
 import { gameBefore, gameFromLine } from "../engine/game.ts";
 import { moveGtp, movePoint, toGtp } from "../shared/coords.ts";
+import { atLevelOf } from "../shared/judge.ts";
 import { ratingToRank } from "../shared/rank.ts";
 import { playedThreshold, sizeText, thresholdNum, thresholdText } from "../shared/threshold.ts";
-import { TUTOR_LEVEL_TEXT, assistText, estimateRankText, rankEstimateText, round1, takenBackTry, takenBackTryText } from "../shared/text.ts";
+import { JUDGE_MODE_TEXT, TUTOR_LEVEL_TEXT, assistText, estimateRankText, rankEstimateText, round1, takenBackTry, takenBackTryText } from "../shared/text.ts";
 import type {
   ChatMessage,
   Color,
@@ -15,6 +16,7 @@ import type {
   GameSettings,
   GameSummary,
   GameView,
+  JudgeMode,
   Move,
   MoveRecord,
   Overlay,
@@ -117,9 +119,13 @@ function rawEvent(e: unknown): string {
 function formatKnownEvent(e: TutorEvent, ctx: EventContext): string {
   switch (e.type) {
     case "game_start":
-      return `GAME_START ${e.gameId} ${settingsText(e.settings)}${e.tutorLevel ? ` level=${e.tutorLevel}` : ""}`;
+      return `GAME_START ${e.gameId} ${settingsText(e.settings)}${e.tutorLevel ? ` level=${e.tutorLevel}` : ""}${e.judgeMode ? ` ${judgeText(e.judgeMode, e.atLevelRank)}` : ""}`;
     case "tutor_level":
       return `LEVEL ${e.level} — ${TUTOR_LEVEL_TEXT[e.level].tutor} (from the learner's next move)`;
+    case "judge_mode": {
+      const text = judgeModeText(e.mode);
+      return `JUDGE ${judgeText(e.mode, e.atLevelRank)}${text ? ` — ${text.tutor}` : ""} (from the learner's next move)`;
+    }
     case "move": {
       const r = e.record;
       let line = `MOVE ${r.number} ${r.move.color} ${eventMoveGtp(r.move, e.size, e.gameId, ctx)} (${e.by})`;
@@ -130,7 +136,12 @@ function formatKnownEvent(e: TutorEvent, ctx: EventContext): string {
     case "teaching_moment": {
       const { moment: m, record: r } = e;
       const gtp = eventMoveGtp(r.move, e.size, e.gameId, ctx);
-      const best = r.eval ? ` (best ${r.eval.bestMove}, pv ${pv(r.eval.bestPv)})` : "";
+      const at = atLevelOf(r);
+      const best = at
+        ? ` (judged at level: vs the ${at.rank} move ${at.move}, pv ${pv(at.pv)}; vs KataGo's best ${r.eval!.bestMove} it lost ${num(r.eval!.pointLoss)})`
+        : r.eval
+          ? ` (best ${r.eval.bestMove}, pv ${pv(r.eval.bestPv)})`
+          : "";
       const head = `MOMENT ${m.id} game=${e.gameId} move ${r.number} ${r.move.color} ${gtp} lost ${num(m.pointLoss)} pts${best}`;
       // A live moment is always "waiting"; any other state means a replay that the server brought up to date.
       if (m.state === "resolved") return `${head} (replayed; already resolved)`;
@@ -242,6 +253,38 @@ export function levelLine(level: TutorLevel): string {
   return `tutor level ${level}${text ? `: ${text.tutor}` : ""}`;
 }
 
+/** The wording for a judge mode; undefined for one a newer server sends that this CLI doesn't know. */
+function judgeModeText(mode: JudgeMode): (typeof JUDGE_MODE_TEXT)[JudgeMode] | undefined {
+  return JUDGE_MODE_TEXT[mode] as (typeof JUDGE_MODE_TEXT)[JudgeMode] | undefined;
+}
+
+/** The reference rank, when the mode uses one and it is known. */
+function referenceRank(mode: JudgeMode, rank?: string): string | undefined {
+  return mode === "at_level" ? rank : undefined;
+}
+
+/** "judge=optimal", or "judge=at_level ref=17k" with the reference rank. */
+function judgeText(mode: JudgeMode, rank?: string): string {
+  const ref = referenceRank(mode, rank);
+  return `judge=${mode}${ref ? ` ref=${ref}` : ""}`;
+}
+
+/** The learner's judge mode and what it means for the tutor. */
+export function judgeLine(mode: JudgeMode, rank?: string): string {
+  const ref = referenceRank(mode, rank);
+  const text = judgeModeText(mode);
+  return `judge ${mode}${ref ? ` (reference ${ref})` : ""}${text ? `: ${text.tutor}` : ""}`;
+}
+
+/** A move judged at level: ", at level -1.5 vs 17k D5" (a gain shows as +, the reference itself as 0). Empty otherwise. */
+function atLevelText(r: MoveRecord): string {
+  const at = atLevelOf(r);
+  if (!at) return "";
+  const loss = round1(at.loss);
+  const score = loss < 0 ? `+${num(-loss)}` : loss > 0 ? `-${num(loss)}` : "0";
+  return `, at level ${score} vs ${at.rank} ${at.move}`;
+}
+
 /** One-line status of the view, printed after every successful tutor command. */
 export function statusLine(v: GameView, now = Date.now()): string {
   const parts: string[] = [];
@@ -249,6 +292,7 @@ export function statusLine(v: GameView, now = Date.now()): string {
   if (v.problem) parts.push(`problem=${v.problem.id}`);
   parts.push(`mode=${v.mode}`, `status=${v.status}`);
   if (v.tutorLevel) parts.push(`level=${v.tutorLevel}`);
+  if (v.judgeMode === "at_level") parts.push(judgeText(v.judgeMode, v.atLevelRank));
   if (v.mode === "game") parts.push(`threshold=${thresholdNum(v.mistakeThreshold)}`);
   if (v.status !== "finished" && v.mode !== "idle") parts.push(`toPlay=${v.toPlay}`);
   if (v.problem) {
@@ -296,6 +340,7 @@ export function formatState(v: GameView, now = Date.now(), chatTail = 8): string
     ].join(" "),
   );
   if (v.tutorLevel) out.push(levelLine(v.tutorLevel));
+  if (v.judgeMode) out.push(judgeLine(v.judgeMode, v.atLevelRank));
   if (v.mode === "game") {
     out.push(`mistake threshold ${thresholdNum(v.mistakeThreshold)} pts on ${sizeText(size)} (a move losing this much or more is a teaching moment)`);
   }
@@ -311,7 +356,7 @@ export function formatState(v: GameView, now = Date.now(), chatTail = 8): string
     const e = last.eval;
     out.push(
       `last move ${last.number} ${last.move.color} ${moveGtp(last.move, size)}: lead ${num(e.leadBefore)} -> ${num(e.leadAfter)}, ` +
-        `winrate ${Math.round(e.winrateBefore * 100)}% -> ${Math.round(e.winrateAfter * 100)}%, best ${e.bestMove} (pv ${pv(e.bestPv)})`,
+        `winrate ${Math.round(e.winrateBefore * 100)}% -> ${Math.round(e.winrateAfter * 100)}%, best ${e.bestMove} (pv ${pv(e.bestPv)})${atLevelText(last)}`,
     );
     if (e.candidates.length > 0) {
       out.push(`candidates: ${e.candidates.map((c) => `${c.move} ${num(c.lead)}`).join(", ")}`);
@@ -380,6 +425,7 @@ export function formatProfile(p: Profile, focus?: FocusRecommendation | null): s
   const handicap = p.handicap >= 2 ? `, learner takes ${p.handicap} handicap stones on 9x9 (rating below 20k, the weakest bot)` : "";
   out.push(`bot plays ${p.botRank}${handicap}`);
   if (p.tutorLevel) out.push(levelLine(p.tutorLevel));
+  if (p.judgeMode) out.push(judgeLine(p.judgeMode));
   const change = p.thresholdHistory?.at(-1);
   out.push(
     `mistake threshold ${thresholdText(p.mistakeThreshold)}` +

@@ -31,6 +31,7 @@ SESSION FLOW
   7. on PROBLEM_START / PROBLEM: the learner is on a practice problem. Let them try; after a wrong
                  first attempt ask what they see (say); after the answer is shown, explain it with show.
   8. on LEVEL:   the learner changed how much you step in (see TUTOR LEVELS); follow it from now on.
+  9. on JUDGE:   the learner changed how their moves are judged (see JUDGING); nothing to do.
 
 TUTOR LEVELS (the learner picks one in the UI; summary, state and GAME_START show it)
   coach      full coaching: teaching moments, say/show/mark, and rethink to take the move back.
@@ -42,6 +43,14 @@ TUTOR LEVELS (the learner picks one in the UI; summary, state and GAME_START sho
   Mistakes are evaluated and recorded the same way at every level (summary, review, problems).
   The learner can Take back their last move at any level (on their turn or in a pause); it prints
   an UNDO line like Try again.
+
+JUDGING (the learner picks it in the UI; summary and state show a "judge <mode>" line, GAME_START judge=<mode>)
+  optimal    a move's score is what it loses against KataGo's best move (the default).
+  at_level   a move's score is what it loses against the reference move: the human-style model's
+             most likely move one rank above the learner (ref=17k, fixed for the game), both valued
+             by KataGo. Only that score opens teaching moments, so they are rarer; the MOMENT line
+             names the reference move and its line, and KataGo's fallback shows that line.
+  Either way, the review, mistakes, tags and practice problems use the loss against KataGo's best.
 
 RANK ESTIMATE AND HELP
   The rating comes from the learner's own moves: after each game of 10+ moves, KataGo's human-style
@@ -59,11 +68,13 @@ COMMANDS
       replay. --since N replays events after seq N. A replayed MOMENT shows its current state instead of
       a countdown, e.g. "(replayed; now fallback)" or "(replayed; already resolved)".
       Lines:
-        GAME_START g12 9x9 komi 7 human=B bot=20k level=coach
+        GAME_START g12 9x9 komi 7 human=B bot=20k level=coach judge=optimal
         MOVE 15 W D6 (bot)
         MOMENT m3 game=g12 move 14 B C3 lost 6.2 pts (best D5, pv D5 E4 C6) — reply with: claim m3, ...
         MOMENT m4 ... — level point_out: explain mistakes, don't take moves back ... — reply with: ...
+        MOMENT m5 game=g12 move 20 B G2 lost 4.4 pts (judged at level: vs the 17k move F3, pv F3 G4; vs KataGo's best E3 it lost 7.1) — ...
         LEVEL silent — no teaching moments; ... (from the learner's next move)
+        JUDGE judge=at_level ref=17k — moves are scored, and moments opened, against ... (from the learner's next move)
         HINT game=g12 B to play — user asks: "where now?" — run: state, then say/show/mark
         USER "why was that bad?" (moment m3) game=g12
         FALLBACK m3 (tutor too slow; KataGo answer shown)

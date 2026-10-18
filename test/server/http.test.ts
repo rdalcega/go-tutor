@@ -35,6 +35,7 @@ describe("request validation", () => {
     expect(parseTutorCommand({ type: "tag", gameId: "g", moveNumber: 3, category: "shape", takenBack: 2 })).toMatchObject({ takenBack: 2 });
     expect(() => parseTutorCommand({ type: "tag", gameId: "g", moveNumber: 3, category: "shape", takenBack: 0 })).toThrow(/takenBack/);
     expect(parseClientAction({ type: "set_tutor_level", level: "point_out" })).toEqual({ type: "set_tutor_level", level: "point_out" });
+    expect(parseClientAction({ type: "set_judge_mode", mode: "at_level" })).toEqual({ type: "set_judge_mode", mode: "at_level" });
     expect(parseTutorCommand({ type: "start_problem", problemId: "p3" })).toEqual({ type: "start_problem", problemId: "p3" });
     expect(parseTutorCommand({ type: "tag", gameId: "g", moveNumber: 3, category: "shape" })).toEqual({
       type: "tag",
@@ -50,6 +51,7 @@ describe("request validation", () => {
     expect(() => parseClientAction({ type: "play", point: { x: "1", y: 2 } })).toThrow(/integers/);
     expect(() => parseClientAction({ type: "set_tutor_level", level: "loud" })).toThrow("Tutor level must be one of silent, point_out, coach.");
     expect(() => parseClientAction({ type: "set_tutor_level" })).toThrow(/"level" is required/);
+    expect(() => parseClientAction({ type: "set_judge_mode", mode: "strict" })).toThrow("Judge mode must be one of optimal, at_level.");
     expect(() => parseTutorCommand({ type: "say" })).toThrow(/"text" is required/);
     expect(() => parseTutorCommand({ type: "mark", points: ["C3"], kind: "star" })).toThrow(/Mark kind/);
     expect(() => parseTutorCommand({ type: "tag", gameId: "g", moveNumber: 0, category: "shape" })).toThrow(/moveNumber/);

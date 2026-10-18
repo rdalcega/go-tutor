@@ -5,7 +5,17 @@
 import { appendFileSync, closeSync, copyFileSync, existsSync, fstatSync, mkdirSync, openSync, readFileSync, readSync, readdirSync, renameSync, statSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
-import { MISTAKE_CATEGORIES, TUTOR_LEVELS, type MistakeCategory, type Profile, type SavedGame, type TutorEvent, type TutorLevel } from "../shared/types.ts";
+import {
+  JUDGE_MODES,
+  MISTAKE_CATEGORIES,
+  TUTOR_LEVELS,
+  type JudgeMode,
+  type MistakeCategory,
+  type Profile,
+  type SavedGame,
+  type TutorEvent,
+  type TutorLevel,
+} from "../shared/types.ts";
 import { withBuiltins, type StoredProblem } from "./problems.ts";
 
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
@@ -25,6 +35,7 @@ export function defaultProfile(): Profile {
     gamesPlayed: 0,
     problemsSolved: 0,
     tutorLevel: "coach",
+    judgeMode: "optimal",
   };
 }
 
@@ -197,7 +208,8 @@ export class Store {
     try {
       const saved = JSON.parse(readFileSync(this.profilePath, "utf8")) as Partial<Profile>;
       const tutorLevel = TUTOR_LEVELS.includes(saved.tutorLevel as TutorLevel) ? saved.tutorLevel! : base.tutorLevel;
-      const profile: Profile = { ...base, ...saved, mistakeCounts: { ...base.mistakeCounts, ...saved.mistakeCounts }, tutorLevel };
+      const judgeMode = JUDGE_MODES.includes(saved.judgeMode as JudgeMode) ? saved.judgeMode! : base.judgeMode;
+      const profile: Profile = { ...base, ...saved, mistakeCounts: { ...base.mistakeCounts, ...saved.mistakeCounts }, tutorLevel, judgeMode };
       // `estimating` held one game id before it became a list.
       const estimating: unknown = saved.estimating;
       const pending = typeof estimating === "string" ? [estimating] : Array.isArray(estimating) ? estimating.filter((id): id is string => typeof id === "string") : [];

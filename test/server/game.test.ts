@@ -5,6 +5,8 @@ import { formatReview } from "../../src/cli/format.ts";
 import { UserError, type TutorEventInput } from "../../src/server/common.ts";
 import { GameController, passIsFine } from "../../src/server/game.ts";
 import type { Store } from "../../src/server/store.ts";
+import { fromGtp } from "../../src/shared/coords.ts";
+import { judgedLoss } from "../../src/shared/judge.ts";
 import type { GameSummary } from "../../src/shared/types.ts";
 import { FakeClock, FakeEngine, flush, tempStore } from "./fakes.ts";
 
@@ -1058,7 +1060,7 @@ describe("GameController and the learner profile", () => {
 
 describe("GameController view contract", () => {
   beforeEach(() => setup());
-  const ALWAYS = ["new_game", "chat", "next_problem", "set_tutor_level"];
+  const ALWAYS = ["new_game", "chat", "next_problem", "set_tutor_level", "set_judge_mode"];
 
   it("lists the actions it accepts, with the same checks the actions make", async () => {
     expect(ctl.view().allowed).toEqual([...ALWAYS]);
@@ -1536,5 +1538,132 @@ describe("GameController mistake threshold by board size", () => {
 
   it("sends the next 9×9 game's threshold before any game", () => {
     expect(ctl.view()).toMatchObject({ mode: "idle", mistakeThreshold: 4 });
+  });
+});
+
+describe("GameController judging at level", () => {
+  beforeEach(() => setup());
+
+  /** A human-SL policy that puts nearly everything on `gtp` (9×9). */
+  const policyOn = (gtp: string) => () => {
+    const policy = new Array(82).fill(0.001);
+    const p = fromGtp(gtp, 9)!;
+    policy[p.y * 9 + p.x] = 0.9;
+    return policy;
+  };
+
+  async function atLevelGame(): Promise<void> {
+    await ctl.handleAction({ type: "set_judge_mode", mode: "at_level" });
+    await startGame();
+  }
+
+  it("defaults to optimal, persists a change and fixes the game's reference rank one above the learner", async () => {
+    await startGame();
+    expect(ctl.view()).toMatchObject({ judgeMode: "optimal", atLevelRank: "19k" }); // rating 10 = 20k
+    expect(events[0]).toMatchObject({ type: "game_start", judgeMode: "optimal", atLevelRank: "19k" });
+    await ctl.handleAction({ type: "set_judge_mode", mode: "at_level" });
+    expect(store.loadProfile().judgeMode).toBe("at_level");
+    expect(events.at(-1)).toEqual({ type: "judge_mode", mode: "at_level", gameId: ctl.view().gameId, atLevelRank: "19k" });
+    expect(ctl.view().chat.at(-1)?.text).toMatch(/^Judging moves: At level \(19k\)\./);
+    // The rating moving mid-game doesn't move the game's reference rank.
+    store.saveProfile({ ...store.loadProfile(), rating: 15 });
+    expect(new GameController({ engine, store, clock }).currentProfile.judgeMode).toBe("at_level");
+    expect(ctl.view().atLevelRank).toBe("19k");
+  });
+
+  it("doesn't pause for a mistake a player one rank up would make too, but still records it against KataGo's best", async () => {
+    await atLevelGame();
+    engine.humanPolicy = policyOn("D4");
+    engine.lossAfter(["C3"], 6); // 6 below KataGo's best
+    engine.lossAfter(["D4"], 4.5); // the 19k move is only 1.5 better
+    ctl.play(C3);
+    await flush();
+    const v = ctl.view();
+    expect(v.status).toBe("playing");
+    expect(v.moment).toBeNull();
+    expect(v.moves).toHaveLength(2); // the bot replied
+    expect(v.moves[0]).toMatchObject({ judge: "at_level", eval: { pointLoss: 6, atLevel: { rank: "19k", move: "D4", loss: 1.5 } } });
+    // The reference comes from one human-SL evaluation at the game's rank, without a search.
+    const query = engine.analyzeCalls.find((c) => c.opts?.overrideSettings?.humanSLProfile);
+    expect(query?.opts).toMatchObject({ maxVisits: 1, includePolicy: true, overrideSettings: { humanSLProfile: "rank_19k" } });
+    // The review, the mistakes and practice problems use KataGo's best.
+    await ctl.handleAction({ type: "resign" });
+    const end = events.find((e) => e.type === "game_end");
+    if (end?.type !== "game_end") throw new Error("expected game_end");
+    expect(end.summary.mistakes.map((m) => [m.moveNumber, m.pointLoss, m.bestMove])).toEqual([[1, 6, "E5"]]);
+  });
+
+  it("pauses for a move that loses the threshold against the reference move, and the fallback shows that move's line", async () => {
+    await atLevelGame();
+    engine.humanPolicy = policyOn("D4");
+    engine.lossAfter(["C3"], 8);
+    engine.lossAfter(["D4"], 3);
+    engine.lines.set("D4", { best: "E5", pv: ["E5", "D5"] });
+    ctl.play(C3);
+    await flush();
+    const v = ctl.view();
+    expect(v.status).toBe("paused");
+    expect(v.moment).toMatchObject({ moveNumber: 1, pointLoss: 5, state: "fallback" });
+    expect(v.overlay?.variation).toMatchObject({ label: "A 19k's line instead of C3", fromMove: 1 });
+    expect(v.overlay?.variation?.moves.map((m) => m.point)).toEqual([D4, E5, { x: 3, y: 4 }]);
+    expect(v.overlay?.best).toEqual(D4);
+    expect(v.chat.at(-1)!.text).toMatch(/C3 cost about 5 points compared with D4, the move a 19k player would most likely play\./);
+  });
+
+  it("records a move better than the reference move as a gain, with nothing judged lost", async () => {
+    await atLevelGame();
+    engine.humanPolicy = policyOn("D4");
+    engine.lossAfter(["C3"], 1);
+    engine.lossAfter(["D4"], 3.5);
+    ctl.play(C3);
+    await flush();
+    const [first] = ctl.view().moves;
+    expect(first!.eval!.atLevel!.loss).toBe(-2.5);
+    expect(judgedLoss(first!)).toBe(0);
+  });
+
+  it("applies from the next move: a move keeps the mode it was played in", async () => {
+    await startGame();
+    engine.humanPolicy = policyOn("D4");
+    engine.lossAfter(["C3"], 6);
+    engine.lossAfter(["C3", "A9", "D4"], 4.5);
+    ctl.play(C3); // optimal: pauses
+    await flush();
+    expect(ctl.view().moment?.pointLoss).toBe(6);
+    await ctl.handleAction({ type: "set_judge_mode", mode: "at_level" });
+    expect(ctl.view().moves[0]!.judge).toBe("optimal");
+    await ctl.handleAction({ type: "continue" });
+    await flush();
+    ctl.play(D4);
+    await flush();
+    expect(ctl.view().moves[2]).toMatchObject({ judge: "at_level", eval: { atLevel: { move: "D4", loss: 0 } } });
+  });
+
+  it("falls back to judging against KataGo's best when the reference move can't be had", async () => {
+    await atLevelGame();
+    engine.humanPolicy = () => {
+      throw new Error("no human net");
+    };
+    engine.lossAfter(["C3"], 6);
+    ctl.play(C3);
+    await flush();
+    const v = ctl.view();
+    expect(v.moves[0]!.eval).toMatchObject({ pointLoss: 6 });
+    expect(v.moves[0]!.eval!.atLevel).toBeUndefined();
+    expect(v.moment).toMatchObject({ pointLoss: 6 });
+    expect(v.chat.some((m) => /couldn't compare move 1 with a 19k's move/.test(m.text))).toBe(true);
+  });
+
+  it("restores the game's reference rank and each move's mode after a restart", async () => {
+    await atLevelGame();
+    engine.humanPolicy = policyOn("D4");
+    ctl.play(C3);
+    await flush();
+    ctl.flush();
+    store.saveProfile({ ...store.loadProfile(), rating: 15 });
+    const again = new GameController({ engine, store, clock, botDelayMs: 0 });
+    expect(again.restoreLastGame()).toBe(true);
+    expect(again.view().atLevelRank).toBe("19k");
+    expect(again.view().moves[0]!.judge).toBe("at_level");
   });
 });
