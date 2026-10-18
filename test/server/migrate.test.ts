@@ -115,9 +115,9 @@ describe("rating model migration", () => {
     const b: TakenBackMove = { ...a, moveNumber: 5, before: ["E5", "J9", "D4", "J8"] };
     const file = [{ ...b, tag: { category: "tactics" as const } }, a, { ...a, tag: { category: "shape" as const } }];
     // The log has the two identical tries at move 3 first; the second one gets the second file entry's tag.
-    expect(pairAttempts(file, [a, a, b]).map((t) => t?.tag?.category)).toEqual([undefined, "shape", "tactics"]);
-    expect(pairAttempts(file, [a, a, a]).map((t) => t?.tag?.category)).toEqual([undefined, "shape", undefined]);
-    expect(pairAttempts([], [a])).toEqual([undefined]);
+    expect(pairAttempts(file, [a, a, b]).map(([, t]) => t?.tag?.category)).toEqual([undefined, "shape", "tactics"]);
+    expect(pairAttempts(file, [a, a, a]).map(([, t]) => t?.tag?.category)).toEqual([undefined, "shape", undefined]);
+    expect(pairAttempts([], [a])).toEqual([[a, undefined]]);
   });
 
   it("takes the log's first attempts when it replays the game, with what the file knows of them", async () => {

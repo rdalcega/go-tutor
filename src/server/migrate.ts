@@ -8,7 +8,7 @@
 // fails partway it writes nothing and throws `MigrationAborted`, and the controller tries again.
 
 import { gameFromLine, movesFromLine, writeSgf } from "../engine/index.ts";
-import { gtpLine, movePoint, pointKey, samePoint } from "../shared/coords.ts";
+import { gtpLine, pointKey } from "../shared/coords.ts";
 import { ratingToRank } from "../shared/rank.ts";
 import { assistText, rankEstimateText } from "../shared/text.ts";
 import { playedThreshold } from "../shared/threshold.ts";
@@ -65,26 +65,26 @@ export interface Reconstruction {
   events: number;
 }
 
-const sameMove = (a: Move, b: Move) => a.color === b.color && ("pass" in a ? "pass" in b : samePoint(movePoint(a), movePoint(b)));
+const moveKey = (m: Move) => `${m.color}${"pass" in m ? "pass" : pointKey(m.point)}`;
+const sameMove = (a: Move, b: Move) => moveKey(a) === moveKey(b);
 
 /** What makes a first attempt the one it is: its move number, move and position. */
 function attemptKey(t: TakenBackMove): string {
-  const point = movePoint(t.record.move);
-  return `${t.moveNumber}|${t.record.move.color}${point ? pointKey(point) : "pass"}|${t.before.join(" ")}`;
+  return `${t.moveNumber}|${moveKey(t.record.move)}|${t.before.join(" ")}`;
 }
 
 /**
- * For each of `attempts`, the entry of `list` that is the same first attempt (`attemptKey`), or
- * undefined: the file's and the log's lists needn't align by index, and identical repeated tries
- * (the same move taken back twice from one position) pair up in order.
+ * Each of `attempts` with the entry of `list` that is the same first attempt (`attemptKey`), if
+ * any: the file's and the log's lists needn't align by index, and identical repeated tries (the
+ * same move taken back twice from one position) pair up in order.
  */
-export function pairAttempts(list: readonly TakenBackMove[], attempts: readonly TakenBackMove[]): (TakenBackMove | undefined)[] {
+export function pairAttempts(list: readonly TakenBackMove[], attempts: readonly TakenBackMove[]): [TakenBackMove, TakenBackMove | undefined][] {
   const queues = new Map<string, TakenBackMove[]>();
   for (const k of list) {
     const key = attemptKey(k);
     queues.set(key, [...(queues.get(key) ?? []), k]);
   }
-  return attempts.map((t) => queues.get(attemptKey(t))?.shift());
+  return attempts.map((t) => [t, queues.get(attemptKey(t))?.shift()]);
 }
 
 /** A copy of the first attempt `t`, with what the file knows of it (`old`: its eval, category and tag). */
@@ -177,7 +177,7 @@ export function reconstructGame(saved: SavedGame, events: readonly TutorEvent[])
   // log yields. All copies: the file's objects are left alone.
   const known = saved.takenBack ?? [];
   const firsts = complete
-    ? pairAttempts(known, takenBack).map((old, i) => copyAttempt(takenBack[i]!, old))
+    ? pairAttempts(known, takenBack).map(([t, old]) => copyAttempt(t, old))
     : known.length
       ? known.map((t) => copyAttempt(t))
       : consistent
@@ -410,9 +410,7 @@ export async function migrateRatingModel(deps: MigrationDeps): Promise<Migration
     // The file as it is now: a tag the tutor made while KataGo worked is in its summary (a board
     // move) or on its first attempts, so the summary written is built from it, not the snapshot.
     const current = store.loadGame(saved.id) ?? saved;
-    pairAttempts(current.takenBack ?? [], rebuilt.takenBack).forEach((now, i) => {
-      if (now?.tag) rebuilt.takenBack[i]!.tag = now.tag;
-    });
+    for (const [t, now] of pairAttempts(current.takenBack ?? [], rebuilt.takenBack)) if (now?.tag) t.tag = now.tag;
     const summary = summaryWithFirstAttempts(current, current.summary ?? saved.summary!, rebuilt, threshold);
     const change = changes.get(saved.id);
     if (change) summary.rating = change;

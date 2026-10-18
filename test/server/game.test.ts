@@ -770,15 +770,36 @@ describe("GameController", () => {
     engine.hold = true;
     engine.lossAfter(["C3"], 6);
     ctl.play(C3);
-    const resigned = ctl.handleAction({ type: "resign" });
-    expect(ctl.view()).toMatchObject({ status: "finished", result: { reason: "resign" } });
+    await ctl.handleAction({ type: "resign" }); // answers at once
+    expect(ctl.view()).toMatchObject({ status: "playing", result: { reason: "resign" } });
+    expect(ctl.view().summary).toBeUndefined();
+    expect(ctl.view().allowed).not.toContain("resign");
+    await expect(ctl.handleAction({ type: "resign" })).rejects.toThrow(/already over/);
     engine.releaseAll();
-    await resigned;
     await flush();
-    expect(ctl.view().moment).toBeNull();
+    expect(ctl.view()).toMatchObject({ status: "finished", moment: null });
     expect(ctl.view().summary?.mistakes).toMatchObject([{ moveNumber: 1, move: "C3", pointLoss: 6 }]);
     expect(types()).toEqual(["game_start", "move", "game_end"]);
     expect(store.lastGame({ finished: true })!.moves[0]!.eval?.pointLoss).toBe(6);
+  });
+
+  it("a new game right after such a resignation ends the resigned game without the verdict", async () => {
+    await startGame();
+    engine.hold = true;
+    engine.lossAfter(["C3"], 6);
+    ctl.play(C3);
+    await ctl.handleAction({ type: "resign" });
+    const first = ctl.view().gameId!;
+    await ctl.handleAction({ type: "new_game" });
+    engine.releaseAll();
+    await flush();
+    const saved = store.loadGame(first)!;
+    expect(saved.result?.reason).toBe("resign");
+    expect(saved.summary?.mistakes).toEqual([]); // finished before the verdict came
+    expect(events.filter((e) => e.type === "game_end").map((e) => e.type === "game_end" && e.gameId)).toEqual([first]);
+    expect(ctl.view()).toMatchObject({ status: "playing", result: null });
+    expect(ctl.view().summary).toBeUndefined();
+    expect(ctl.view().gameId).not.toBe(first);
   });
 
   it("a restart during a teaching moment opens it again instead of letting the bot move", async () => {

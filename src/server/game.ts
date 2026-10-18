@@ -748,10 +748,15 @@ export class GameController {
   newGame(partial: Partial<GameSettings> = {}): void {
     const { settings, fromProfile } = this.validateSettings(partial);
     this.closePractice(); // a new game ends problem mode
-    if (this.game && !this.result && this.gameId) {
-      // Leaving an unfinished game: keep its record, but it doesn't count.
-      this.result = { winner: null, margin: 0, reason: "abandon" };
-      this.save();
+    if (this.game && this.gameId && this.status !== "finished") {
+      if (this.result) {
+        // Resigned, waiting for the last move's verdict: it ends now, without it.
+        this.finish(this.result);
+      } else {
+        // Leaving an unfinished game: keep its record, but it doesn't count.
+        this.result = { winner: null, margin: 0, reason: "abandon" };
+        this.save();
+      }
     }
     this.flush(); // the old game's last changes belong in its own file
     this.resetGameState();
@@ -1391,16 +1396,20 @@ export class GameController {
 
   // --- game end ------------------------------------------------------------------------
 
-  private async resign(): Promise<void> {
-    const { settings } = this.requireGame();
+  private resign(): void {
+    const { game, settings } = this.requireGame();
     if (this.result) throw new UserError("The game is already over.");
-    // The move still being evaluated keeps its verdict (it may be the blunder they resign over):
-    // with the result already in, its arrival opens no moment and the bot doesn't reply.
-    this.result = { winner: opponent(settings.humanColor), margin: 0, reason: "resign" };
-    this.status = "finished";
+    const result: GameResult = { winner: opponent(settings.humanColor), margin: 0, reason: "resign" };
+    if (!this.evaluating) return this.finish(result);
+    // The move still being evaluated keeps its verdict (it may be the blunder they resign over): the
+    // result is in at once (no moment opens, the bot doesn't reply, nothing else is accepted) and the
+    // game finishes when the verdict lands, unless a new game replaced it first (newGame then ends
+    // it without the verdict).
+    this.result = result;
     this.changed();
-    await this.evaluation;
-    this.finish(this.result);
+    void this.evaluation.then(() => {
+      if (this.game === game && this.result === result && this.status !== "finished") this.finish(result);
+    });
   }
 
   private async finishByScore(): Promise<void> {
