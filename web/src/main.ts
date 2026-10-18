@@ -276,6 +276,8 @@ function renderPassBanner(v: GameView | null): void {
   if (!text || !v) {
     clearTimeout(passBannerTimer);
     el.passBanner.hidden = true;
+    // Forget the pass once it is no longer the last move: after a take-back, a pass at the same number is a new one.
+    passBannerShownFor = null;
     return;
   }
   const key = `${v.gameId}|${v.moves.length}`;
@@ -666,7 +668,10 @@ function renderResult(v: GameView | null): void {
   const human = v.settings?.humanColor;
   const won = r.winner !== null && r.winner === human;
   el.resultTitle.textContent = r.winner === null ? "Draw" : won ? "You won" : "You lost";
-  el.resultText.textContent = r.winner === null ? "The game ended in a draw." : `${formatScore(r)}.`;
+  // The dialog is modal (the status line behind it is inert), so it says itself how the game ended.
+  const pass = human ? lastPass(v.moves, human) : null;
+  const ended = !pass?.final ? "" : pass.by === "bot" ? `${colorName(pass.color)} passed too, so the game ended. ` : "You both passed, so the game ended. ";
+  el.resultText.textContent = `${ended}${r.winner === null ? "The game ended in a draw." : `${formatScore(r)}.`}`;
 
   // The server's mistakes (worst first, at the threshold the game was played with).
   const mistakes = (v.summary?.mistakes ?? []).slice(0, 3);
