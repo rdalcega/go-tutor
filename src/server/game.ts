@@ -61,7 +61,7 @@ import { ProblemGenerator } from "./generate.ts";
 import { atLevelEvalFrom, humanPolicyOptions, moveEvalFrom, needsReferenceAnalysis, positionOf, topHumanMove, type Analysis, type Engine, type Position } from "./katago.ts";
 import { migrateRatingModel } from "./migrate.ts";
 import { PracticeSession, type PracticeDeps } from "./practice.ts";
-import { gameSource, generateProblems, pickNextProblem, promptFor, resultOf, schedule, type StoredProblem } from "./problems.ts";
+import { gameSource, generateProblems, pickNextProblem, recategorize, resultOf, schedule, type StoredProblem } from "./problems.ts";
 import {
   applyEstimate,
   applyGame,
@@ -240,8 +240,6 @@ export class GameController {
   private botFailures = 0;
   /** The human move whose evaluation is in flight. The bot waits for it, so a moment can't be skipped. */
   private evaluating: MoveRecord | null = null;
-  /** That evaluation's completion (resolved when none is in flight): a resignation waits for it. */
-  private evaluation: Promise<void> = Promise.resolve();
   private momentTimer: unknown = null;
   /** Mistakes whose teaching moment has opened (or was dismissed before a restart). */
   private readonly momentShown = new WeakSet<MoveRecord>();
@@ -478,7 +476,7 @@ export class GameController {
     }
     if (this.status !== "playing") return;
     if (human && !human.eval && !this.evaluating) {
-      this.evaluation = this.evaluateHumanMove(human);
+      void this.evaluateHumanMove(human);
       return;
     }
     void this.prefetch();
@@ -492,7 +490,8 @@ export class GameController {
    */
   restoreLastGame(): boolean {
     const saved = this.store.lastGame();
-    if (!saved || (saved.result && (saved.summary || saved.result.reason === "abandon"))) return false;
+    // Nothing to pick up: no game, or one that finished (it has a summary) or was abandoned.
+    if (!saved || saved.summary || saved.result?.reason === "abandon") return false;
     let game: GoGame;
     try {
       game = GoGame.fromMoves(saved.settings.size, saved.settings.komi, saved.settings.handicap, saved.moves.map((r) => r.move));
@@ -525,7 +524,6 @@ export class GameController {
     this.system(`Picked up where you left off: game ${saved.id}, move ${game.moves.length}.`);
     if (saved.result) {
       this.finish(saved.result);
-      this.changed();
       return true;
     }
     // A mistake the learner dismissed stays dismissed; an open moment comes back as it was (its
@@ -889,7 +887,7 @@ export class GameController {
       // The bot passed and so did the human: nothing left to evaluate.
       void this.finishByScore();
     } else {
-      this.evaluation = this.evaluateHumanMove(record);
+      void this.evaluateHumanMove(record);
     }
     this.changed();
   }
@@ -946,6 +944,8 @@ export class GameController {
       if (this.evaluating === record) this.evaluating = null;
     }
     this.save();
+    // Resigned while this verdict was on its way: the game finishes with it now.
+    if (this.result) return this.finish(this.result);
     const loss = judgedLoss(record);
     // The moment opens now, or once the learner is back from a practice problem.
     if (loss !== undefined && loss >= this.threshold) this.resumeTurn();
@@ -1406,20 +1406,17 @@ export class GameController {
   // --- game end ------------------------------------------------------------------------
 
   private resign(): void {
-    const { game, settings } = this.requireGame();
+    const { settings } = this.requireGame();
     if (this.result) throw new UserError("The game is already over.");
     const result: GameResult = { winner: opponent(settings.humanColor), margin: 0, reason: "resign" };
     if (!this.evaluating) return this.finish(result);
     // The move still being evaluated keeps its verdict (it may be the blunder they resign over): the
-    // result is in at once (no moment opens, the bot doesn't reply, nothing else is accepted, and it
-    // is on file, so a restart finishes the game) and the game finishes when the verdict lands,
-    // unless a new game replaced it first (newGame then ends it without the verdict).
+    // result is in at once (no moment opens, the bot doesn't reply, nothing else is accepted) and the
+    // game finishes when the verdict lands (evaluateHumanMove), or without it if a new game or a
+    // restart (the result is on file) gets there first.
     this.result = result;
     this.save();
     this.changed();
-    void this.evaluation.then(() => {
-      if (this.game === game && this.result === result && this.status !== "finished") this.finish(result);
-    });
   }
 
   private async finishByScore(): Promise<void> {
@@ -1754,9 +1751,7 @@ export class GameController {
     try {
       this.updateProblems((problems) => {
         const problem = problems.find(fromMove);
-        if (!problem) return;
-        problem.category = category;
-        problem.prompt = promptFor(category, problem.toPlay);
+        if (problem) recategorize(problem, category);
       });
     } catch (err) {
       this.log(`updating the problem from ${gameId} move ${moveNumber} failed: ${(err as Error).message}`);

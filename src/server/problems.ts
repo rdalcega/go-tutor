@@ -189,6 +189,12 @@ export function promptFor(category: MistakeCategory, toPlay: Color): string {
   return `${colorName(toPlay)} to play. ${PROMPTS[category]}`;
 }
 
+/** A problem's category changed (the tutor tagged its mistake): its prompt follows. */
+export function recategorize(p: Pick<StoredProblem, "category" | "prompt" | "toPlay">, category: MistakeCategory): void {
+  p.category = category;
+  p.prompt = promptFor(category, p.toPlay);
+}
+
 /** Whether a mistake's stored candidates are too shallow to trust for the answers. */
 export function candidatesThin(candidates: readonly Pick<Candidate, "visits">[]): boolean {
   return candidates.length < 2 || candidates.reduce((sum, c) => sum + c.visits, 0) < THIN_VISITS;

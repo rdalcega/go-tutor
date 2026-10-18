@@ -64,8 +64,6 @@ export class TutorBridge {
   private viewQueued = false;
   /** Browsers waiting for "drain" before they get the next view. */
   private readonly draining = new Set<ServerResponse>();
-  /** Moments found in the log for fresh streams, by id (never reused, so a find stands; a miss is looked up again). */
-  private readonly momentsFromLog = new Map<string, TutorEvent>();
 
   constructor(
     private readonly controller: GameController,
@@ -185,11 +183,7 @@ export class TutorBridge {
     const newest = [...this.ring].reverse();
     const momentEvent = (id: string): TutorEvent | null => {
       const matches = (e: TutorEvent) => e.type === "teaching_moment" && e.moment.id === id;
-      const inRing = newest.find(matches);
-      if (inRing) return inRing;
-      const logged = this.momentsFromLog.get(id) ?? this.store.findEvent("teaching_moment", matches);
-      if (logged) this.momentsFromLog.set(id, logged);
-      return logged;
+      return newest.find(matches) ?? this.store.findEvent("teaching_moment", matches);
     };
     const events = [open && momentEvent(open), problemId && newest.find((e) => e.type === "problem_start" && e.problemId === problemId)];
     return events.filter((e): e is TutorEvent => !!e).sort((a, b) => a.seq - b.seq);
