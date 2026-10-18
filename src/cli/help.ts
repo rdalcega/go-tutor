@@ -33,8 +33,9 @@ SESSION FLOW
                  Your answer marks their next move as helped, so it doesn't count for the rank estimate.)
   5. on USER:    answer with say (pass --moment <id> when the line names one).
   6. on GAME_END: read the review below the line, discuss the top 1-2 mistakes, tag categories, then
-                 offer a review of the game's mistakes as problems (problem --game <id>) or new-game. The server waits up to 15 s for the rank estimate, so the RATING line
-                 usually comes with GAME_END; a slower one follows on its own.
+                 offer a review of the game's mistakes as problems (problem --game <id>) or new-game.
+                 The server waits up to 15 s for the rank estimate, so the RATING line usually comes
+                 with GAME_END; a slower one follows on its own.
   7. on PROBLEM_START / PROBLEM: the learner is on a practice problem. Let them try; after a wrong
                  first attempt ask what they see (say); after the answer is shown, explain it with show.
                  "review g12 2/4" on the line: the 2nd of 4 problems in a review of game g12's mistakes;

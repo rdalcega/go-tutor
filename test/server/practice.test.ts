@@ -629,13 +629,24 @@ describe("reviewing a game's mistakes", () => {
     await ctl.handleAction({ type: "review_game", gameId: "g7" });
     engine.hold = true;
     await ctl.handleAction({ type: "play", point: at("E1") });
-    await expect(ctl.handleAction({ type: "next_problem" })).rejects.toThrow(/still checking/);
+    expect(ctl.view().allowed).not.toContain("next_problem");
+    await expect(ctl.handleAction({ type: "next_problem" })).rejects.toThrow();
     engine.releaseAll();
     await flush();
+    expect(ctl.view().allowed).toContain("next_problem");
     await ctl.handleAction({ type: "next_problem" });
     expect(ctl.view().problem).toMatchObject({ id: "p1", review: { index: 3, total: 3 } });
     await ctl.handleAction({ type: "next_problem" });
-    expect(ctl.view().chat.at(-1)?.text).toBe("Review done: you solved 1 of 3. Practice brings back the ones you missed.");
+    // The problem that couldn't be set up doesn't count.
+    expect(ctl.view().chat.at(-1)?.text).toBe("Review done: you solved 1 of 2. Practice brings back the ones you missed.");
+  });
+
+  it("refuses a review none of whose problems can be set up", async () => {
+    const problems = store.loadProblems();
+    for (const p of problems) if (p.id !== "p4") p.stones.B.push("Z99");
+    store.saveProblems(problems);
+    await expect(ctl.handleAction({ type: "review_game", gameId: "g7" })).rejects.toThrow(/couldn't be set up/);
+    expect(ctl.view().problem).toBeNull();
   });
 
   it("ends the review when the learner leaves it, or another problem starts", async () => {

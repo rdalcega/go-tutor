@@ -139,6 +139,8 @@ interface ReviewState {
   ids: string[];
   index: number;
   solved: Set<string>;
+  /** Problems that couldn't be set up, left out of the count. */
+  skipped: Set<string>;
 }
 
 /** Rating-migration attempts per server run that KataGo may fail before it waits for a restart. */
@@ -447,6 +449,7 @@ export class GameController {
       problem: this.practice ? this.practice.actionState : null,
       overlay: this.activeOverlay !== null,
       reviewProblems: this.reviewProblems,
+      inReview: this.review !== null,
     };
   }
 
@@ -1858,12 +1861,15 @@ export class GameController {
 
   /**
    * A game problem saved before problems kept their recent moves: they come from the game record,
-   * once (none when the record is gone or no longer leads to the position), and are saved with it.
+   * once (none when the record no longer leads to the position), and are saved with it; a record that
+   * can't be read is tried again at the next start.
    */
   private backfillRecent(problem: StoredProblem): StoredProblem {
     const source = gameSource(problem);
     const saved = source && this.store.loadGame(source.gameId);
-    const recent = (saved && recentFromGame(problem, saved)) ?? [];
+    // Unreadable now (missing, or caught mid-write): no labels this time, and the next start tries again.
+    if (!saved) return problem;
+    const recent = recentFromGame(problem, saved) ?? [];
     try {
       this.updateProblems((problems) => {
         const p = problems.find((q) => q.id === problem.id);
@@ -1898,7 +1904,7 @@ export class GameController {
     if (ids.length === 0) {
       throw new UserError(`Game ${id} has no practice problems${id === this.gameId ? " yet: they are made from its mistakes a little after it ends" : ""}.`);
     }
-    this.reviewFrom({ gameId: id, ids, index: 0, solved: new Set() }, 0);
+    this.reviewFrom({ gameId: id, ids, index: 0, solved: new Set(), skipped: new Set() }, 0);
   }
 
   /** Next problem during a review: the review's next one, or after the last, back to the game with how it went. */
@@ -1917,10 +1923,12 @@ export class GameController {
       } catch (err) {
         if (!(err instanceof UserError)) throw err;
         this.log(`review of ${review.gameId}: skipping ${review.ids[i]}: ${err.message}`);
+        review.skipped.add(review.ids[i]!);
       }
     }
+    const n = review.ids.length - review.skipped.size;
+    if (n === 0) throw new UserError(`Game ${review.gameId}'s practice problems couldn't be set up.`);
     this.leaveProblem();
-    const n = review.ids.length;
     const solved = review.solved.size;
     const all = n === 1 ? "it" : `all ${n}`;
     this.system(

@@ -253,6 +253,7 @@ class MockServer implements Transport {
       problem: v.problem ? { revealed: v.problem.revealed, checking: false } : null,
       overlay: v.overlay !== null,
       reviewProblems: v.reviewProblems ?? 0,
+      inReview: this.review !== null,
     });
   }
 

@@ -24,6 +24,8 @@ export interface ActionState {
   overlay: boolean;
   /** A finished game's practice problems, which Review mistakes goes through. */
   reviewProblems?: number;
+  /** In problem mode: the problem is part of a review of one game's mistakes. */
+  inReview?: boolean;
 }
 
 /** Actions the browser can send in any mode. */
@@ -86,7 +88,9 @@ export function hintBlocked(
 export function allowedActions(s: ActionState): ActionType[] {
   if (s.mode === "problem") {
     const canPlay = s.problem !== null && !s.problem.revealed && !s.problem.checking && s.engineReady;
-    return [...always(s), "leave_problem", ...(canPlay ? (["play"] as const) : [])];
+    // During a review Next waits for KataGo's verdict: it would drop the attempt's result.
+    const base = s.inReview && s.problem?.checking ? always(s).filter((a) => a !== "next_problem") : always(s);
+    return [...base, "leave_problem", ...(canPlay ? (["play"] as const) : [])];
   }
   // A finished game's mistakes can be reviewed once they are practice problems.
   if (s.mode === "game" && s.finished && (s.reviewProblems ?? 0) > 0) return [...always(s), "review_game"];

@@ -407,7 +407,6 @@ function renderReviewButtons(v: GameView | null): void {
   el.reviewGame.hidden = el.resultReview.hidden = n === 0;
   el.reviewGame.textContent = el.resultReview.textContent = `Review mistakes (${n})`;
   el.reviewGame.title = el.resultReview.title = title;
-  el.reviewGame.disabled = el.resultReview.disabled = !can(v, "review_game");
 }
 
 function renderProblem(v: GameView | null): void {
