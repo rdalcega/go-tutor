@@ -40,9 +40,11 @@ export const PV_STONES = 6;
 
 /** One more than the largest number in the ids of the form `<prefix><n>` (1 when there is none): the next free id's number. */
 export function nextNumber(ids: Iterable<string>, prefix: string): number {
-  const pattern = new RegExp(`^${prefix}(\\d+)$`);
   let max = 0;
-  for (const id of ids) max = Math.max(max, Number(pattern.exec(id)?.[1] ?? 0));
+  for (const id of ids) {
+    const rest = id.startsWith(prefix) ? id.slice(prefix.length) : "";
+    if (/^\d+$/.test(rest)) max = Math.max(max, Number(rest));
+  }
   return max + 1;
 }
 

@@ -813,6 +813,32 @@ describe("GameController", () => {
     expect(again.view().chat.some((m) => /cost about/.test(m.text))).toBe(false);
   });
 
+  it("a restart after the tutor resumed with a drawing up keeps the pause for the learner's Continue, without a fallback", async () => {
+    setup({ tutor: true });
+    await startGame();
+    engine.lossAfter(["C3"], 6);
+    ctl.play(C3);
+    await flush();
+    const id = ctl.view().moment!.id;
+    await ctl.handleTutor({ type: "show", moves: ["E5", "D4"] });
+    await ctl.handleTutor({ type: "say", text: "E5 is bigger." });
+    await ctl.handleTutor({ type: "resume" });
+    expect(ctl.view().moment).toMatchObject({ state: "tutor", awaitingLearner: true });
+    ctl.flush();
+    const again = new GameController({ engine, store, clock, botDelayMs: 0, tutorTimeoutMs: 30_000 });
+    again.restoreLastGame();
+    again.setEngineState("ready");
+    await flush();
+    expect(again.view().status).toBe("paused");
+    expect(again.view().moment).toMatchObject({ id, state: "tutor", awaitingLearner: true });
+    expect(again.view().moment?.deadline).toBeUndefined();
+    clock.advance(60_000);
+    expect(again.view().moment?.state).toBe("tutor"); // the tutor already answered: KataGo doesn't
+    expect(again.view().chat.some((m) => /cost about/.test(m.text))).toBe(false);
+    await again.handleAction({ type: "continue" });
+    expect(again.view().status).toBe("playing");
+  });
+
   it("a restart during a moment the tutor had falls back once nobody comes back for it", async () => {
     setup({ tutor: true });
     await startGame();

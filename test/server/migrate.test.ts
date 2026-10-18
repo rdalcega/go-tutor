@@ -110,6 +110,41 @@ describe("rating model migration", () => {
     expect(partial.moves.every((r) => !r.assist)).toBe(true);
   });
 
+  it("keeps a game's saved first attempts when the log can't rebuild them", async () => {
+    const { store, engine, gameId, current } = await oldGame();
+    tenKyu(engine);
+    // The new server's record (first attempts kept), whose events are gone from the log.
+    store.saveGame(current, store.loadSgf(gameId)!);
+    writeFileSync(join(store.dir, "events.jsonl"), "");
+    expect(reconstructGame(store.loadGame(gameId)!, store.readEvents())).toMatchObject({ complete: false, takenBack: [{ moveNumber: 3, by: "human" }] });
+    await migrateRatingModel({ store, engine, now: () => 1_800_000_000_000, log: () => {}, threshold: 4 });
+    const saved = store.loadGame(gameId)!;
+    expect(saved.takenBack).toHaveLength(1);
+    expect(saved.summary!.mistakes).toMatchObject([{ moveNumber: 3, move: "C3", takenBack: 0 }]);
+  });
+
+  it("keeps a tag the tutor makes while its KataGo work runs", async () => {
+    const { store, engine, gameId, current } = await oldGame();
+    tenKyu(engine);
+    store.saveGame(current, store.loadSgf(gameId)!); // the first attempt is on file, so the tutor can tag it
+    let tagged = false;
+    engine.respond = () => {
+      if (tagged) return undefined;
+      tagged = true;
+      // `tutor tag <game> 3 shape --taken-back`, as the controller writes it, during the first KataGo query.
+      const game = store.loadGame(gameId)!;
+      game.takenBack![0]!.tag = { category: "shape", note: "empty triangle" };
+      Object.assign(game.summary!.mistakes.find((m) => m.takenBack === 0)!, { category: "shape", categorySource: "tutor" });
+      store.saveGame(game, store.loadSgf(gameId)!);
+      return undefined;
+    };
+    await migrateRatingModel({ store, engine, now: () => 1_800_000_000_000, log: () => {}, threshold: 4 });
+    expect(tagged).toBe(true);
+    const saved = store.loadGame(gameId)!;
+    expect(saved.takenBack![0]!.tag).toEqual({ category: "shape", note: "empty triangle" });
+    expect(saved.summary!.mistakes).toMatchObject([{ moveNumber: 3, takenBack: 0, category: "shape", categorySource: "tutor" }]);
+  });
+
   it("re-estimates the rating from the moves, adds the first attempts' mistakes and problems, backs up, and is idempotent", async () => {
     const { store, engine, gameId } = await oldGame();
     tenKyu(engine);

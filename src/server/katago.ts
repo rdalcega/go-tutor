@@ -25,9 +25,10 @@ import { createInterface } from "node:readline";
 import { delimiter, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { opponent } from "../engine/board.ts";
-import { toGtp, tryFromGtp } from "../shared/coords.ts";
+import type { GoGame } from "../engine/game.ts";
+import { moveGtp, toGtp, tryFromGtp } from "../shared/coords.ts";
 import { toHumanSLProfile } from "../shared/rank.ts";
-import type { AtLevelEval, Color, Gtp, MoveEval } from "../shared/types.ts";
+import type { AtLevelEval, Color, Gtp, Move, MoveEval } from "../shared/types.ts";
 
 /** A position as KataGo needs it. Moves are replayed from the initial stones. */
 export interface Position {
@@ -161,6 +162,18 @@ export function sideToMove(pos: Position): Color {
   return pos.initialPlayer ?? (pos.initialStones?.length ? "W" : "B");
 }
 
+/** The position after `moves` in a game set up like `game` (its handicap or setup stones), as KataGo needs it. */
+export function positionOf(game: Pick<GoGame, "size" | "komi" | "initialStones" | "initialPlayer">, moves: readonly Move[]): Position {
+  return {
+    size: game.size,
+    komi: game.komi,
+    rules: "chinese",
+    moves: moves.map((m) => [m.color, moveGtp(m, game.size)]),
+    initialStones: game.initialStones.map((s) => [s.color, toGtp(s.point, game.size)]),
+    initialPlayer: game.initialPlayer,
+  };
+}
+
 /** Policy index (y * size + x, y = 0 at the top; size*size = pass) to a GTP coordinate. */
 export function policyIndexToGtp(index: number, size: number): Gtp {
   if (index === size * size) return "pass";
@@ -216,8 +229,8 @@ export function chooseBotMove(
       total += p;
     }
   }
-  // Every board move is under 1%: the most likely one.
-  if (candidates.length === 0) return top;
+  // Every board move is under 1%: the most likely one, or pass when none has any probability at all.
+  if (candidates.length === 0) return human[policyIndex(top, size)]! > 0 ? top : "pass";
   let r = random() * total;
   for (const c of candidates) {
     r -= c.p;

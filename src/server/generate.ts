@@ -203,10 +203,10 @@ export function emptyGeneration(): GenerationFile {
 export function normalizeGeneration(file: GenerationFile): string | null {
   const last = file.batches.at(-1);
   const unfinished = last && !last.finishedAt ? last : null;
-  const named = file.progress?.batchId ?? null;
-  if (named === (unfinished?.id ?? null)) return null;
+  if (unfinished ? file.progress?.batchId === unfinished.id : file.progress === null) return null;
+  const named = file.progress?.batchId ?? "no batch";
   file.progress = unfinished ? { batchId: unfinished.id, game: null, reserve: [] } : null;
-  return unfinished ? `progress for ${named ?? "no batch"} replaced: resuming ${unfinished.id}` : `progress for unknown ${named} dropped`;
+  return unfinished ? `progress for ${named} replaced: resuming ${unfinished.id}` : `progress for ${named} dropped`;
 }
 
 function perSize<T>(make: (size: BoardSize) => T): Record<BoardSize, T> {

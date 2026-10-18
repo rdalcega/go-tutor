@@ -5,11 +5,11 @@
 // makes the KataGo queries.
 
 import { GoGame, movesFromLine } from "../engine/index.ts";
-import { moveGtp, toGtp } from "../shared/coords.ts";
+import { moveGtp } from "../shared/coords.ts";
 import { rankToRating } from "../shared/rank.ts";
 import { round2 } from "../shared/text.ts";
 import type { AssistCounts, GameSettings, Gtp, Move, MoveRecord, RankEstimate, TakenBackMove } from "../shared/types.ts";
-import { BACKGROUND_PRIORITY, humanMoveProbability, humanPolicyOptions, type Analysis, type AnalyzeOptions, type Position } from "./katago.ts";
+import { BACKGROUND_PRIORITY, humanMoveProbability, humanPolicyOptions, positionOf, type Analysis, type AnalyzeOptions, type Position } from "./katago.ts";
 
 /** The human-SL profiles the likelihood is measured at, weakest first. */
 export const ESTIMATE_RANKS = ["20k", "18k", "15k", "12k", "10k", "8k", "5k", "3k", "1k", "1d", "3d", "5d", "9d"] as const;
@@ -35,15 +35,7 @@ export interface RankSample {
 
 /** The KataGo position after `moves` from the game's settings (handicap stones included). */
 export function positionFor(settings: Pick<GameSettings, "size" | "komi" | "handicap">, moves: readonly Move[]): Position {
-  const start = new GoGame(settings.size, settings.komi, settings.handicap);
-  return {
-    size: settings.size,
-    komi: settings.komi,
-    rules: "chinese",
-    moves: moves.map((m) => [m.color, moveGtp(m, settings.size)]),
-    initialStones: start.initialStones.map((s) => [s.color, toGtp(s.point, settings.size)]),
-    initialPlayer: start.initialPlayer,
-  };
+  return positionOf(new GoGame(settings.size, settings.komi, settings.handicap), moves);
 }
 
 /** Whether a human move counts for the estimate: it got no help, and it isn't a pass or an opening move. */

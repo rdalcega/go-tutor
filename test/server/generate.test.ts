@@ -25,6 +25,7 @@ import {
   masteryNeeded,
   nextBatchTrigger,
   nextGeneratedId,
+  normalizeGeneration,
   removeLegacyBuiltins,
   swapColors,
   wrongGap,
@@ -94,6 +95,21 @@ describe("the next batch's trigger", () => {
     expect(nextBatchTrigger({ version: 1, batches: [], progress: null }, [])).toBe("first");
     const running: GenerationFile = { version: 1, batches: [batch("batch1", false)], progress: { batchId: "batch1", game: null, reserve: [] } };
     expect(nextBatchTrigger(running, problems(20))).toBeNull();
+  });
+
+  it("repairs a generation file whose progress doesn't belong to an unfinished newest batch", () => {
+    const stray: GenerationFile = { version: 1, batches: [], progress: { batchId: "batch7", game: null, reserve: [] } };
+    expect(normalizeGeneration(stray)).toMatch(/batch7 dropped/);
+    expect(stray.progress).toBeNull();
+    const nameless: GenerationFile = { version: 1, batches: [batch("batch1", true)], progress: { game: null, reserve: [] } as unknown as GenerationFile["progress"] };
+    expect(normalizeGeneration(nameless)).toMatch(/no batch dropped/);
+    expect(nameless.progress).toBeNull();
+    const abandoned: GenerationFile = { version: 1, batches: [batch("batch2", false)], progress: null };
+    expect(normalizeGeneration(abandoned)).toMatch(/resuming batch2/);
+    expect(abandoned.progress).toEqual({ batchId: "batch2", game: null, reserve: [] });
+    const fine: GenerationFile = { version: 1, batches: [batch("batch2", false)], progress: { batchId: "batch2", game: null, reserve: [] } };
+    expect(normalizeGeneration(fine)).toBeNull();
+    expect(fine.progress?.batchId).toBe("batch2");
   });
 
   it("starts the next batch once 15 of the newest batch's 20 problems are in box 3 or higher", () => {

@@ -58,7 +58,7 @@ export interface Reconstruction {
   moves: MoveRecord[];
   takenBack: TakenBackMove[];
   assistance: AssistCounts;
-  /** The log's moves replay to exactly the saved game (else only the saved moves and any first attempts found are used). */
+  /** The log's moves replay to exactly the saved game (else the saved moves, with the saved first attempts or else any the log yielded, are used). */
   complete: boolean;
   /** Events of the game found in the log. */
   events: number;
@@ -141,7 +141,27 @@ export function reconstructGame(saved: SavedGame, events: readonly TutorEvent[])
     const { assist: _old, ...rest } = r;
     return assist?.length ? { ...rest, assist } : rest;
   });
-  return { moves, takenBack: consistent ? takenBack : [], assistance: complete ? assistance : { ...assistance, ...saved.assistance }, complete, events: mine.length };
+  // A game saved with its first attempts keeps them when the log can't rebuild it (the log is the
+  // only source for games saved before first attempts were kept).
+  const firsts = complete ? takenBack : saved.takenBack?.length ? saved.takenBack : consistent ? takenBack : [];
+  return { moves, takenBack: firsts, assistance: complete ? assistance : { ...assistance, ...saved.assistance }, complete, events: mine.length };
+}
+
+/**
+ * The tutor's tags as the game file has them now, onto the rebuilt first attempts and the summary's
+ * categories: a tag made while the migration's KataGo work ran must not be undone by its snapshot.
+ */
+function applyCurrentTags(current: SavedGame, takenBack: readonly TakenBackMove[], summary: GameSummary): void {
+  takenBack.forEach((t, i) => {
+    const now = current.takenBack?.[i];
+    if (now?.tag && now.moveNumber === t.moveNumber) t.tag = now.tag;
+  });
+  for (const m of summary.mistakes) {
+    const tag = m.takenBack !== undefined ? takenBack[m.takenBack]?.tag : current.tags?.[m.moveNumber];
+    if (!tag) continue;
+    m.category = tag.category;
+    m.categorySource = "tutor";
+  }
 }
 /** What `migrateRatingModel` needs. */
 export interface MigrationDeps {
@@ -375,8 +395,9 @@ export async function migrateRatingModel(deps: MigrationDeps): Promise<Migration
     const { saved, rebuilt, summary } = entry;
     const change = changes.get(saved.id);
     if (change) summary.rating = change;
-    // The file as it is now: the tutor may have tagged a move while KataGo worked.
+    // The file as it is now: a tag the tutor made while KataGo worked wins over the snapshot's categories.
     const current = store.loadGame(saved.id) ?? saved;
+    applyCurrentTags(current, rebuilt.takenBack, summary);
     const updated: SavedGame = { ...current, moves: rebuilt.moves, takenBack: rebuilt.takenBack, assistance: rebuilt.assistance, summary };
     store.saveGame(updated, store.loadSgf(saved.id) ?? writeSgf(saved.settings, saved.moves, saved.result, {}));
   }

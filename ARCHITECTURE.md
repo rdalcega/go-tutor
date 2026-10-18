@@ -119,10 +119,12 @@ a restart before the move still counts it as assisted.
 **Restart.** `restoreLastGame` picks up the newest unfinished game with its chat, tags, first
 attempts, help and open question. A moment the learner dismissed stays dismissed. An open one comes
 back as it was saved, with its id (the tutor stream gets its `teaching_moment` again): KataGo's
-fallback is drawn again without repeating its chat message; a moment the tutor had, or was waiting
-for (it had a deadline), waits `TUTOR_TIMEOUT_MS` for the tutor to reconnect, as after a dropped
-connection, before KataGo answers; one nobody was handling falls back at once. A mistake whose eval
-arrived but never opened a moment opens one now.
+fallback is drawn again without repeating its chat message; a moment the tutor finished (resumed
+with a drawing up) keeps waiting for the learner's Continue, its drawing gone but its words in the
+chat; a moment the tutor was still on, or was waiting for (it had a deadline), waits
+`TUTOR_TIMEOUT_MS` for the tutor to reconnect, as after a dropped connection, before KataGo answers;
+one nobody was handling falls back at once. A mistake whose eval arrived but never opened a moment
+opens one now.
 `SavedGame.assistance` / `GameSummary.assistance` count hint requests, the learner's take-backs and
 the tutor's rethinks. Assisted moves don't count for the rank estimate.
 
@@ -327,7 +329,8 @@ profile or problems; `ratingModel` unchanged), and the controller logs it and tr
   (with the moves before them) and mark the next human move `retry`/`rethink`, and a `hint_request`
   marks the next move `hint` when the saved chat has a tutor message or KataGo's hint between the
   request and that move. The rebuild counts only when its moves replay to exactly the saved game;
-  otherwise the saved moves are used without help flags (and any first attempts found are kept).
+  otherwise the saved moves are used with their own help flags and first attempts (a game saved
+  without first attempts keeps any the log yielded).
 - categorizes each taken-back mistake (`classifyPlayed`, as the controller does, with ownership
   from 100-visit analyses), rank-estimates each rated game, works out the practice problems for the
   taken-back mistakes on a scratch copy, and replays the rating from 20k through `applyEstimate` in

@@ -57,9 +57,9 @@ import {
   type Clock,
   type TutorEventInput,
 } from "./common.ts";
-import { estimateRank, positionFor, rankSamples } from "./estimate.ts";
+import { estimateRank, rankSamples } from "./estimate.ts";
 import { ProblemGenerator } from "./generate.ts";
-import { atLevelEvalFrom, humanPolicyOptions, moveEvalFrom, needsReferenceAnalysis, topHumanMove, type Analysis, type Engine, type Position } from "./katago.ts";
+import { atLevelEvalFrom, humanPolicyOptions, moveEvalFrom, needsReferenceAnalysis, positionOf, topHumanMove, type Analysis, type Engine, type Position } from "./katago.ts";
 import { migrateRatingModel } from "./migrate.ts";
 import { PracticeSession, type PracticeDeps } from "./practice.ts";
 import { gameSource, generateProblems, pickNextProblem, promptFor, resultOf, schedule, type StoredProblem } from "./problems.ts";
@@ -939,22 +939,25 @@ export class GameController {
   }
 
   /**
-   * After a restart, the open moment as it was saved rather than a fresh one. KataGo's fallback is
-   * drawn again without repeating its chat message. A moment the tutor had, or was about to get (it
-   * had a deadline), waits for the tutor to reconnect as after a dropped connection: `watch` shows
-   * it waiting again, and KataGo answers if the wait runs out. One nobody was handling falls back at
-   * once (resumeTurn settles it). The tutor stream gets the moment again either way, so a fresh
-   * `watch` finds it.
+   * After a restart, the open moment as it was saved rather than a fresh one. A moment already
+   * answered stays answered, waiting for the learner's Continue: KataGo's fallback is drawn again
+   * without repeating its chat message; the tutor's drawing is gone, but their words are in the
+   * chat. A moment the tutor was still on, or was about to get (it had a deadline), waits for the
+   * tutor to reconnect as after a dropped connection: `watch` shows it waiting again, and KataGo
+   * answers if the wait runs out. One nobody was handling falls back at once (resumeTurn settles
+   * it). The tutor stream gets the moment again either way, so a fresh `watch` finds it.
    */
   private restoreMoment(record: MoveRecord, saved: TeachingMoment): void {
-    const { deadline: _deadline, awaitingLearner: _awaiting, ...rest } = saved;
+    const { deadline: _deadline, awaitingLearner, ...rest } = saved;
     const fallback = saved.state === "fallback";
-    this.openMoment(record, fallback ? rest : { ...rest, state: "waiting" });
-    if (fallback) {
-      if (record.eval) this.overlay = this.fallbackFor(this.game!, record, record.eval).overlay;
-    } else if (saved.state === "tutor" || saved.deadline !== undefined) {
-      this.waitForTutor();
+    if (!fallback && !(saved.state === "tutor" && awaitingLearner)) {
+      this.openMoment(record, { ...rest, state: "waiting" });
+      if (saved.state === "tutor" || saved.deadline !== undefined) this.waitForTutor();
+      this.emitMoment(record);
+      return;
     }
+    this.openMoment(record, { ...rest, ...(awaitingLearner && { awaitingLearner }) });
+    if (fallback && record.eval) this.overlay = this.fallbackFor(this.game!, record, record.eval).overlay;
     this.emitMoment(record);
     if (fallback) this.emit({ type: "fallback", momentId: rest.id });
   }
@@ -1570,9 +1573,10 @@ export class GameController {
       }, delay);
       return false;
     }
-    // The migration wrote the profile; the controller's copy follows.
+    // The migration wrote the profile and the problems; the controller's and the generator's copies follow.
     this.profile = this.store.loadProfile();
     this.profileVersion++;
+    this.generator.problemsChanged(this.store.loadProblems());
     if (report.message) {
       this.log(report.summary);
       this.system(report.message);
@@ -1906,7 +1910,7 @@ export class GameController {
 
   /** The current game's position after `moves`, for KataGo (handicap stones included). */
   private position(moves: readonly Move[]): Position {
-    return positionFor(this.settings!, moves);
+    return positionOf(this.game!, moves);
   }
 
   /**
