@@ -515,12 +515,14 @@ unless `--json`).
   on; what arrives in one chunk goes out in one stdout write, which Claude Code's Monitor tool turns
   into one notification (one Claude turn, the main cost of a session). Left out unless `--all`: moves,
   level and judge changes, batch starts, and take-backs except those undoing the position of an open
-  moment or hint (`undo.during`). A waiting teaching moment, a hint request or a problem start comes
-  with the `state` output under it, and a `game_end` with the `review` output, when the server
+  moment or hint (`undo.during`). A waiting teaching moment, a hint request, a problem start or a
+  learner's message while its game is in play (not one about a problem) comes with the `state`
+  output under it, and a `game_end` with the `review` output, when the server
   answers within 3 s and the state is still about that event (else the line says to run it).
   A PROBLEM_START the server held back whose problem has left the board by the time it goes out is
   dropped. The attached state is brief (no chat tail or boilerplate lines; the last 12 moves and the
-  earlier mistakes; one state fetch per write) and the review leaves out the move list.
+  earlier mistakes; one state fetch per write, each printed once; a question on a board that hasn't
+  changed since the last state printed gets a one-line note instead) and the review leaves out the move list.
   `--json` prints every event raw. Reconnects with `since=` on drop. `npm run sim:tokens`
   (`scripts/token-sim.ts`) runs a scripted session through the real bridge and `watch` and prices the
   Claude calls it would cause.

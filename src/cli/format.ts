@@ -211,7 +211,7 @@ function formatKnownEvent(e: TutorEvent, ctx: EventContext): string {
     case "user_message":
       // On a practice problem the message is about the problem; the game id would point at the wrong board.
       if (e.problemId) return `USER ${quote(e.text)} (problem ${e.problemId})`;
-      return `USER ${quote(e.text)}${e.momentId ? ` (moment ${e.momentId})` : ""}${e.gameId ? ` game=${e.gameId}` : ""}${e.tutorLevel ? ` level=${e.tutorLevel}` : ""}`;
+      return `USER ${quote(e.text)}${e.momentId ? ` (moment ${e.momentId})` : ""}${e.gameId ? ` game=${e.gameId}` : ""}${e.tutorLevel ? ` level=${e.tutorLevel}` : ""}${ctx.attached === true ? " — state below" : ctx.attached === false ? " — run state for the board" : ""}`;
     case "hint_request":
       return `HINT game=${e.gameId} ${e.toPlay} to play${e.tutorLevel ? ` level=${e.tutorLevel}` : ""} — user asks: ${quote(e.text ?? "hint please")} — ${ctx.attached ? "state below; answer with" : "run: state, then"} say/show/mark`;
     case "fallback":

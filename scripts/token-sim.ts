@@ -96,6 +96,7 @@ const SHOW = `npm run -s tutor -- show D5 E4 C6 E6 --label "${"x".repeat(30)}"`;
 /** What a notification is about, beyond its first line: the scripted reason the learner wrote or did it. */
 export type Beat =
   | { kind: "user-question" }
+  | { kind: "board-question" }
   | { kind: "review-answer"; last: boolean }
   | { kind: "problem-reply" }
   | { kind: "start-problems" }
@@ -161,6 +162,9 @@ function respond(protocol: Protocol, text: string, beat: Beat, w: World): Call[]
         return [{ tools: [chain("show", "say", "tag")], out: OUT.chained }, final()];
       }
       if (beat.kind === "start-problems") return [{ tools: [chain("problem", "say")], out: OUT.chained }, final()];
+      // A question about the board during the game needs the position, which the stream's moves no longer bring.
+      // ("before" streamed every move, so its tutor followed the game without it.)
+      if (p === "after" && beat.kind === "board-question" && !text.includes("state below")) return [{ tools: [state], out: OUT.state }, { tools: [say], out: OUT.say }, final()];
       return [{ tools: [say], out: OUT.say }, final()];
     }
     case "GAME_END": {
@@ -376,7 +380,7 @@ function script(level: TutorLevel): Step[] {
       at(15, (w) => {
         w.say("user", "Why did the bot play there? Is my group in danger?");
         return w.event({ type: "user_message", text: "Why did the bot play there? Is my group in danger?", gameId: "g1" });
-      }, { kind: "user-question" });
+      }, { kind: "board-question" });
     }
     if (n === 14) {
       at(15, (w) => w.event({ type: "hint_request", gameId: "g1", size: 9, board: toAscii(w.game.board, movePoint(w.game.moves.at(-1)?.move)), toPlay: "B", text: "where should I play?" }));

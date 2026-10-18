@@ -184,8 +184,40 @@ describe("watch", () => {
       expect(out.map((l) => l.split(" ")[0])).toEqual(["GAME_START", "BATCH", "USER", "UNDO", "MOVE"]);
       expect(out[1]).toContain("finished");
       expect(out[4]).toMatch(/^MOVE 12 B D6 \(human\) — played before your hint answer/);
-      // The USER line carries the learner's level.
-      expect(out[2]).toBe('USER "why?" game=g1 level=silent');
+      // The USER line carries the learner's level, and the board of the game in play.
+      expect(out[2]).toMatch(/^USER "why\?" game=g1 level=silent — state below\ngame g1 mode=game /);
+    });
+
+    it("attaches the board to a question only while its game is in play", async () => {
+      const ended = await run([user(2)], { view: { ...view, status: "over", moment: null, result: { winner: "B", margin: 5, reason: "score" } } });
+      expect(ended.out).toEqual(['USER "why?" game=g1 level=silent']);
+      const problemView = { ...view, mode: "problem", moment: null, problem: { id: "p4" } };
+      const underProblem = await run([user(2)], { view: problemView });
+      expect(underProblem.out).toEqual(['USER "why?" game=g1 level=silent']);
+      // A question about the problem doesn't fetch the state at all.
+      const aboutProblem = await run([{ ...user(2), problemId: "p4" }], { view: problemView });
+      expect(aboutProblem.out).toEqual(['USER "why?" (problem p4)']);
+      expect(aboutProblem.paths).not.toContain("/api/state");
+      expect([...ended.err, ...underProblem.err].filter((l) => /moved on|couldn.t fetch/.test(l))).toEqual([]);
+      // A state that can't be fetched: the tutor is told to run it.
+      expect((await run([user(2)], { failState: true })).out).toEqual(['USER "why?" game=g1 level=silent — run state for the board']);
+      // A moment and a question that arrive together share one state.
+      const together = (await run([[moment, user(5)]])).out[0]!;
+      expect(together.split("\n").slice(0, 2).map((l) => l.split(" ")[0])).toEqual(["MOMENT", "USER"]);
+      expect(together.match(/^game g1 mode=game /gm)).toHaveLength(1);
+      // After the stream saw the game end, a question is about the review: no fetch, no "run state".
+      const gameEnd2 = { seq: 2, ts: 0, type: "game_end", gameId: "g1", result: { winner: "B", margin: 5, reason: "score" }, summary: { moves: 40, mistakes: [], totalPointLoss: 3 } };
+      const review = await run([gameEnd2, user(3)], { failState: true });
+      expect(review.out[1]).toBe('USER "why?" game=g1 level=silent');
+      // A chat line with no game fetches nothing.
+      const noGame = await run([{ ...user(2), gameId: null }]);
+      expect(noGame.paths).not.toContain("/api/state");
+    });
+
+    it("says the board hasn't changed instead of reprinting it for a follow-up question", async () => {
+      const { out } = await run([user(2), user(3)]);
+      expect(out[0]).toMatch(/— state below\ngame g1 mode=game /);
+      expect(out[1]).toBe('USER "why?" game=g1 level=silent — state below\n(the board hasn\'t changed since the last state above)');
     });
 
     it("prints what the server sent together in one write, dropping a problem start whose problem has gone", async () => {

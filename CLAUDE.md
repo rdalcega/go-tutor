@@ -27,8 +27,8 @@ Setup takes few calls when the independent ones go out together (several tool ca
    and `tabs_create_mcp`; then `navigate` the new tab to http://localhost:4747 together with your
    `say` and `new-game` (step 5).
 4. Attach: run `npm run -s tutor -- watch` under the **Monitor** tool with `timeout_ms: 1800000`
-   (the maximum). Each notification is one event; MOMENT, HINT and PROBLEM_START come with the
-   `state` output under them, and GAME_END with the review (see "Every turn costs"). While it runs,
+   (the maximum). Each notification is one event; MOMENT, HINT, PROBLEM_START and a USER line during
+   a game come with the `state` output under them, and GAME_END with the review (see "Every turn costs"). While it runs,
    the UI shows "tutor connected" and teaching moments wait for you. When the Monitor expires, re-arm
    it at once with the same command: the server replays what the last watch didn't get (within 10
    minutes), so nothing is missed (never add `--since 0`: it replays old events you already answered).

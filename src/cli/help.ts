@@ -19,8 +19,9 @@ SESSION FLOW
   1. summary [--wait]        learner's rank, weak categories, recommended focus: decide what to do
                              (--wait: right after npm start, waits for the server instead of failing)
   2. watch                   start under the Monitor tool; prints each event you act on, forever.
-                 MOMENT, HINT and PROBLEM_START come with the state under them, GAME_END with the
-                 review: don't run state or review again. Chain one answer's commands with &&.
+                 MOMENT, HINT, PROBLEM_START and a USER line during a game come with the state
+                 under them, GAME_END with the review: don't run state or review again.
+                 Chain one answer's commands with &&.
   3. on MOMENT:  read the state below the line, then answer in one call that starts with the
                  claim: claim <id> && show ... && say ... && resume (the claim fails if the moment is
                  gone, which stops the chain). Once watch has delivered it you have 75 s.
@@ -100,13 +101,13 @@ COMMANDS
       Lines:
         GAME_START g12 9x9 komi 7 human=B bot=20k level=coach judge=optimal
         MOVE 15 W D6 (bot)   (--all only)
-        MOMENT m3 game=g12 move 14 B C3 lost 6.2 pts (best D5, pv D5 E4 C6) — answer in one call: show/say/rethink, then resume (your first command claims m3); fallback in 75s — state below
+        MOMENT m3 game=g12 move 14 B C3 lost 6.2 pts (best D5, pv D5 E4 C6) — answer in one call: claim m3 && show/say/rethink (&& resume); fallback in 75s — state below
         MOMENT m4 ... — level point_out: explain mistakes, don't take moves back ... — answer in one call: ...
         MOMENT m5 game=g12 move 20 B G2 lost 4.4 pts (judged at level: vs the 17k move F3, pv F3 G4; vs KataGo's best E3 it lost 7.1) — ...
         LEVEL silent — no teaching moments; ... (from the learner's next move)   (--all only)
         JUDGE judge=at_level ref=17k — moves are scored, and moments opened, against ... (from the learner's next move)   (--all only)
         HINT game=g12 B to play — user asks: "where now?" — state below; answer with say/show/mark
-        USER "why was that bad?" (moment m3) game=g12 level=coach
+        USER "why was that bad?" (moment m3) game=g12 level=coach — state below   (state while the game is in play)
         FALLBACK m3 (tutor too slow; KataGo answer shown)
         UNDO game=g12 by human: back to move 13, B to play   (with a MOMENT or HINT open, or --all)
         GAME_END g12 W+3.5 — 3 mistakes (1 taken back), worst move 14 (6.2), total loss 15 over 61 moves, help: 1 hint, rank estimate running (a RATING line follows) — review below

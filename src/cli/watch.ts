@@ -5,8 +5,9 @@
 // - moves, level and judge changes and batch starts are left out, and the learner's moves and
 //   take-backs unless one changes the position of a moment or hint the tutor may be answering
 //   (`all` prints everything);
-// - a waiting MOMENT, a HINT or a PROBLEM_START comes with the state, and a GAME_END with the
-//   review, so the tutor doesn't spend a turn running `state` or `review`;
+// - a waiting MOMENT, a HINT, a PROBLEM_START or a USER line while its game is in play comes with
+//   the state (printed once per write, and a question on an unchanged board just says so), and a
+//   GAME_END with the review, so the tutor doesn't spend a turn running `state` or `review`;
 // - what arrives together goes out in one write: the server sends a GAME_END with its RATING when
 //   the rank estimate is quick, and holds events that need no answer (a game or problem start, a
 //   finished batch, a fallback) for the next one that does, so each is one notification.
@@ -83,14 +84,23 @@ export async function watch(opts: WatchOptions): Promise<void> {
   const line = (event: TutorEvent, attached?: boolean): string =>
     opts.json ? JSON.stringify(event) : formatEvent(event, { sizeOf: (g) => sizes.get(g), ...(attached !== undefined && { attached }) });
 
+  /** Games the stream has seen end: a question about one is about the review, not a board. */
+  const ended = new Set<string>();
+  /** The position of the last state printed, so a question on an unchanged board doesn't reprint it. */
+  let lastBoard: string | undefined;
+  const boardKey = (v: GameView): string => JSON.stringify([v.mode, v.gameId, v.problem?.id, v.moves.length, v.toPlay, v.status, v.moment?.id, v.moment?.state]);
+
   /**
    * The state (or review) to print under an event: null when it has none, false when it should but
    * the server can't give it in time, "gone" when the board has moved on from it. `state` fetches the
-   * view once for all the events of a write.
+   * view once for all the events of a write, and `t` is the write's clock, so they print alike.
    */
-  const contextFor = async (event: TutorEvent, state: () => Promise<GameView>, fetchSignal: AbortSignal): Promise<string | null | false | "gone"> => {
-    if (!tutorStream || now() - event.ts > CONTEXT_MAX_AGE_MS) return null;
-    const wanted = event.type === "teaching_moment" ? event.moment.state === "waiting" : event.type === "hint_request" || event.type === "problem_start" || event.type === "game_end";
+  const contextFor = async (event: TutorEvent, state: () => Promise<GameView>, fetchSignal: AbortSignal, t: number): Promise<string | null | false | "gone"> => {
+    if (!tutorStream || t - event.ts > CONTEXT_MAX_AGE_MS) return null;
+    // A question during a game comes with the board too: the stream leaves out the moves since the last moment.
+    const question = event.type === "user_message" && !event.problemId && !!event.gameId && !ended.has(event.gameId);
+    const wanted =
+      event.type === "teaching_moment" ? event.moment.state === "waiting" : question || event.type === "hint_request" || event.type === "problem_start" || event.type === "game_end";
     if (!wanted) return null;
     try {
       if (event.type === "game_end") return await reviewText(client, event.gameId, fetchSignal, true);
@@ -101,8 +111,17 @@ export async function watch(opts: WatchOptions): Promise<void> {
           ? view.moment?.id === event.moment.id
           : event.type === "hint_request"
             ? view.mode === "game" && view.gameId === event.gameId && toAscii(view.board, movePoint(view.moves.at(-1)?.move)) === event.board
-            : event.type === "problem_start" && view.problem?.id === event.problemId;
-      if (same) return formatState(view, now(), 0, true);
+            : event.type === "user_message"
+              ? view.mode === "game" && view.gameId === event.gameId && !view.result
+              : event.type === "problem_start" && view.problem?.id === event.problemId;
+      if (same) {
+        const key = boardKey(view);
+        if (event.type === "user_message" && key === lastBoard) return "(the board hasn't changed since the last state above)";
+        lastBoard = key;
+        return formatState(view, t, 0, true);
+      }
+      // A question after the game or over a practice problem simply goes without it.
+      if (event.type === "user_message") return null;
       // A moment waiting under a practice problem: `state` shows the problem, so give the game's board from the event.
       if (event.type === "teaching_moment" && view.mode === "problem" && event.boardAfter) {
         return (
@@ -133,6 +152,7 @@ export async function watch(opts: WatchOptions): Promise<void> {
       last = seq;
     }
     if (event.type === "game_start") sizes.set(event.gameId, event.settings.size);
+    if (event.type === "game_end") ended.add(event.gameId);
     else if ("size" in event && typeof event.size === "number" && "gameId" in event && typeof event.gameId === "string") sizes.set(event.gameId, event.size);
     return tutorStream && !actionable(event) ? null : event;
   };
@@ -148,11 +168,13 @@ export async function watch(opts: WatchOptions): Promise<void> {
     const fetchSignal = signal ? AbortSignal.any([signal, timeout]) : timeout;
     let view: Promise<GameView> | undefined;
     const state = () => (view ??= client.state(fetchSignal));
-    const contexts = await Promise.all(events.map((e) => contextFor(e, state, fetchSignal)));
+    const t = now();
+    const contexts = await Promise.all(events.map((e) => contextFor(e, state, fetchSignal, t)));
     const kept = events.map((e, i) => ({ e, c: contexts[i]! })).filter(({ e, c }) => !(c === "gone" && e.type === "problem_start"));
     const attached = (c: (typeof contexts)[number]): c is string => typeof c === "string" && c !== "gone";
     const lines = kept.map(({ e, c }) => line(e, c === null ? undefined : attached(c)));
-    return [...lines, ...kept.map(({ c }) => c).filter(attached)].join("\n");
+    // The same state under two events (a moment and a question about it) is printed once.
+    return [...lines, ...new Set(kept.map(({ c }) => c).filter(attached))].join("\n");
   };
 
   /** The server's first frame: its epoch, and the seq its replay starts after (our new cursor). */
