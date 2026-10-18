@@ -16,15 +16,17 @@ Coordinates are GTP: column letters A-T without I, row 1 at the bottom (e.g. D4)
 Exit codes: 0 ok, 1 server error (message on stderr), 2 usage error. Add --json to any command for raw JSON.
 
 SESSION FLOW
-  1. summary                 learner's rank, weak categories, recommended focus: decide what to do
+  1. summary [--wait]        learner's rank, weak categories, recommended focus: decide what to do
+                             (--wait: right after npm start, waits for the server instead of failing)
   2. watch                   start under the Monitor tool; prints each event you act on, forever.
                  MOMENT, HINT and PROBLEM_START come with the state under them, GAME_END with the
                  review: don't run state or review again. Chain one answer's commands with &&.
-  3. on MOMENT:  claim <id> within the deadline, read the state below the line, then teach with
-                 say/show/mark/rethink and finish with resume (show ... && say ... && resume, in one
-                 call). A drawing you made stays up after resume: the game stays
-                 paused until the learner presses Continue when ready. If you don't claim in time
-                 a FALLBACK line appears: KataGo's answer is already shown; you can still add a say.
+  3. on MOMENT:  read the state below the line, then answer in one call that starts with the
+                 claim: claim <id> && show ... && say ... && resume (the claim fails if the moment is
+                 gone, which stops the chain). Once watch has delivered it you have 75 s.
+                 A drawing you made stays up after resume: the game stays
+                 paused until the learner presses Continue when ready. If you don't answer in time
+                 a FALLBACK line comes with your next event: KataGo's answer is already shown.
   4. on HINT:    read the state below the line, then say/show/mark. Don't give the answer outright unless asked. (The
                  learner presses Hint next to the chat input; anything they typed comes as the question.
                  Your answer marks their next move as helped, so it doesn't count for the rank estimate.)
@@ -36,6 +38,8 @@ SESSION FLOW
                  first attempt ask what they see (say); after the answer is shown, explain it with show.
   8. on BATCH:   a batch of generated practice problems finished (see GENERATED PROBLEMS); mention
                  it when it fits, not in the middle of a game on Silent.
+  GAME_START, PROBLEM_START, BATCH finished and FALLBACK need no answer of their own: watch prints
+  them at the top of the next event you answer (a PROBLEM_START with the learner's first attempt).
   Not in the stream (watch --all prints them): moves, tutor level and judge changes (USER lines in
   a game carry level=..., and state shows both), batch starts, and take-backs (UNDO), except the
   learner's take-back of a MOMENT's or HINT's position and their move made before your hint answer
@@ -96,8 +100,8 @@ COMMANDS
       Lines:
         GAME_START g12 9x9 komi 7 human=B bot=20k level=coach judge=optimal
         MOVE 15 W D6 (bot)   (--all only)
-        MOMENT m3 game=g12 move 14 B C3 lost 6.2 pts (best D5, pv D5 E4 C6) — reply with: claim m3, ...
-        MOMENT m4 ... — level point_out: explain mistakes, don't take moves back ... — reply with: ...
+        MOMENT m3 game=g12 move 14 B C3 lost 6.2 pts (best D5, pv D5 E4 C6) — answer in one call: show/say/rethink, then resume (your first command claims m3); fallback in 75s — state below
+        MOMENT m4 ... — level point_out: explain mistakes, don't take moves back ... — answer in one call: ...
         MOMENT m5 game=g12 move 20 B G2 lost 4.4 pts (judged at level: vs the 17k move F3, pv F3 G4; vs KataGo's best E3 it lost 7.1) — ...
         LEVEL silent — no teaching moments; ... (from the learner's next move)   (--all only)
         JUDGE judge=at_level ref=17k — moves are scored, and moments opened, against ... (from the learner's next move)   (--all only)
@@ -123,7 +127,9 @@ COMMANDS
       Example: npm run -s tutor -- state
 
   claim <momentId>
-      Take ownership of a teaching moment; cancels the KataGo fallback timer. Do this first.
+      Take ownership of a teaching moment; cancels the KataGo fallback timer. Start your answer's
+      chained call with it (claim m3 && show ... && say ... && resume): it fails when the moment is
+      no longer current, so the rest doesn't run on the wrong board.
       Example: npm run -s tutor -- claim m3
 
   say <text> [--moment <id>]
@@ -204,8 +210,8 @@ COMMANDS
       Example: npm run -s tutor -- tag g12 14 direction "played toward thickness"
       Example: npm run -s tutor -- tag g12 9 tactics --taken-back 2
 
-  summary
-      Learner profile: rank estimate and rating trend, the last game's move-quality estimate (from how
+  summary [--wait]
+      With --wait it first waits (up to 100 s) for a server that is still starting. Learner profile: rank estimate and rating trend, the last game's move-quality estimate (from how
       many unassisted moves, and the help left out), the bot's rank (and handicap stones while the
       learner is below 20k), the tutor level, the mistake threshold on each board size and its last
       change, mistake counts by category with the last 3 games,

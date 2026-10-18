@@ -15,12 +15,17 @@ async function setup() {
   let t = 1_000_000;
   let timers: { at: number; fn: () => void; id: number }[] = [];
   let ids = 0;
+  const extended: string[] = [];
+  const watching: boolean[] = [];
+  let moment: object | null = null;
   const controller = {
     onEvent: (fn: (e: TutorEventInput) => void) => (emit = fn),
     onChange: () => {},
     view: () => ({ mode: "game" }),
-    gameMoment: () => null,
+    gameMoment: () => moment,
     setTutorAttached: () => {},
+    setTutorWatching: (on: boolean) => watching.push(on),
+    extendMoment: (id: string) => extended.push(id),
   } as unknown as GameController;
   const store = {
     lastEventSeq: () => 0,
@@ -86,7 +91,7 @@ async function setup() {
     server.closeAllConnections();
     await new Promise((r) => server.close(r));
   };
-  return { emit: (e: object) => emit(e as TutorEventInput), open, advance, close, now: () => t, setNow: (v: number) => (t = v) };
+  return { emit: (e: object) => emit(e as TutorEventInput), open, advance, close, now: () => t, extended, watching, log, setMoment: (m: object | null) => (moment = m) };
 }
 
 const settle = () => new Promise((r) => setTimeout(r, 30));
@@ -166,6 +171,63 @@ describe("TutorBridge", () => {
     env.advance(11 * 60_000);
     const third = await env.open("?rejoin=1");
     expect(third.seqs()).toEqual([]);
+  });
+
+  it("tells the controller when the tutor's watch is attached, and gives a moment waiting at attach the longer wait", async () => {
+    env = await setup();
+    const reader = await env.open();
+    expect(env.watching).toEqual([]);
+    await reader.close();
+    env.setMoment({ id: "m1", state: "waiting" });
+    const tutor = await env.open("?rejoin=1");
+    expect(env.watching).toEqual([true]);
+    expect(env.extended).toEqual(["m1"]);
+    await tutor.close();
+    expect(env.watching).toEqual([true, false]);
+  });
+
+  it("holds events that need no answer from the tutor's watch until the next one that does, in one write", async () => {
+    env = await setup();
+    const tutor = await env.open("?rejoin=1");
+    const reader = await env.open();
+    env.emit({ type: "game_start", gameId: "g1", settings: {} });
+    env.emit({ type: "fallback", momentId: "m1" });
+    await settle();
+    expect(tutor.chunks).toEqual([]);
+    expect(reader.seqs()).toEqual([1, 2]);
+    env.emit(user);
+    await settle();
+    expect(tutor.chunks).toEqual([[1, 2, 3]]);
+    // Held events don't count as sent: a fresh watch after this one gets them.
+    env.emit({ type: "problem_start", problemId: "p1" });
+    await settle();
+    await tutor.close();
+    await reader.close();
+    const next = await env.open("?rejoin=1");
+    // A replay is written as it is, in one write.
+    expect(next.chunks).toEqual([[4]]);
+    env.emit({ type: "game_start", gameId: "g2", settings: {} });
+    env.emit(user);
+    await settle();
+    expect(next.chunks).toEqual([[4], [5, 6]]);
+
+    // A problem opening over a moment the tutor may be answering goes out at once.
+    env.setMoment({ id: "m1", state: "tutor" });
+    env.emit({ type: "problem_start", problemId: "p2" });
+    await settle();
+    expect(next.chunks).toEqual([[4], [5, 6], [7]]);
+  });
+
+  it("keeps events that need no answer with a held GAME_END instead of releasing it", async () => {
+    env = await setup();
+    const tutor = await env.open("?rejoin=1");
+    env.emit(gameEnd);
+    env.emit({ type: "game_start", gameId: "g2", settings: {} });
+    await settle();
+    expect(tutor.chunks).toEqual([]);
+    env.emit(rating);
+    await settle();
+    expect(tutor.chunks).toEqual([[1, 2, 3]]);
   });
 
   it("doesn't replay what came after the tutor counted as gone (the server's fallbacks answered it)", async () => {

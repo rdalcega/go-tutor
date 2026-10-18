@@ -222,6 +222,8 @@ async function main(): Promise<void> {
   const port = Number(process.env.PORT ?? 4747);
   const timeout = Number(process.env.TUTOR_TIMEOUT_MS);
   const tutorTimeoutMs = Number.isFinite(timeout) && timeout >= 0 ? timeout : 30_000;
+  const grace = Number(process.env.TUTOR_GRACE_MS);
+  const tutorGraceMs = Number.isFinite(grace) && grace >= 0 ? grace : 75_000;
   const debug = !!process.env.GO_TUTOR_DEBUG;
   const store = new Store();
   // Generated problems replaced the built-in starter set: drop it from problems.json (backed up first).
@@ -247,6 +249,7 @@ async function main(): Promise<void> {
     engine,
     store,
     tutorTimeoutMs,
+    tutorGraceMs,
     log: (m) => console.log(m),
     ...(debug && { debug: (m: string) => console.log(`[generate] ${m}`) }),
   });

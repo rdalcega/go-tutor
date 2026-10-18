@@ -82,8 +82,15 @@ export class TutorBridge {
   private rejoinFrom: { seq: number; at: number; until?: number } | null = null;
   /** Streams of the tutor's `watch` (`rejoin=1`), as opposed to other readers of the event stream. */
   private readonly rejoiners = new Set<ServerResponse>();
+  /**
+   * Frames held back from a tutor `watch` stream: events that need no answer of their own (a game
+   * or problem start, a finished batch, a fallback) go out with the next event that does, so they
+   * don't wake the tutor alone. Held frames don't count as sent: a fresh watch after this one gets
+   * them. (A replay is written as it is.)
+   */
+  private readonly deferred = new Map<ServerResponse, string>();
   /** A GAME_END whose rank estimate is still running: logged, but sent to the tutors with its RATING (or after `ratingHoldMs`). */
-  private held: { event: TutorEvent; frame: string; timer: unknown } | null = null;
+  private held: { event: TutorEvent; frame: string; seq: number; timer: unknown } | null = null;
   private viewQueued = false;
   /** Browsers waiting for "drain" before they get the next view. */
   private readonly draining = new Set<ServerResponse>();
@@ -137,19 +144,28 @@ export class TutorBridge {
     if (held && event.type === "rating" && held.event.type === "game_end" && event.gameId === held.event.gameId) {
       this.held = null;
       this.clearTimer(held.timer);
-      this.sendAll(event.seq, held.frame + frame);
+      this.sendAll(event.seq, held.frame + frame, false);
+      return;
+    }
+    // A problem opening over a moment the tutor may be answering changes what its commands act on: not held.
+    const momentOpen = event.type === "problem_start" && (this.controller.gameMoment()?.state ?? "resolved") !== "resolved";
+    const defer = deferrable(event) && !momentOpen;
+    // An event that needs no answer waits with the held GAME_END instead of pushing it out without its RATING.
+    if (held && defer) {
+      held.frame += frame;
+      held.seq = event.seq;
       return;
     }
     this.releaseHeld();
     if (event.type === "game_end" && event.summary.rating?.pending && this.ratingHoldMs > 0) {
-      const h = { event, frame, timer: undefined as unknown };
+      const h = { event, frame, seq: event.seq, timer: undefined as unknown };
       h.timer = this.setTimer(() => {
         if (this.held === h) this.releaseHeld();
       }, this.ratingHoldMs);
       this.held = h;
       return;
     }
-    this.sendAll(event.seq, frame);
+    this.sendAll(event.seq, frame, defer);
   }
 
   private releaseHeld(): void {
@@ -157,12 +173,21 @@ export class TutorBridge {
     if (!held) return;
     this.held = null;
     this.clearTimer(held.timer);
-    this.sendAll(held.event.seq, held.frame);
+    this.sendAll(held.seq, held.frame, false);
   }
 
-  private sendAll(seq: number, frame: string): void {
-    // A frame that wasn't written doesn't count as sent: a fresh stream after this one replays it.
-    for (const res of this.tutors) if (send(res, frame)) this.lastSent.set(res, seq);
+  /** Writes a frame to every tutor stream; a tutor `watch` holds a `deferrable` one for its next write. */
+  private sendAll(seq: number, frame: string, deferrable: boolean): void {
+    for (const res of this.tutors) {
+      if (deferrable && this.rejoiners.has(res)) {
+        this.deferred.set(res, (this.deferred.get(res) ?? "") + frame);
+        continue;
+      }
+      // A frame that wasn't written doesn't count as sent: a fresh stream after this one replays it.
+      if (!send(res, (this.deferred.get(res) ?? "") + frame)) continue;
+      this.deferred.delete(res);
+      this.lastSent.set(res, seq);
+    }
   }
 
   /** Events with seq > since, from memory when possible, else from the log. */
@@ -186,28 +211,37 @@ export class TutorBridge {
     startSse(res);
     const hello: StreamHello = { epoch: this.epoch, since: since ?? null };
     res.write(`event: hello\ndata: ${JSON.stringify(hello)}\n\n`);
+    // Attached first, so a waiting moment that this replay delivers to the tutor's watch gets its
+    // longer wait before its frame (with the deadline) is written.
+    if (this.detachTimer) clearTimeout(this.detachTimer);
+    this.detachTimer = null;
+    this.controller.setTutorAttached(true);
+    if (rejoin) this.controller.setTutorWatching(true);
+    const moment = this.controller.gameMoment();
+    if (rejoin && moment?.state === "waiting") this.controller.extendMoment(moment.id);
     const replay = since !== undefined ? this.eventsSince(since) : this.freshReplay(rejoin);
     // A held GAME_END goes out when it is released, not before.
     const sent = this.held ? this.held.event.seq - 1 : this.seq;
-    for (const e of replay) if (e.seq <= sent) res.write(tutorFrame(this.replayed(e)));
-    // An id-only frame sets the client's cursor without an event, so a reconnect replays from here
-    // even when nothing was sent yet.
-    res.write(`id: ${sent}\n\n`);
+    const frames = replay.filter((e) => e.seq <= sent).map((e) => tutorFrame(this.replayed(e)));
+    // One write, so the replay is one notification. The id-only frame sets the client's cursor
+    // without an event, so a reconnect replays from here even when nothing was sent yet.
+    res.write(`${frames.join("")}id: ${sent}\n\n`);
     this.lastSent.set(res, sent);
     if (rejoin) {
       this.rejoinFrom = null;
       this.rejoiners.add(res);
     }
     this.tutors.add(res);
-    if (this.detachTimer) clearTimeout(this.detachTimer);
-    this.detachTimer = null;
-    this.controller.setTutorAttached(true);
     this.keepAlive(req, res, () => {
       this.tutors.delete(res);
       const last = this.lastSent.get(res);
       this.lastSent.delete(res);
-      const wasRejoiner = this.rejoiners.delete(res);
-      if (wasRejoiner && last !== undefined && ![...this.tutors].some((r) => this.rejoiners.has(r))) this.rejoinFrom = { seq: last, at: this.now() };
+      this.deferred.delete(res);
+      if (this.rejoiners.delete(res)) {
+        const watching = [...this.tutors].some((r) => this.rejoiners.has(r));
+        this.controller.setTutorWatching(watching);
+        if (!watching && last !== undefined) this.rejoinFrom = { seq: last, at: this.now() };
+      }
       if (this.tutors.size > 0) return;
       // `tutor watch` reconnects quickly after a drop; don't fall back on a blip.
       this.detachTimer = setTimeout(() => {
@@ -324,6 +358,11 @@ export class TutorBridge {
 
 /** Unread SSE data a client may hold before it counts as stalled and is dropped (it can reconnect). */
 const MAX_BUFFERED_BYTES = 1 << 20;
+
+/** Events that need no answer of their own: a tutor `watch` gets them with the next event that does. */
+function deferrable(event: TutorEvent): boolean {
+  return event.type === "problem_start" || event.type === "game_start" || event.type === "fallback" || (event.type === "generation" && event.status === "finished");
+}
 
 /** Writes a frame; false when the stream is gone or too far behind (it is then closed). */
 function send(res: ServerResponse, frame: string): boolean {

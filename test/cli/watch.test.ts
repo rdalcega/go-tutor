@@ -91,7 +91,7 @@ describe("watch", () => {
     const urls: string[] = [];
     const controller = new AbortController();
     const hello = (epoch: string, since: number | null) => `event: hello\ndata: ${JSON.stringify({ epoch, since })}\n\n`;
-    const fb = (seq: number, id: string) => ({ seq, ts: 0, type: "fallback", momentId: id });
+    const fb = (seq: number, id: string) => ({ seq, ts: 0, type: "user_message", text: id, gameId: null });
     const responses = [
       () => sseResponse([hello("boot1", null), ev(fb(5, "a")), ev(fb(6, "b")), "id: 6\n\n"]),
       // The server restarted with seq 4 as its last logged event: it replays from 4, and 5 is new.
@@ -109,7 +109,7 @@ describe("watch", () => {
     const out: string[] = [];
     const err: string[] = [];
     await watch({ client: new Client("http://x", fakeFetch), json: false, out: (l) => out.push(l), err: (l) => err.push(l), signal: controller.signal, sleep: async () => {} });
-    expect(out.map((l) => l.split(" ")[1])).toEqual(["a", "b", "c"]);
+    expect(out.map((l) => l.split(" ")[1])).toEqual(['"a"', '"b"', '"c"']);
     expect(urls).toEqual(["http://x/api/tutor/events?rejoin=1", "http://x/api/tutor/events?since=6&epoch=boot1&rejoin=1", "http://x/api/tutor/events?since=5&epoch=boot2&rejoin=1"]);
     expect(err.some((l) => l.includes("server restarted"))).toBe(true);
   });
@@ -182,67 +182,94 @@ describe("watch", () => {
       const early = { ...move(12, "human"), hintPending: true };
       const { out } = await run([start, level, judge, move(4, "human"), move(5, "bot"), undo(6), batch(7, "started"), batch(8, "finished"), user(9), undo(10, "moment"), undo(11, "moment", "tutor"), early]);
       expect(out.map((l) => l.split(" ")[0])).toEqual(["GAME_START", "BATCH", "USER", "UNDO", "MOVE"]);
-      expect(out[4]).toMatch(/^MOVE 12 B D6 \(human\) — played before your hint answer/);
       expect(out[1]).toContain("finished");
+      expect(out[4]).toMatch(/^MOVE 12 B D6 \(human\) — played before your hint answer/);
       // The USER line carries the learner's level.
       expect(out[2]).toBe('USER "why?" game=g1 level=silent');
     });
 
-    it("prints the state under a waiting moment in the same write", async () => {
-      const { out, paths } = await run([start, moment]);
+    it("prints what the server sent together in one write, dropping a problem start whose problem has gone", async () => {
+      const problemStart = (seq: number, id: string) => ({ seq, ts: 0, type: "problem_start", problemId: id, kind: "game", category: "shape", toPlay: "B", prompt: "Black to play.", answers: ["D5"], box: 1, size: 9, board: "" });
+      const attempt = (seq: number, id: string) => ({ seq, ts: 0, type: "problem_attempt", problemId: id, move: "C3", correct: false, category: "shape", attempt: 1, firstTry: false, pointLoss: 5, revealed: false, bestMove: "D5", bestPv: ["D5"] });
+      const fallback = { seq: 9, ts: 0, type: "fallback", momentId: "m1" };
+      const problemView = { ...view, mode: "problem", moment: null, problem: { id: "p4", prompt: "Black to play.", attempts: 1, solved: false, kind: "game", category: "shape", toPlay: "B", maxAttempts: 2, revealed: false, box: 1 } };
+      // The server holds lines that need no answer and sends them with the next event that does.
+      const { out } = await run([[start, problemStart(2, "p3"), problemStart(3, "p4"), attempt(4, "p4")], [fallback, user(10)]], { view: problemView });
       expect(out).toHaveLength(2);
-      const [head, ...rest] = out[1]!.split("\n");
-      expect(head).toMatch(/^MOMENT m1 game=g1 move 3 B C7 lost 6 pts.* — state below$/);
+      const lines = out[0]!.split("\n");
+      // p3 left the board before anything needed an answer; p4's start comes with its attempt and the problem's state.
+      expect(lines.slice(0, 3).map((l) => l.split(" ").slice(0, 2).join(" "))).toEqual(["GAME_START g1", "PROBLEM_START p4", "PROBLEM p4"]);
+      expect(lines[1]).toMatch(/ — state below; /);
+      expect(lines[3]).toMatch(/^game g1 mode=problem /);
+      expect(out[1]!.split("\n").map((l) => l.split(" ")[0])).toEqual(["FALLBACK", "USER"]);
+
+      // A state that can't be fetched doesn't drop the problem start: the tutor is told to run state.
+      const failed = await run([[problemStart(3, "p4"), attempt(4, "p4")]], { failState: true });
+      expect(failed.out[0]!.split("\n").map((l) => l.split(" ")[0])).toEqual(["PROBLEM_START", "PROBLEM"]);
+      expect(failed.out[0]).toMatch(/run: state; let them try/);
+    });
+
+    it("prints the brief state under a waiting moment in the same write", async () => {
+      const moves = Array.from({ length: 20 }, (_, i) => ({ number: i + 1, move: { color: i % 2 ? "W" : "B", point: { x: i % 9, y: Math.floor(i / 9) } }, captures: [], ...(i === 2 && { eval: { pointLoss: 7, leadBefore: 0, leadAfter: -7, winrateBefore: 0.5, winrateAfter: 0.3, bestMove: "E5", bestPv: [], candidates: [] } }) }));
+      const { out, paths } = await run([moment], { view: { ...view, moves, chat: [{ id: "c1", ts: 0, from: "user", text: "hello" }] } });
+      expect(out).toHaveLength(1);
+      const [head, ...rest] = out[0]!.split("\n");
+      expect(head).toMatch(/^MOMENT m1 game=g1 move 3 B C7 lost 6 pts .*answer in one call: claim m1 && show\/say\/rethink \(&& resume\) — state below$/);
       expect(rest[0]).toMatch(/^game g1 mode=game status=paused/);
+      const state = rest.join("\n");
+      expect(state).toContain("moves (last 12;");
+      expect(state).toContain("earlier mistakes: 3 C9 -7");
+      expect(state).not.toMatch(/chat|overlay: none|tutor=attached|mistake threshold/);
       expect(paths).toContain("/api/state");
     });
 
     it("attaches nothing to a moment that is no longer waiting", async () => {
-      const replayed = { ...moment, moment: { ...moment.moment, state: "fallback" } };
-      const { out, paths } = await run([start, replayed]);
-      expect(out[1]).toMatch(/\(replayed; now fallback\)$/);
+      const replayed = { ...moment, moment: { ...moment.moment, state: "tutor" } };
+      const { out, paths } = await run([replayed]);
+      expect(out[0]).toMatch(/\(replayed; now tutor\)$/);
       expect(paths).not.toContain("/api/state");
     });
 
     it("says to run state when the state can't be fetched", async () => {
-      const hint = { seq: 2, ts: 0, type: "hint_request", gameId: "g1", size: 9, board: "", toPlay: "B" };
-      const { out, err } = await run([start, hint], { failState: true });
-      expect(out[1]).toBe('HINT game=g1 B to play — user asks: "hint please" — run: state, then say/show/mark');
+      const hint = { seq: 2, ts: 0, type: "hint_request", gameId: "g1", size: 9, board: "", toPlay: "B", tutorLevel: "coach" };
+      const { out, err } = await run([hint], { failState: true });
+      expect(out[0]).toBe('HINT game=g1 B to play level=coach — user asks: "hint please" — run: state, then say/show/mark');
       expect(err.some((l) => l.includes("couldn't fetch the state"))).toBe(true);
     });
 
     it("doesn't attach a board the event isn't about, and says to run state", async () => {
       // A replayed moment that is no longer the game's.
-      const moved = await run([start, moment], { view: { ...view, moment: { ...view.moment, id: "m2" } } });
-      expect(moved.out[1]).toMatch(/^MOMENT m1 .* — run state for the board$/);
+      const moved = await run([moment], { view: { ...view, moment: { ...view.moment, id: "m2" } } });
+      expect(moved.out[0]).toMatch(/^MOMENT m1 .* — run state for the board$/);
       expect(moved.err.some((l) => l.includes("moved on"))).toBe(true);
       // A hint asked on another position than the one on the board now.
       const board = toAscii(emptyBoard() as Board);
       const hint = (b: string) => ({ seq: 2, ts: 0, type: "hint_request", gameId: "g1", size: 9, board: b, toPlay: "B" });
-      expect((await run([start, hint(board)])).out[1]).toMatch(/state below; answer with say\/show\/mark\ngame g1 /);
-      expect((await run([start, hint(board.replace("+", "X"))])).out[1]).toMatch(/run: state, then say\/show\/mark$/);
+      expect((await run([hint(board)])).out[0]).toMatch(/state below; answer with say\/show\/mark\ngame g1 /);
+      expect((await run([hint(board.replace("+", "X"))])).out[0]).toMatch(/run: state, then say\/show\/mark$/);
     });
 
-    it("prints what arrives together in one write: a GAME_END, its RATING, then the review", async () => {
-      const { out } = await run([start, move(2, "human"), [gameEnd(3), rating(4)]]);
-      expect(out).toHaveLength(2);
-      const lines = out[1]!.split("\n");
+    it("prints what arrives together in one write: a GAME_END, its RATING, then the brief review", async () => {
+      const { out } = await run([move(2, "human"), [gameEnd(3), rating(4)]]);
+      expect(out).toHaveLength(1);
+      const lines = out[0]!.split("\n");
       expect(lines[0]).toMatch(/^GAME_END g1 B\+5 .* — review below$/);
       expect(lines[1]).toMatch(/^RATING g1 /);
       expect(lines[2]).toMatch(/^game g1 9x9 /);
+      expect(lines.at(-1)).toBe("(the full move list: review g1)");
     });
 
     it("attaches nothing to events from a replay older than 10 minutes", async () => {
-      const { out, paths } = await run([start, moment, gameEnd(5)], { now: 11 * 60_000 });
-      expect(out[1]).toMatch(/fallback in \d+s$|claim m1, then say\/show\/rethink\/resume$/);
-      expect(out[2]).toMatch(/run: review g1$/);
+      const { out, paths } = await run([moment, gameEnd(5)], { now: 11 * 60_000 });
+      expect(out[0]).toMatch(/claim m1 && show\/say\/rethink \(&& resume\)$/);
+      expect(out[1]).toMatch(/run: review g1$/);
       expect(paths.filter((p) => !p.startsWith("/api/tutor/events"))).toEqual([]);
     });
 
     it("gives a moment waiting under a practice problem the game's board from the event", async () => {
       const under = { ...moment, boardAfter: "ASCII-AFTER" };
-      const { out } = await run([start, under], { view: { ...view, mode: "problem", moment: null, problem: { id: "p4" } } });
-      expect(out[1]).toMatch(/ — state below\npractice problem p4 on the board; the moment waits under it\. Board after move 3:\nASCII-AFTER$/);
+      const { out } = await run([under], { view: { ...view, mode: "problem", moment: null, problem: { id: "p4" } } });
+      expect(out[0]).toMatch(/ — state below\npractice problem p4 on the board; the moment waits under it \(.*claim m1 keeps the moment for after it\)\. Board after move 3:\nASCII-AFTER$/);
     });
 
     it("with all or json, prints every event bare", async () => {

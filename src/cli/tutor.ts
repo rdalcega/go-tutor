@@ -17,6 +17,26 @@ async function getProblems(client: Client): Promise<ProblemsResponse | null> {
   return body && Array.isArray(body.problems) && body.counts ? body : null;
 }
 
+/**
+ * Waits until the server answers: `summary --wait` right after `npm start`, instead of polling. Only
+ * "can't reach it" (or a 5xx while it starts) is waited out, for at most 100 s (under the Bash
+ * tool's 2-minute limit); any other answer is an error now.
+ */
+async function waitForServer(client: Client): Promise<void> {
+  const until = Date.now() + 100_000;
+  for (;;) {
+    try {
+      await client.state();
+      return;
+    } catch (e) {
+      // Not reachable yet, or answering 5xx while it starts.
+      const starting = e instanceof ServerError && (e.status === undefined || e.status >= 500);
+      if (!starting || Date.now() >= until) throw e;
+      await new Promise((resolve) => setTimeout(resolve, 1000));
+    }
+  }
+}
+
 async function summary(client: Client, json: boolean): Promise<void> {
   const [profile, problems] = await Promise.all([getProfile(client), getProblems(client)]);
   if (json) {
@@ -64,6 +84,7 @@ async function run(inv: Invocation, client: Client): Promise<void> {
       return;
     }
     case "summary":
+      if (inv.wait) await waitForServer(client);
       return summary(client, inv.json);
     case "problems":
       return problems(client, inv.json);

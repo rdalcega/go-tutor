@@ -99,7 +99,6 @@ describe.skipIf(!hasKataGo())("end to end with real KataGo", () => {
     await until((v) => v.tutorAttached, 20_000);
 
     expect((await act({ type: "new_game", settings: { size: 9 } })).ok).toBe(true);
-    await watch.waitFor(/^GAME_START /, 10_000);
 
     // A good first move, then a deliberately bad one in the corner.
     expect((await act({ type: "play", point: { x: 4, y: 4 } })).ok).toBe(true);
@@ -110,6 +109,8 @@ describe.skipIf(!hasKataGo())("end to end with real KataGo", () => {
 
     const moment = await watch.waitFor(/^MOMENT (\S+) .* lost ([\d.]+) pts/, 60_000);
     const momentId = moment[1]!;
+    // GAME_START needs no answer of its own: it came in the same write, before the MOMENT.
+    await watch.waitFor(/^GAME_START /, 1_000);
     expect(Number(moment[2])).toBeGreaterThanOrEqual(4);
     let v = await state();
     expect(v.status).toBe("paused");
@@ -158,13 +159,14 @@ describe.skipIf(!hasKataGo())("end to end with real KataGo", () => {
     expect(await tutor("problems")).toContain(`${problem.id} ${problem.category} from `);
 
     expect(await tutor("problem", problem.id)).toMatch(new RegExp(`^ok problem=${problem.id} mode=problem status=playing`));
-    await watch.waitFor(new RegExp(`^PROBLEM_START ${problem.id} `), 10_000);
     const answer = problem.answers[0]!;
     const cols = "ABCDEFGHJ";
     expect((await act({ type: "play", point: { x: cols.indexOf(answer[0]!), y: 9 - Number(answer.slice(1)) } })).ok).toBe(true);
     const solved = await until((s) => !!s.problem?.revealed, 60_000);
     expect(solved.problem).toMatchObject({ solved: true, attempts: 1, lastAttempt: { move: answer, correct: true } });
     await watch.waitFor(new RegExp(`^PROBLEM ${problem.id} attempt 1 ${answer} correct, first try`), 10_000);
+    // PROBLEM_START came with the attempt, in the same write.
+    await watch.waitFor(new RegExp(`^PROBLEM_START ${problem.id} `), 1_000);
     const after = (await (await fetch(`${base}/api/problems`)).json()) as ProblemsResponse;
     expect(after.problems.find((p) => p.id === problem.id)).toMatchObject({ box: 2, seen: 1, solves: 1, isDue: false });
 

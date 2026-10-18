@@ -218,6 +218,15 @@ tutor attached, the server adds a system reply saying the tutor isn't connected.
   `watch` every 30 minutes), every event that stream wasn't sent. A `game_end` whose rank estimate is
   still running is logged at once but sent to the tutor streams with its `rating` event, in one write
   (or alone after 15 s, or before any other event); a stream opened meanwhile gets a cursor before it.
+  The tutor's `watch` marks its stream `rejoin=1`: only such streams use or leave the backlog above.
+  On such a stream, events that need no answer of their own (`game_start`, `problem_start`, a
+  finished batch, `fallback`) are held and written with the next event that does, so they don't
+  wake the tutor alone (a problem start over an open moment is sent at once); held frames don't
+  count as sent, so a fresh `watch` gets them, and while a GAME_END is held they wait with it. While
+  one is attached the controller knows (`setTutorWatching`): a teaching moment then opens with the
+  longer wait, `TUTOR_GRACE_MS` (75 s) instead of `TUTOR_TIMEOUT_MS` (30 s), and a moment already
+  waiting when it attaches gets it the first time, at least 30 s after that (`extendMoment`). The
+  tutor answers a moment in one chained call that starts with `claim <id>`.
 - `/api/*` rejects requests with a foreign `Origin` (anything but this server and the Vite dev server
   on port 5173) with 403, and POSTs without `content-type: application/json` with 415. The server
   listens on 127.0.0.1 only.
@@ -509,6 +518,9 @@ unless `--json`).
   moment or hint (`undo.during`). A waiting teaching moment, a hint request or a problem start comes
   with the `state` output under it, and a `game_end` with the `review` output, when the server
   answers within 3 s and the state is still about that event (else the line says to run it).
+  A PROBLEM_START the server held back whose problem has left the board by the time it goes out is
+  dropped. The attached state is brief (no chat tail or boilerplate lines; the last 12 moves and the
+  earlier mistakes; one state fetch per write) and the review leaves out the move list.
   `--json` prints every event raw. Reconnects with `since=` on drop. `npm run sim:tokens`
   (`scripts/token-sim.ts`) runs a scripted session through the real bridge and `watch` and prices the
   Claude calls it would cause.

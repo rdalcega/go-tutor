@@ -8,11 +8,12 @@
 // - a waiting MOMENT, a HINT or a PROBLEM_START comes with the state, and a GAME_END with the
 //   review, so the tutor doesn't spend a turn running `state` or `review`;
 // - what arrives together goes out in one write: the server sends a GAME_END with its RATING when
-//   the rank estimate is quick, so both are one notification.
+//   the rank estimate is quick, and holds events that need no answer (a game or problem start, a
+//   finished batch, a fallback) for the next one that does, so each is one notification.
 
 import { toAscii } from "../engine/ascii.ts";
 import { movePoint } from "../shared/coords.ts";
-import type { TutorEvent } from "../shared/types.ts";
+import type { GameView, TutorEvent } from "../shared/types.ts";
 import { Client, ServerError } from "./client.ts";
 import { formatEvent, formatState } from "./format.ts";
 import { reviewText } from "./queries.ts";
@@ -82,16 +83,18 @@ export async function watch(opts: WatchOptions): Promise<void> {
   const line = (event: TutorEvent, attached?: boolean): string =>
     opts.json ? JSON.stringify(event) : formatEvent(event, { sizeOf: (g) => sizes.get(g), ...(attached !== undefined && { attached }) });
 
-  /** The state (or review) to print under an event: null when it has none, false when it should but the server can't give it in time. */
-  const contextFor = async (event: TutorEvent): Promise<string | null | false> => {
+  /**
+   * The state (or review) to print under an event: null when it has none, false when it should but
+   * the server can't give it in time, "gone" when the board has moved on from it. `state` fetches the
+   * view once for all the events of a write.
+   */
+  const contextFor = async (event: TutorEvent, state: () => Promise<GameView>, fetchSignal: AbortSignal): Promise<string | null | false | "gone"> => {
     if (!tutorStream || now() - event.ts > CONTEXT_MAX_AGE_MS) return null;
     const wanted = event.type === "teaching_moment" ? event.moment.state === "waiting" : event.type === "hint_request" || event.type === "problem_start" || event.type === "game_end";
     if (!wanted) return null;
-    const timeout = AbortSignal.timeout(contextTimeoutMs);
-    const fetchSignal = signal ? AbortSignal.any([signal, timeout]) : timeout;
     try {
-      if (event.type === "game_end") return await reviewText(client, event.gameId, fetchSignal);
-      const view = await client.state(fetchSignal);
+      if (event.type === "game_end") return await reviewText(client, event.gameId, fetchSignal, true);
+      const view = await state();
       // The board must be the one the event is about: a replayed moment or hint can come after the game moved on.
       const same =
         event.type === "teaching_moment"
@@ -99,12 +102,16 @@ export async function watch(opts: WatchOptions): Promise<void> {
           : event.type === "hint_request"
             ? view.mode === "game" && view.gameId === event.gameId && toAscii(view.board, movePoint(view.moves.at(-1)?.move)) === event.board
             : event.type === "problem_start" && view.problem?.id === event.problemId;
-      if (same) return formatState(view);
+      if (same) return formatState(view, now(), 0, true);
       // A moment waiting under a practice problem: `state` shows the problem, so give the game's board from the event.
       if (event.type === "teaching_moment" && view.mode === "problem" && event.boardAfter) {
-        return `practice problem ${view.problem?.id ?? ""} on the board; the moment waits under it. Board after move ${event.record.number}:\n${event.boardAfter}`;
+        return (
+          `practice problem ${view.problem?.id ?? ""} on the board; the moment waits under it (say/show/mark go to the problem; ` +
+          `claim ${event.moment.id} keeps the moment for after it). Board after move ${event.record.number}:\n${event.boardAfter}`
+        );
       }
       err(`watch: the board has moved on from this ${event.type}; not attaching the state`);
+      return "gone";
     } catch (e) {
       err(`watch: couldn't fetch the ${event.type === "game_end" ? "review" : "state"} for this event: ${(e as Error).message}`);
     }
@@ -130,11 +137,22 @@ export async function watch(opts: WatchOptions): Promise<void> {
     return tutorStream && !actionable(event) ? null : event;
   };
 
-  /** One write for what arrived together: the event lines first (a GAME_END's RATING right under it), then the states and reviews, fetched at once. */
+  /**
+   * One write for what arrived together (the server sends events that need no answer, like a
+   * PROBLEM_START, with the next one that does): the event lines first (a GAME_END's RATING right
+   * under it), then the states and reviews, fetched at once. A PROBLEM_START whose problem has left
+   * the board by then is dropped.
+   */
   const render = async (events: TutorEvent[]): Promise<string> => {
-    const contexts = await Promise.all(events.map(contextFor));
-    const lines = events.map((e, i) => line(e, contexts[i] === null ? undefined : contexts[i] !== false));
-    return [...lines, ...contexts.filter((c): c is string => typeof c === "string")].join("\n");
+    const timeout = AbortSignal.timeout(contextTimeoutMs);
+    const fetchSignal = signal ? AbortSignal.any([signal, timeout]) : timeout;
+    let view: Promise<GameView> | undefined;
+    const state = () => (view ??= client.state(fetchSignal));
+    const contexts = await Promise.all(events.map((e) => contextFor(e, state, fetchSignal)));
+    const kept = events.map((e, i) => ({ e, c: contexts[i]! })).filter(({ e, c }) => !(c === "gone" && e.type === "problem_start"));
+    const attached = (c: (typeof contexts)[number]): c is string => typeof c === "string" && c !== "gone";
+    const lines = kept.map(({ e, c }) => line(e, c === null ? undefined : attached(c)));
+    return [...lines, ...kept.map(({ c }) => c).filter(attached)].join("\n");
   };
 
   /** The server's first frame: its epoch, and the seq its replay starts after (our new cursor). */

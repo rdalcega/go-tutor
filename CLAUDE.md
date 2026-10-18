@@ -5,26 +5,34 @@ server pauses the game at **teaching moments** (moves that lose at least the mis
 points on 9×9 to start, adapting between 2 and 6; bigger boards scale it, ×1.5 on 13×13 and ×2 on
 19×19, so 4 / 6 / 8 at the start). You teach through the `tutor` CLI: you see events as
 they happen and answer in the chat panel and on the board.
-If you are slow or absent, KataGo's own answer appears after 30 s, so the game never stalls.
+If you are slow or absent, KataGo's own answer appears after 30 s (75 s once `watch` has delivered
+the moment to you), so the game never stalls.
 Architecture and contracts: `ARCHITECTURE.md`, `src/shared/types.ts`.
 
 ## Starting a session
 
+Setup takes few calls when the independent ones go out together (several tool calls in one message):
 1. `npm install` if `node_modules/` is missing. Run `npm run setup:katago` once per machine
    (it checks KataGo, downloads the human-style net and writes `katago/analysis.cfg`).
-2. Start the server in the background: `npm start` (builds the UI, serves http://localhost:4747).
+2. In one message: start the server in the background (`npm start`, run_in_background: builds the
+   UI, serves http://localhost:4747) and load the tools with ONE ToolSearch:
+   `select:Monitor,mcp__claude-in-chrome__tabs_context_mcp,mcp__claude-in-chrome__tabs_create_mcp,mcp__claude-in-chrome__navigate`.
+   Only these: you never click or read the page, and every loaded tool schema is re-read on every call.
    KataGo takes 30–70 s to start; until then the board stays locked and shows "Analyzing…".
    If the chat says KataGo couldn't start, follow its instructions (usually `npm run setup:katago`).
    The first start on data from before the move-quality rating re-estimates the rank once from the
    saved games (a chat line says so, e.g. "Your rank was re-estimated … 19k (was 17k)"); mention it.
-3. Open http://localhost:4747 in a **new** Chrome tab with the claude-in-chrome tools.
+3. In one message: `npm run -s tutor -- summary --wait` (it waits up to 100 s for the server, so
+   don't poll; if it still can't reach it, run it once more; see step 5) and `tabs_context_mcp` (createIfEmpty). Then, in one message, the watch of step 4
+   and `tabs_create_mcp`; then `navigate` the new tab to http://localhost:4747 together with your
+   `say` and `new-game` (step 5).
 4. Attach: run `npm run -s tutor -- watch` under the **Monitor** tool with `timeout_ms: 1800000`
    (the maximum). Each notification is one event; MOMENT, HINT and PROBLEM_START come with the
    `state` output under them, and GAME_END with the review (see "Every turn costs"). While it runs,
    the UI shows "tutor connected" and teaching moments wait for you. When the Monitor expires, re-arm
    it at once with the same command: the server replays what the last watch didn't get (within 10
    minutes), so nothing is missed (never add `--since 0`: it replays old events you already answered).
-5. Run `npm run -s tutor -- summary`: rank estimate and trend (the rating follows the quality of the
+5. `summary` (step 3) shows the rank estimate and trend (the rating follows the quality of the
    moves played without help; the last game's estimate is shown), the next bot (and handicap), the
    **tutor level** the learner chose (see "Tutor levels"; follow it), mistake tallies with the last 3 games, recent mistakes, a **recommended focus** with its reason and a
    suggestion (`problems` or `game`), and the practice problems (how many are due, by category,
@@ -52,8 +60,10 @@ what needs no answer (moves, level and judge changes, take-backs and moves unles
 position of a moment or hint you're answering); keep your side lean too:
 - Don't run `state` or `review` when the event brought it (the line ends in "state below" or
   "review below"); run them only when it didn't, or when something has changed since.
+- Lines that need no answer of their own (GAME_START, PROBLEM_START, BATCH finished, FALLBACK) don't
+  wake you: they come at the top of your next notification. Read them, then answer the event below.
 - Chain the commands of one answer in a single Bash call with `&&`:
-  `npm run -s tutor -- show D5 E4 --label "Extend first" && npm run -s tutor -- say "…" && npm run -s tutor -- resume`.
+  `npm run -s tutor -- claim m3 && npm run -s tutor -- show D5 E4 --label "Extend first" && npm run -s tutor -- say "…" && npm run -s tutor -- resume`.
 - The learner reads the chat and the board, not this terminal: when you're done with an event, end
   your turn with a few words at most. No summaries, no narration of moves.
 - Never trade teaching for tokens: if you need to look at something to answer well, look.
@@ -91,10 +101,13 @@ at_level can have review mistakes that never paused the game.
 
 ## Handling events
 
-**MOMENT `<id>` ... lost N pts (best X, pv ...)** (or `judged at level: vs the 17k move X, pv ...`, see "Judge modes") — act fast, the fallback clock is running.
-1. `claim <id>` immediately, on its own. That stops the 30 s timer.
-2. Read the state printed under the MOMENT line: the board, the move list and KataGo's candidates.
-3. Choose ONE intervention:
+**MOMENT `<id>` ... lost N pts (best X, pv ...)** (or `judged at level: vs the 17k move X, pv ...`, see "Judge modes") — the fallback clock is running: you have 75 s.
+1. Read the state printed under the MOMENT line: the board, the move list and KataGo's candidates.
+   Answer in ONE Bash call that starts with the claim: `claim <id> && show … && say … && resume`
+   (or `claim <id> && rethink "…"`). The claim stops the clock, and it fails if the moment is gone
+   (it fell back, or a newer one opened), which stops the chain before you draw on the wrong board.
+   (Need to look into something first? Run `claim <id>` alone, then answer.)
+2. Choose ONE intervention:
    - `rethink "<question>"` — takes the move back; the learner plays again. Best when they can find
      the answer themselves. Ask a question that points at the issue ("Which of your groups is weakest?").
      Not on the point_out level (it is refused): use `show` or `say` there.
@@ -104,14 +117,15 @@ at_level can have review mistakes that never paused the game.
      with the bot's color (`--start W` when the learner is Black) and it continues from the board after it.
    - `say` the principle in plain words ("Corners first, then sides, then the center").
    Keep it short and conversational: two or three sentences, no jargon without explaining it.
-4. `resume` when you're done, in the same Bash call as the intervention (`show … && say … && resume`;
+3. `resume` when you're done, in the same Bash call as the intervention (`claim … && show … && say … && resume`;
    not needed after `rethink`: their next move ends the moment). Resume
    doesn't hide your drawing: with a `show` or `mark` on the board (or KataGo's fallback line) the
    game stays paused, the learner is told you're done, and they press Continue when they've looked
    (the output says "still paused", `--json` has `"stillPaused": true`, and `state` shows the moment
    "waiting for the learner to press Continue"). Don't wait for them or resume again; answer USER lines as usual.
    Without a drawing, play goes on at once.
-If a **FALLBACK** line appears, KataGo's answer is already on the board; you can still `say` something.
+If a **FALLBACK** line comes (with your next event), KataGo's answer is already on the board; you can
+still `say` something.
 
 Drawings (yours, hints, KataGo's) stay until the learner's next move or Continue, or until they press
 Hide (or Esc); `clear` removes them yourself. You never need to redraw something just because time passed.
@@ -158,9 +172,9 @@ help; wins and losses only nudge it.
    (a chat line says so), and re-solving one right after discussing it locks the lesson in.
 
 **PROBLEM_START `<id>` ... answers ...** — a practice problem is on the board (you started it with
-`problem`, or the learner pressed Practice). The line shows the accepted answers; the learner can't
-see them. The position is in the state under the line. Say nothing yet, or one short line of
-encouragement; never the answer or a strong hint before the first attempt.
+`problem`, or the learner pressed Practice). It comes together with their first attempt (or a
+question about it), with the position in the state under the lines. The line shows the accepted
+answers; the learner can't see them. Never give the answer or a strong hint before the first attempt.
 
 **PROBLEM `<id>` attempt N `<move>` ...** — KataGo has judged an attempt.
 - **correct**: celebrate briefly and specifically, and say *why* it works in one or two sentences
@@ -198,8 +212,8 @@ are judged exactly like the learner's own problems.
   3+, solved on the first try twice), at their new rank. `summary` shows the batch in progress or
   the mastery count; `generate --status` shows more; `generate --now` starts a batch early (only if
   the learner asks for new problems, or the current ones are all mastered and it hasn't fired yet).
-- **BATCH ... finished** in `watch`: tell the learner once, when it fits (between games or problems,
-  not mid-game on Silent): "20 new practice problems are ready, made at your level", and say what's
+- **BATCH ... finished** in `watch` (it comes with your next event): tell the learner once, in that
+  answer or a later one when it fits (between games or problems, not mid-game on Silent): "20 new practice problems are ready, made at your level", and say what's
   new: the rank, or that they include 13×13 and 19×19 positions. A batch started by mastery is
   progress worth naming ("You've mastered most of the last set, so the next one is made from 17k
   games").
@@ -235,7 +249,7 @@ are judged exactly like the learner's own problems.
   restarts KataGo). Problem generation (`src/server/generate.ts`) starts with the server and keeps
   `data/generation.json`; experiment on a copy of the data (`GO_TUTOR_DATA`, another `PORT`), never
   on a real data folder. `GO_TUTOR_DEBUG=1` logs every candidate's verdict and measurements.
-- Data lives in `data/` (override with `GO_TUTOR_DATA`); `TUTOR_TIMEOUT_MS` and `PORT` are env settings.
+- Data lives in `data/` (override with `GO_TUTOR_DATA`); `TUTOR_TIMEOUT_MS`, `TUTOR_GRACE_MS` and `PORT` are env settings.
 - Workspace conventions from the parent `CLAUDE.md` apply: work in worktrees under
   `.claude/worktrees/` on their branch, run `/code-review high` before committing and fix real
   findings, commit only when asked, never push unless asked.

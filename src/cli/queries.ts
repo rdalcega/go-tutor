@@ -20,9 +20,9 @@ export async function getGame(client: Client, gameId: string, signal?: AbortSign
   return game;
 }
 
-/** `review <gameId>` as text. */
-export async function reviewText(client: Client, gameId: string, signal?: AbortSignal): Promise<string> {
+/** `review <gameId>` as text (brief: without the full move list). */
+export async function reviewText(client: Client, gameId: string, signal?: AbortSignal, brief = false): Promise<string> {
   const [game, profile] = await Promise.all([getGame(client, gameId, signal), getProfile(client, signal).catch(() => null)]);
   // The threshold the game was played with, on its board, decides what counted as a mistake.
-  return formatReview(game, reviewThreshold(game, profile?.profile));
+  return formatReview(game, reviewThreshold(game, profile?.profile), brief);
 }

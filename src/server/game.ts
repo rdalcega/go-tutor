@@ -88,6 +88,11 @@ export interface ControllerOptions {
   clock?: Clock;
   /** How long a teaching moment waits for an attached tutor before the KataGo fallback. Default 30 s. */
   tutorTimeoutMs?: number;
+  /**
+   * The wait once a waiting moment reached the tutor's `watch` (the bridge says so): its first
+   * command (say, show, mark, rethink) claims the moment, so it needs no separate `claim`. Default 75 s.
+   */
+  tutorGraceMs?: number;
   /** Minimum time before the bot answers, so replies don't feel instant. Default 500 ms. */
   botDelayMs?: number;
   /** Retry delay after a failed bot move. Default 2 s. */
@@ -173,6 +178,11 @@ export class GameController {
   private readonly store: Store;
   private readonly clock: Clock;
   private readonly tutorTimeoutMs: number;
+  private readonly tutorGraceMs: number;
+  /** The tutor's `watch` (not just any reader of the event stream) is attached: a moment goes to it as it opens. */
+  private tutorWatching = false;
+  /** The moment that already got the longer wait (`tutorGraceMs`): it gets it once. */
+  private graceGiven: string | null = null;
   private readonly botDelayMs: number;
   private readonly botRetryMs: number;
   private readonly analysisVisits: number | undefined;
@@ -254,6 +264,7 @@ export class GameController {
     this.store = opts.store;
     this.clock = opts.clock ?? systemClock;
     this.tutorTimeoutMs = opts.tutorTimeoutMs ?? 30_000;
+    this.tutorGraceMs = opts.tutorGraceMs ?? 75_000;
     this.botDelayMs = opts.botDelayMs ?? 500;
     this.botRetryMs = opts.botRetryMs ?? 2000;
     this.analysisVisits = opts.analysisVisits;
@@ -425,6 +436,11 @@ export class GameController {
   }
 
   // --- wiring from the bridge / index ------------------------------------------
+
+  /** The tutor's `watch` is (or isn't) attached: a moment opening now goes straight to it, so it waits `tutorGraceMs`. */
+  setTutorWatching(watching: boolean): void {
+    this.tutorWatching = watching;
+  }
 
   setTutorAttached(attached: boolean): void {
     if (attached === this.tutorAttached) return;
@@ -967,14 +983,18 @@ export class GameController {
   private startMoment(record: MoveRecord): void {
     if (this.result) return;
     const game = this.game!;
+    // A moment that goes straight to the tutor's watch waits longer: the tutor's first command claims it.
+    const grace = this.tutorAttached && this.tutorWatching;
+    const wait = grace ? this.tutorGraceMs : this.tutorTimeoutMs;
     const moment: TeachingMoment = {
       id: `${record.number}-${randomBytes(2).toString("hex")}`,
       moveNumber: record.number,
       pointLoss: round1(judgedLoss(record)!),
       state: "waiting",
-      ...(this.tutorAttached && { deadline: this.clock.now() + this.tutorTimeoutMs }),
+      ...(this.tutorAttached && { deadline: this.clock.now() + wait }),
       level: record.tutorLevel ?? "coach",
     };
+    if (grace) this.graceGiven = moment.id;
     this.openMoment(record, moment);
     const before = game.before(record.number);
     this.emit({
@@ -988,7 +1008,7 @@ export class GameController {
       tutorLevel: moment.level,
     });
     this.save();
-    this.settleWaitingMoment();
+    this.settleWaitingMoment(false, wait);
   }
 
   /** The game pauses on `moment`, about `record` (the last move): it won't open again for that move. */
@@ -1006,27 +1026,44 @@ export class GameController {
    * `timedOut` is set when the wait's own timer fired: that is the expiry, even if the clock reads
    * a moment before the deadline (Node timers can fire a millisecond early).
    */
-  private settleWaitingMoment(timedOut = false): boolean {
+  private settleWaitingMoment(timedOut = false, wait = this.tutorTimeoutMs): boolean {
     const m = this.moment;
     if (m?.state !== "waiting" || this.momentTimer !== null) return false;
     const expired = timedOut || (m.deadline !== undefined && m.deadline <= this.clock.now());
-    if (this.tutorAttached && !expired) this.waitForTutor();
+    if (this.tutorAttached && !expired) this.waitForTutor(wait);
     else if (!this.practice) this.applyFallback();
     return true;
   }
 
-  /** Give the attached tutor `tutorTimeoutMs` to take the waiting moment before KataGo answers. */
-  private waitForTutor(): void {
+  /** Give the attached tutor `ms` (default `tutorTimeoutMs`) to take the waiting moment before KataGo answers. */
+  private waitForTutor(ms = this.tutorTimeoutMs): void {
     const moment = this.moment;
     if (!moment) return;
     this.cancelMomentTimer();
-    this.setMomentState("waiting", this.clock.now() + this.tutorTimeoutMs);
+    this.setMomentState("waiting", this.clock.now() + ms);
     this.momentTimer = this.clock.setTimeout(() => {
       this.momentTimer = null;
       if (this.moment?.id !== moment.id) return;
       this.settleWaitingMoment(true);
       this.changed();
-    }, this.tutorTimeoutMs);
+    }, ms);
+  }
+
+  /**
+   * The waiting moment `id` reached the tutor's `watch` after it opened (the watch attached, or came
+   * back, while it waited): the first time, its wait becomes `tutorGraceMs` from now, since the
+   * tutor answers in one call; after that, a watch coming back still leaves it `tutorTimeoutMs`.
+   * Never shortened.
+   */
+  extendMoment(id: string): void {
+    const m = this.moment;
+    if (!m || m.id !== id || m.state !== "waiting" || m.deadline === undefined || !this.tutorAttached) return;
+    const wait = this.graceGiven === id ? this.tutorTimeoutMs : this.tutorGraceMs;
+    this.graceGiven = id;
+    if (this.clock.now() + wait > m.deadline) {
+      this.waitForTutor(wait);
+      this.changed();
+    }
   }
 
   /**

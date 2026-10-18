@@ -102,13 +102,21 @@ export type Beat =
   | { kind: "moment"; action: "rethink" | "show" }
   | { kind: "none" };
 
+/** The kind of event a notification answers: deferred lines (GAME_START, PROBLEM_START, BATCH finished, FALLBACK) lead the event they ride with. */
+function headOf(text: string): string {
+  const lines = text.split("\n").filter((l) => /^[A-Z_]+ /.test(l));
+  const main = lines.find((l) => !/^(GAME_START|PROBLEM_START|FALLBACK|BATCH \S+ finished)/.test(l)) ?? lines[0] ?? text;
+  return main.split(" ")[0]!;
+}
+
 /**
  * The calls Claude makes for one notification, following the protocol's CLAUDE.md. `status` is the
- * status line a command prints, `state` and `review` what those commands print now.
+ * status line a command prints, `state` and `review` what those commands print now. (A finished
+ * batch riding along is mentioned in that answer's say: no extra call.)
  */
 function respond(protocol: Protocol, text: string, beat: Beat, w: World): Call[] {
   const p = protocol;
-  const head = text.split(" ")[0]!;
+  const head = headOf(text);
   const status = (command: TutorCommand) => () => commandOutput(command, w.view(), w.now);
   const say = { command: SAY, result: status({ type: "say", text: "" }) };
   const state = { command: "npm run -s tutor -- state", result: () => formatState(w.view(), w.now) };
@@ -131,9 +139,9 @@ function respond(protocol: Protocol, text: string, beat: Beat, w: World): Call[]
           final(),
         ];
       }
-      // The state came with the line: claim at once (it stops the fallback clock), then answer in one call.
-      if (rethink) return [{ tools: [claim], out: OUT.claim }, { tools: [rethinkCall], out: OUT.say }, final()];
-      return [{ tools: [claim], out: OUT.claim }, { tools: [chain("show", "say", "resume")], out: OUT.chained }, final()];
+      // The state came with the line and the moment waits 75 s: one chained call, starting with the claim, answers it.
+      if (rethink) return [{ tools: [chain("claim", "rethink")], out: OUT.say }, final()];
+      return [{ tools: [chain("claim", "show", "say", "resume")], out: OUT.chained }, final()];
     }
     case "HINT": {
       const mark = { command: "npm run -s tutor -- mark C3 D3", result: status({ type: "mark", points: [] }) };
@@ -211,6 +219,8 @@ class World {
   result: SavedGame["result"] = null;
   summary: GameSummary | null = null;
   problem: ProblemView | null = null;
+  /** The tutor's watch is attached (the bridge says so). */
+  watching = false;
   private readonly random: () => number;
 
   constructor(seed: number) {
@@ -335,7 +345,8 @@ function script(level: TutorLevel): Step[] {
     if (moments.includes(n)) {
       at(2, (w) => {
         const r = w.game.moves.at(-1)!;
-        w.moment = { id: `m${n}`, moveNumber: r.number, pointLoss: 8, state: "waiting", deadline: w.now + 30_000, level };
+        // The server's soft claim: a moment going straight to the tutor's watch waits 75 s.
+        w.moment = { id: `m${n}`, moveNumber: r.number, pointLoss: 8, state: "waiting", deadline: w.now + (w.watching ? 75_000 : 30_000), level };
         return w.event({ type: "teaching_moment", gameId: "g1", size: 9, moment: w.moment, record: r, boardBefore: "", boardAfter: "", tutorLevel: level });
       }, { kind: "moment", action: rethinks.has(n) ? "rethink" : "show" });
       if (rethinks.has(n)) {
@@ -447,8 +458,20 @@ function problemView(id: string): ProblemView {
 // The run
 // ---------------------------------------------------------------------------
 
-/** The session's start, the same for both protocols: setup, the browser, the watch, summary, the plan, new-game (from the transcript). */
-const SETUP_CALLS: { add: number; out: number }[] = [
+/**
+ * The session's start: setup, the browser, the watch, summary, the plan, new-game. "before" is the
+ * transcript's (one call per step, six Chrome tool schemas); "after" makes the independent calls
+ * together and loads three Chrome schemas (~2.1k fewer tokens in every later call).
+ */
+const SETUP_AFTER: { add: number; out: number }[] = [
+  { add: 0, out: 200 },
+  { add: 1500, out: 300 },
+  { add: 5200, out: 250 },
+  { add: 1950, out: 300 },
+  { add: 1300, out: 330 },
+  { add: 500, out: 200 },
+];
+const SETUP_BEFORE: { add: number; out: number }[] = [
   { add: 0, out: 170 },
   { add: 400, out: 160 },
   { add: 1100, out: 320 },
@@ -499,7 +522,7 @@ const tick = () => new Promise<void>((resolve) => setImmediate(resolve));
 export async function simulate(protocol: Protocol, level: TutorLevel, seed = 7): Promise<Cost> {
   const w = new World(seed);
   const meter = new Meter();
-  for (const s of SETUP_CALLS) {
+  for (const s of protocol === "before" ? SETUP_BEFORE : SETUP_AFTER) {
     meter.pending += s.add;
     meter.call(s.out, "setup");
   }
@@ -524,6 +547,11 @@ export async function simulate(protocol: Protocol, level: TutorLevel, seed = 7):
     view: () => w.view(),
     gameMoment: () => w.moment,
     setTutorAttached: () => {},
+    setTutorWatching: (on: boolean) => (w.watching = on),
+    // The server's soft claim: a waiting moment delivered to the tutor's watch waits 75 s.
+    extendMoment: (id: string) => {
+      if (w.moment?.id === id && w.moment.state === "waiting") w.moment.deadline = Math.max(w.moment.deadline ?? 0, w.now + 30_000);
+    },
   } as unknown as GameController;
   const store = {
     lastEventSeq: () => 0,
@@ -565,7 +593,7 @@ export async function simulate(protocol: Protocol, level: TutorLevel, seed = 7):
   };
 
   const notify = async (text: string, beat: Beat) => {
-    const kind = text.split(" ")[0]!;
+    const kind = headOf(text);
     meter.cost.notifications++;
     meter.pending += CALIBRATION.notificationOverhead + tokens(text);
     for (const call of respond(protocol, text, beat, w)) {
