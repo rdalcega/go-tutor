@@ -471,15 +471,21 @@ variation's numbers, hidden under a drawn stone or mark); `tutor state` lists th
     says so in the chat, and Forward tries again.
   - Nothing is judged or recorded: the moves carry no eval, and the play-out emits no event, writes
     no problem, profile or rating. The view shows the play-out's board, side to move, `moves` (plain
-    records) and captures, with `ProblemView.playout` (`line`, `cursor`, `thinking`, `over`).
-  - The tutor stays out (`PracticeSession.checkTutor`, before any tutor command): `show` and `mark`
-    are refused, and `say` only while the tutor owes an answer, once: the reveal it hadn't answered
-    when the learner pressed Play it out, or the learner's latest chat about the problem (sent with
-    the tutor attached or not); any say, show or mark on the problem settles it. Abandoned KataGo
-    requests are cancelled (`AbortSignal`), and playing the next move of the line just steps
-    forward. A fresh `watch` doesn't get the problem's
-    `problem_start` replayed, and `watch` attaches no state to a `problem_start` whose problem is
-    being played out. `retry` and `take_back` point to Back; resign and hints are refused as in problems.
+    records) and captures, with `ProblemView.playout` (`line`, `cursor`, `thinking`, `over`, and
+    `replyOwed` while the tutor owes the learner a reply).
+  - The tutor stays out (`PracticeSession.admitTutor`, before any tutor command): `show` and `mark`
+    are skipped, not refused (the command succeeds without drawing and its output says "not drawn",
+    so a `show … && say …` chain still sends the say), and a `say` about the problem goes only while
+    the tutor owes a reply, once: the result it hadn't answered when the learner pressed Play it out,
+    or the learner's latest chat about the problem (sent with the tutor attached or not). A say, show
+    or mark on the problem before the play-out, or a say during it, settles the reply; a
+    `say --moment` about a game moment waiting underneath is the game's and settles nothing. That
+    one rule (`replyOwed`) is what the stream reads: a fresh `watch` gets the problem's
+    `problem_start` replayed, and `watch` attaches its state, only while a reply is owed (the state's
+    play-out line says so); otherwise it prints "nothing to answer" under it. Abandoned KataGo
+    requests are cancelled (`AbortSignal`), and playing the next move of the line just steps forward
+    (without KataGo, when the line goes on past it: `allowed` then keeps `play`). `retry` and
+    `take_back` point to Back; resign and hints are refused as in problems.
 
 ## Generated problems
 
@@ -658,7 +664,9 @@ A pass places no stone, so the UI derives it from the view's last move (`lastPas
 seconds (or "White passed too: the game is over" when it answers the learner's pass), and the status
 line (an `aria-live` region, which screen readers hear) keeps saying it until the next move ("White
 passed. Your move (Black): pass too to end the game, or play on.", then "…Counting the score…" and
-"…Game over." once both passed). The `?mock` bot passes on its third move to show it.
+"…Game over." once both passed). The `?mock` bot passes on its third move to show it. A problem's
+play-out gets the same (its `moves` are the play-out's, KataGo being the bot). The banner shows once
+per pass in each game or problem: going to a problem and back doesn't show the game's again.
 The status, controls, last-move and progress cards are collapsible: their header is a `<button
 aria-expanded>` that folds the card to its header line (the turn, the last move's loss, the rank, or
 the tutor level stay visible there), remembered per card in localStorage (`web/src/collapse.ts`; any

@@ -304,8 +304,9 @@ export class TutorBridge {
     // The game's moment (null once the game is over), which stays open under a practice problem.
     const moment = this.controller.gameMoment();
     const open = moment && moment.state !== "resolved" ? moment.id : undefined;
-    // A problem being played out is answered: there is nothing left in it for the tutor.
-    const problemId = view.mode === "problem" && !view.problem?.playout ? view.problem?.id : undefined;
+    // A problem being played out is the tutor's only while it still owes the learner a reply.
+    const playout = view.problem?.playout;
+    const problemId = view.mode === "problem" && (!playout || playout.replyOwed) ? view.problem?.id : undefined;
     const newest = [...this.ring].reverse();
     const momentEvent = (id: string): TutorEvent | null => {
       const matches = (e: TutorEvent) => e.type === "teaching_moment" && e.moment.id === id;

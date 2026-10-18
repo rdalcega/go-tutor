@@ -10,7 +10,6 @@ import {
   lastPass,
   lossLevel,
   pixelToPoint,
-  playoutPass,
   pointToPixel,
   positionBefore,
   rowLabel,
@@ -120,17 +119,6 @@ describe("eval helpers", () => {
     expect(botPassBanner(lastPass([stone(1, "B"), pass(2, "W"), pass(3, "B")], "B"))).toBeNull();
     expect(lastPass([stone(1, "B"), pass(2, "W"), pass(3, "B")], "B")?.final).toBe(true);
     expect(botPassBanner(lastPass([pass(1, "B")], "B"))).toBeNull();
-  });
-
-  it("finds KataGo's pass at the cursor of a play-out", () => {
-    const po = (line: string[], cursor: number) => ({ line, cursor, thinking: false, over: false });
-    expect(playoutPass(po(["D4", "pass"], 0), "B")).toBeNull();
-    expect(playoutPass(po(["D4", "E5"], 2), "B")).toBeNull();
-    // Stepped back past the pass: it is ahead of the cursor, not on the board.
-    expect(playoutPass(po(["D4", "pass"], 1), "B")).toBeNull();
-    expect(botPassBanner(playoutPass(po(["D4", "pass"], 2), "B"))).toBe("White passed");
-    expect(playoutPass(po(["D4", "pass", "pass"], 3), "B")).toMatchObject({ color: "B", by: "human", final: true });
-    expect(botPassBanner(playoutPass(po(["pass", "pass"], 2), "W"))).toBe("Black passed too: the game is over");
   });
 
   it("scales the sparkline with a floor and dips on bigger losses", () => {

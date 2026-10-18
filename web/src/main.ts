@@ -32,7 +32,6 @@ import {
   positionBefore,
   generationFact,
   nextProblemLabel,
-  playoutPass,
   playoutText,
   problemHeading,
   problemResult,
@@ -265,28 +264,29 @@ function renderBoard(v: GameView | null): void {
 
 /** How long the banner for the bot's pass stays on the board; the status line keeps saying it. */
 const PASS_BANNER_MS = 4000;
-let passBannerShownFor: string | null = null;
+/** The pass each game or problem last showed its banner for (its move number), so going to a problem and back doesn't show it again. */
+const passBannerShown = new Map<string, number>();
 let passBannerTimer: ReturnType<typeof setTimeout> | undefined;
 
 /**
  * The bot's pass is easy to miss (no stone appears), so it gets a banner on the board, once per
  * pass. It is visual only: the status line says the same and is the live region screen readers hear.
+ * In a problem's play-out the view's moves are the play-out's, and the bot is KataGo's side.
  */
 function renderPassBanner(v: GameView | null): void {
-  const po = v?.mode === "problem" ? v.problem?.playout : undefined;
-  const text = po && v?.problem
-    ? botPassBanner(playoutPass(po, v.problem.toPlay))
-    : v?.mode === "game" && v.settings ? botPassBanner(lastPass(v.moves, v.settings.humanColor)) : null;
-  if (!text || !v) {
+  const context = v?.mode === "game" ? `game|${v.gameId}` : v?.mode === "problem" ? `problem|${v.problem?.id}` : null;
+  const pass = context && v?.settings ? lastPass(v.moves, v.settings.humanColor) : null;
+  const text = botPassBanner(pass);
+  if (!text || !pass || !context) {
     clearTimeout(passBannerTimer);
     el.passBanner.hidden = true;
-    // Forget the pass once it is no longer the last move: after a take-back, a pass at the same number is a new one.
-    passBannerShownFor = null;
+    // Forget the pass once it is no longer this game's (or play-out's) last move: after a take-back
+    // or a step back, a pass at the same number is a new one.
+    if (context) passBannerShown.delete(context);
     return;
   }
-  const key = po ? `${v.problem?.id}|playout|${po.cursor}` : `${v.gameId}|${v.moves.length}`;
-  if (key === passBannerShownFor) return;
-  passBannerShownFor = key;
+  if (passBannerShown.get(context) === pass.number) return;
+  passBannerShown.set(context, pass.number);
   el.passBanner.textContent = text;
   el.passBanner.hidden = false;
   clearTimeout(passBannerTimer);
@@ -364,7 +364,7 @@ function turnText(v: GameView): string {
     if (po) {
       if (po.thinking) return "KataGo is thinking…";
       if (po.over) return "Both sides passed.";
-      const pass = playoutPass(po, p.toPlay);
+      const pass = lastPass(v.moves, p.toPlay);
       const passed = pass ? `${colorName(pass.color)} passed. ` : "";
       return v.toPlay === p.toPlay ? `${passed}Playing it out: your move (${colorName(p.toPlay)}).` : `${passed}Playing it out: press Forward for KataGo's move.`;
     }

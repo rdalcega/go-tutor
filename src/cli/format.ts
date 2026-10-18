@@ -314,7 +314,7 @@ export function problemLines(p: ProblemView, size?: number): string[] {
   if (p.playout) {
     const po = p.playout;
     lines.push(
-      `playing it out against KataGo: move ${po.cursor} of ${po.line.length}${po.line.length ? ` (${pv(po.line)})` : ""}${po.over ? ", both passed" : ""} — unjudged; don't comment, only answer their chat`,
+      `playing it out against KataGo: move ${po.cursor} of ${po.line.length}${po.line.length ? ` (${pv(po.line)})` : ""}${po.over ? ", both passed" : ""} — unjudged; ${po.replyOwed ? "your reply to the result or their chat is still owed: one say, nothing is drawn" : "don't comment, only answer their chat"}`,
     );
   }
   if (p.recentMoves?.length && size !== undefined) {
@@ -392,6 +392,9 @@ function awaitingLearner(v: GameView): boolean {
 /** What a command that changed something prints: "ok" and the status, and for `resume` whether the pause now waits for the learner. */
 export function commandOutput(command: TutorCommand, v: GameView, now = Date.now()): string {
   const status = `ok ${statusLine(v, now)}`;
+  if ((command.type === "show" || command.type === "mark") && v.problem?.playout) {
+    return `${status}\nnot drawn: the learner is playing the problem out (a say you owe them still goes)`;
+  }
   if (command.type !== "resume" || !awaitingLearner(v)) return status;
   return `${status}\nstill paused: your drawing stays on the board until the learner presses Continue (or Try again) when ready; you can keep talking with say`;
 }

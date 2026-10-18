@@ -645,11 +645,11 @@ export class GameController {
     if (cmd.type === "new_game" || cmd.type === "start_problem" || cmd.type === "rethink" || cmd.type === "resume") this.noteActivity();
     this.checkSilent(cmd);
     // A problem being played out is unjudged: the tutor stays out of it, except to answer the learner.
-    this.practice?.checkTutor(cmd);
+    if (this.practice && !this.practice.admitTutor(cmd)) return;
     await this.tutorCommand(cmd);
     // The tutor answered: on Silent, the learner's question has had its one reply.
     if (cmd.type === "say" || cmd.type === "show" || cmd.type === "mark") {
-      this.practice?.tutorAnswered();
+      this.practice?.tutorAnswered(cmd);
       this.noteQuestion(false);
       this.noteTutorHelp(cmd.type);
     }

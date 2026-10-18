@@ -246,6 +246,12 @@ describe("watch", () => {
       const played = await run([[problemStart(3, "p4"), chat]], { view: playing });
       const out2 = played.out[0]!.split("\n");
       expect(out2).toEqual([expect.stringMatching(/^PROBLEM_START p4 /), 'USER "why there?" (problem p4, playing it out: answer with one short say)', PLAYOUT_CONTEXT]);
+      // ... unless the tutor still owes a reply (the learner pressed Play it out before it answered the result).
+      const owedView = { ...playing, problem: { ...playing.problem, playout: { ...playing.problem.playout, replyOwed: true } } };
+      const owed = await run([[problemStart(3, "p4")]], { view: owedView });
+      expect(owed.out[0]).toMatch(/ — state below; /);
+      expect(owed.out[0]).toMatch(/still owed: one say/);
+      expect(owed.out[0]).not.toContain(PLAYOUT_CONTEXT);
     });
 
     it("prints the brief state under a waiting moment in the same write", async () => {

@@ -101,6 +101,8 @@ describe("allowedActions", () => {
     // KataGo not ready: stored moves still step; nothing new is asked for.
     expect(playout({ cursor: 1, length: 2 }, { engineReady: false })).toEqual([...base, "playout_back", "playout_forward"]);
     expect(playout({ cursor: 2, length: 2 }, { engineReady: false })).toEqual([...base, "playout_back"]);
+    // ... but the learner may replay the line's next move while the line goes on past it.
+    expect(playout({ cursor: 0, length: 2 }, { engineReady: false })).toEqual([...base, "playout_forward", "play", "pass"]);
     // The game's state underneath doesn't count.
     expect(playout({}, { humanColor: "W", toPlay: "W", status: "paused" })).toContain("play");
   });

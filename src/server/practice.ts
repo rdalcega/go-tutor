@@ -16,9 +16,9 @@ import { ANSWER_MARGIN, MAX_ATTEMPTS, gameSource, generatedInfo, problemGame, pr
 /** Moves of the follow-up drawn after a correct answer: the answer, the opponent's best reply, the next move. */
 const ANSWER_LINE_LENGTH = 3;
 
-/** What the tutor is told when it tries to draw on (or comment on) a problem being played out. */
+/** What the tutor is told when it tries to comment on a problem being played out. */
 export const PLAYOUT_REFUSAL =
-  "The learner is playing the answered problem out against full-strength KataGo: nothing is judged and you don't comment on it or draw on it. Only a chat message (or the answer you owed them when they started) gets one say.";
+  "The learner is playing the answered problem out against full-strength KataGo: nothing is judged and you don't comment on it. Only a chat message (or the result you hadn't answered when they started) gets one say.";
 
 /**
  * Playing an answered problem out against KataGo. One line, no branches: playing a move after
@@ -236,18 +236,21 @@ export class PracticeSession {
   }
 
   /**
-   * The rule that keeps the tutor out of a play-out, checked before any tutor command runs: no
-   * drawing on it, and one say only when an answer is owed (the reveal's, or the learner's chat).
+   * The rule that keeps the tutor out of a play-out, checked before any tutor command runs. A show
+   * or mark isn't drawn (false: it is skipped, not refused, so the say chained after it still goes,
+   * and the command's output says it wasn't drawn); a say about the problem goes only when a reply
+   * is owed (the result's, or the learner's chat). A say about a game moment waiting underneath is the game's.
    */
-  checkTutor(cmd: TutorCommand): void {
-    if (!this.playout) return;
-    if (cmd.type === "show" || cmd.type === "mark") throw new UserError(PLAYOUT_REFUSAL);
-    if (cmd.type === "say" && !this.tutorOwed) throw new UserError(PLAYOUT_REFUSAL);
+  admitTutor(cmd: TutorCommand): boolean {
+    if (!this.playout) return true;
+    if (cmd.type === "show" || cmd.type === "mark") return false;
+    if (cmd.type === "say" && !cmd.momentId && !this.tutorOwed) throw new UserError(PLAYOUT_REFUSAL);
+    return true;
   }
 
-  /** The tutor said or drew something about the problem: what it owed is answered. */
-  tutorAnswered(): void {
-    this.tutorOwed = false;
+  /** The tutor said or drew something: an answer about the problem (not a say about a game moment) settles what it owed. */
+  tutorAnswered(cmd: TutorCommand): void {
+    if (cmd.type === "show" || cmd.type === "mark" || (cmd.type === "say" && !cmd.momentId)) this.tutorOwed = false;
   }
 
   /** The learner chatted about the problem: the tutor owes an answer (also one it reads later, from a replay). */
@@ -310,7 +313,7 @@ export class PracticeSession {
         ...(this.nextDue !== undefined && { nextDue: this.nextDue }),
         ...(this.recentMoves && { recentMoves: this.recentMoves }),
         ...(this.review && { review: { ...this.review } }),
-        ...(po && { playout: { line: [...po.line], cursor: po.cursor, thinking: po.thinking, over: po.game.isOver } }),
+        ...(po && { playout: { line: [...po.line], cursor: po.cursor, thinking: po.thinking, over: po.game.isOver, ...(this.tutorOwed && { replyOwed: true }) } }),
       },
     };
   }
@@ -400,8 +403,6 @@ export class PracticeSession {
     if (po.thinking) throw new UserError("KataGo is thinking.");
     if (po.game.isOver) throw new UserError("Both sides passed. Step back with ◀ to play on from an earlier move.");
     if (po.game.toPlay !== this.problem.toPlay) throw new UserError("It's KataGo's move: press ▶ to see it.");
-    const notReady = this.deps.engineNotReady();
-    if (notReady) throw new UserError(notReady);
     const point = action.type === "play" ? action.point : null;
     if (point) {
       const reason = po.game.illegalReason(point);
@@ -410,6 +411,11 @@ export class PracticeSession {
     const gtp = toGtp(point, this.problem.size);
     // The next move of the line itself just steps forward, keeping what follows it.
     const same = po.line[po.cursor] === gtp;
+    // KataGo answers unless the line already goes on past this move.
+    if (!same || po.cursor + 1 >= po.line.length) {
+      const notReady = this.deps.engineNotReady();
+      if (notReady) throw new UserError(notReady);
+    }
     // Only a legal move replaces the moves that were ahead.
     if (!same) {
       po.line.length = po.cursor;

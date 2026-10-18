@@ -409,6 +409,13 @@ describe("formatState", () => {
     // Its moves are unjudged: no move list headed by losses.
     const moves = [{ number: 1, move: { color: "B" as const, point: { x: 3, y: 4 } }, captures: [] }];
     expect(formatState({ ...v, moves, problem: playout })).not.toContain("moves (");
+    // A reply the tutor still owes (the result's, or their chat's) is one say; a drawing isn't drawn.
+    const owed = { ...playout, playout: { ...playout.playout, replyOwed: true } };
+    expect(problemLines(owed)[3]).toMatch(/— unjudged; your reply to the result or their chat is still owed: one say, nothing is drawn$/);
+    expect(commandOutput({ type: "show", moves: ["D5"] }, { ...v, problem: owed }).split("\n")[1]).toBe(
+      "not drawn: the learner is playing the problem out (a say you owe them still goes)",
+    );
+    expect(commandOutput({ type: "show", moves: ["D5"] }, v)).not.toContain("not drawn");
   });
 
   it("handles an idle server", () => {

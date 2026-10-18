@@ -105,7 +105,8 @@ export function allowedActions(s: ActionState): ActionType[] {
       const allowed: ActionType[] = [...always(s), "leave_problem", "playout_exit"];
       if (po.cursor > 0) allowed.push("playout_back");
       if (!po.thinking && (po.cursor < po.length || (!po.over && s.engineReady))) allowed.push("playout_forward");
-      if (po.learnerToPlay && !po.thinking && !po.over && s.engineReady) allowed.push("play", "pass");
+      // Without KataGo the learner can still replay the line's next move when the line goes on past it.
+      if (po.learnerToPlay && !po.thinking && !po.over && (s.engineReady || po.cursor + 1 < po.length)) allowed.push("play", "pass");
       return allowed;
     }
     if (s.problem?.revealed && !s.problem.checking) return [...always(s), "leave_problem", "playout_start"];

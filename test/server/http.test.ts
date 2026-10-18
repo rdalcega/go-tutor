@@ -398,10 +398,15 @@ describe("HTTP server", () => {
     const tutor = await stream(`${base}/api/tutor/events`);
     await flush();
     expect(tutor.frames.map((f) => JSON.parse(f) as TutorEvent)).toEqual([expect.objectContaining({ type: "problem_start", problemId: body.problems[0]!.id })]);
-    // Answered and played out: a tutor attaching now gets nothing about it.
+    // Answered and played out: a tutor attaching now still hears of it while it owes the result a
+    // reply, and nothing once it has answered.
     await post("/api/action", { type: "play", point: { x: 4, y: 8 } });
     await flush();
-    expect((await post("/api/action", { type: "playout_start" })).body.view?.problem?.playout).toMatchObject({ cursor: 0 });
+    expect((await post("/api/action", { type: "playout_start" })).body.view?.problem?.playout).toMatchObject({ cursor: 0, replyOwed: true });
+    const owed = await stream(`${base}/api/tutor/events`);
+    await flush();
+    expect(owed.frames.map((f) => (JSON.parse(f) as TutorEvent).type)).toEqual(["problem_start"]);
+    expect((await post("/api/tutor", { type: "say", text: "Nice." })).status).toBe(200);
     const later = await stream(`${base}/api/tutor/events`);
     await flush();
     expect(later.frames).toEqual([]);

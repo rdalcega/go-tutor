@@ -698,7 +698,8 @@ describe("playing a problem out", () => {
     expect(answered.allowed).toContain("playout_start");
     await act({ type: "playout_start" });
     const v = ctl.view();
-    expect(v.problem?.playout).toEqual({ line: ["E1", "D8", "E8"], cursor: 0, thinking: false, over: false });
+    // The tutor hasn't answered the solve yet.
+    expect(v.problem?.playout).toEqual({ line: ["E1", "D8", "E8"], cursor: 0, thinking: false, over: false, replyOwed: true });
     // The answer's ghost stones go: the play-out puts real stones on the board.
     expect(v.overlay).toBeNull();
     expect(v.board).toEqual(answered.board);
@@ -759,7 +760,7 @@ describe("playing a problem out", () => {
     expect(ctl.view().allowed).not.toContain("play");
     await expect(act({ type: "play", point: at("F1") })).rejects.toThrow(/thinking/);
     await flush();
-    expect(playout()).toEqual({ line: ["D1", "E1"], cursor: 2, thinking: false, over: false });
+    expect(playout()).toMatchObject({ line: ["D1", "E1"], cursor: 2, thinking: false, over: false });
     expect(stone("E1")).toBe("W");
     // The main net (no human-style profile), never the bot.
     const last = engine.analyzeCalls.at(-1)!;
@@ -895,6 +896,12 @@ describe("playing a problem out", () => {
     expect(playout()?.cursor).toBe(2);
     await expect(act({ type: "playout_forward" })).rejects.toThrow(/starting up/);
     await expect(act({ type: "play", point: at("B9") })).rejects.toThrow(/starting up/);
+    // Replaying the line's next move needs no KataGo while the line goes on past it.
+    await act({ type: "playout_back" });
+    await act({ type: "playout_back" });
+    expect(ctl.view().allowed).toContain("play");
+    await act({ type: "play", point: at("A9") });
+    expect(playout()).toMatchObject({ line: ["A9", "pass"], cursor: 1 });
   });
 
   it("ends after two passes, when only Back is left", async () => {
@@ -903,7 +910,7 @@ describe("playing a problem out", () => {
     await act({ type: "pass" });
     await flush();
     let v = ctl.view();
-    expect(v.problem?.playout).toEqual({ line: ["pass", "pass"], cursor: 2, thinking: false, over: true });
+    expect(v.problem?.playout).toMatchObject({ line: ["pass", "pass"], cursor: 2, thinking: false, over: true });
     expect(v.moves.map((r) => "pass" in r.move)).toEqual([true, true]);
     expect(v.allowed).not.toContain("playout_forward");
     expect(v.allowed).not.toContain("play");
@@ -943,13 +950,21 @@ describe("playing a problem out", () => {
     await expect(act({ type: "playout_forward" })).rejects.toThrow(/practice problem you have answered/);
   });
 
-  it("keeps the tutor out: no drawing, and one say per answer it owes", async () => {
+  it("keeps the tutor out: nothing drawn, and one say per answer it owes", async () => {
     ctl.setTutorAttached(true);
     await solveAndPlayOut();
-    await expect(ctl.handleTutor({ type: "show", moves: ["E1"] })).rejects.toThrow(/playing the answered problem out/);
-    await expect(ctl.handleTutor({ type: "mark", points: ["E1"] })).rejects.toThrow(/playing the answered problem out/);
+    expect(playout()?.replyOwed).toBe(true);
+    // Drawings are skipped, not refused (a `show && say` chain still sends the say), and settle nothing.
+    await ctl.handleTutor({ type: "show", moves: ["E1"] });
+    await ctl.handleTutor({ type: "mark", points: ["E1"] });
+    expect(ctl.view().overlay).toBeNull();
+    expect(playout()?.replyOwed).toBe(true);
+    // A say about a game moment waiting underneath is the game's: it doesn't settle the problem's reply.
+    await ctl.handleTutor({ type: "say", text: "About your game: later.", momentId: "m1" });
+    expect(playout()?.replyOwed).toBe(true);
     // The learner pressed Play it out before the tutor answered the solve: that answer still goes, once.
     await ctl.handleTutor({ type: "say", text: "Nice, E1 makes two eyes." });
+    expect(playout()?.replyOwed).toBeUndefined();
     await expect(ctl.handleTutor({ type: "say", text: "Nice!" })).rejects.toThrow(/playing the answered problem out/);
     await ctl.handleAction({ type: "chat", text: "why does White play there?" });
     expect(ofType("user_message").at(-1)).toMatchObject({ problemId: LIVE, playout: true });

@@ -41,8 +41,9 @@ SESSION FLOW
                  "review g12 2/4" on the line: the 2nd of 4 problems in a review of game g12's mistakes;
                  the learner's Next goes on through it, and after the last it ends.
                  Once answered, the learner may play the problem out against KataGo (unjudged, not in
-                 the stream): show/mark are refused, and one say answers their chat (or the result
-                 you hadn't answered yet when they started).
+                 the stream): show/mark aren't drawn (the output says so; a chained say still goes),
+                 and one say answers their chat (or the result you hadn't answered yet when they
+                 started).
   8. on BATCH:   a batch of generated practice problems finished (see GENERATED PROBLEMS); mention
                  it when it fits, not in the middle of a game on Silent.
   GAME_START, PROBLEM_START, BATCH finished and FALLBACK need no answer of their own: watch prints

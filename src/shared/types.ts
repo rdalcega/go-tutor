@@ -318,6 +318,8 @@ export interface PlayoutView {
   thinking: boolean;
   /** Both sides passed at the cursor: only stepping back is left. */
   over: boolean;
+  /** The tutor still owes the learner a reply (to the result, or to their chat): one say. */
+  replyOwed?: boolean;
 }
 
 /** How many of the moves before a problem's position it labels on the board (-1 … -5). */

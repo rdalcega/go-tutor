@@ -108,9 +108,10 @@ export async function watch(opts: WatchOptions): Promise<void> {
     try {
       if (event.type === "game_end") return await reviewText(client, event.gameId, fetchSignal, true);
       const view = await state();
-      // A problem being played out is answered and unjudged: its board is never for the tutor (only a
-      // problem_start can match a problem view; a moment under it prints the game's board below).
-      if (event.type === "problem_start" && view.problem?.playout) {
+      // A problem being played out is answered and unjudged: its board is for the tutor only while it
+      // still owes a reply (only a problem_start can match a problem view; a moment under it prints
+      // the game's board below).
+      if (event.type === "problem_start" && view.problem?.playout && !view.problem.playout.replyOwed) {
         return view.problem.id === event.problemId ? PLAYOUT_CONTEXT : "gone";
       }
       // The board must be the one the event is about: a replayed moment or hint can come after the game moved on.

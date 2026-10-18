@@ -1,7 +1,6 @@
 // Pure helpers for the board UI: layout math, coordinates, eval color coding.
 // No DOM access here so everything can be unit tested.
 
-import { opponent } from "../../src/engine/board.ts";
 import { gameBefore } from "../../src/engine/game.ts";
 import { GTP_COLUMNS, movePoint, samePoint } from "../../src/shared/coords.ts";
 import { ratingToRank } from "../../src/shared/rank.ts";
@@ -16,7 +15,6 @@ import type {
   MistakeCategory,
   MoveRecord,
   Overlay,
-  PlayoutView,
   Point,
   ProblemView,
   Profile,
@@ -100,7 +98,7 @@ export function humanMoves(moves: MoveRecord[], humanColor: Color): MoveRecord[]
 }
 
 /**
- * A pass as the game's last move: who passed, and whether it was the second pass in a row, which
+ * A pass as the last move of a game (or of a problem's play-out): who passed, and whether it was the second pass in a row, which
  * ends the game. Null when the last move is a stone (or there are no moves). The UI uses it to make
  * the bot's pass obvious: a banner on the board and the status line.
  */
@@ -126,16 +124,6 @@ export function lastPass(moves: MoveRecord[], humanColor: Color): LastPass | nul
 }
 
 /** The board banner for the bot's pass ("White passed"), or null when the last move isn't one. */
-/**
- * The pass at the cursor of a problem's play-out, if any. The line alternates from the learner's
- * color; "bot" is KataGo's side (the learner's moves can be KataGo's too, when they press Forward).
- */
-export function playoutPass(po: PlayoutView, learner: Color): LastPass | null {
-  if (po.cursor === 0 || po.line[po.cursor - 1] !== "pass") return null;
-  const color = po.cursor % 2 === 1 ? learner : opponent(learner);
-  return { number: po.cursor, color, by: color === learner ? "human" : "bot", final: po.cursor >= 2 && po.line[po.cursor - 2] === "pass" };
-}
-
 export function botPassBanner(pass: LastPass | null): string | null {
   if (pass?.by !== "bot") return null;
   return pass.final ? `${colorName(pass.color)} passed too: the game is over` : `${colorName(pass.color)} passed`;
