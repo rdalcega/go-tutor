@@ -653,6 +653,12 @@ width stacks the panel under the board. Ghost stones and marks from `overlay` ar
 KataGo's highlighted move too (`overlay.best`): the UI draws only what the overlay holds, so hiding
 it hides everything. While one is up, a "✕ Hide" button next to the board caption (and Esc, unless
 focus is in a form control, which keeps its own Esc) sends `clear_overlay`.
+A pass places no stone, so the UI derives it from the view's last move (`lastPass` in
+`web/src/geometry.ts`): when the bot passes, a banner across the board says "White passed" for a few
+seconds (or "White passed too: the game is over" when it answers the learner's pass), and the status
+line (an `aria-live` region, which screen readers hear) keeps saying it until the next move ("White
+passed. Your move (Black): pass too to end the game, or play on.", then "…Counting the score…" and
+"…Game over." once both passed). The `?mock` bot passes on its third move to show it.
 The status, controls, last-move and progress cards are collapsible: their header is a `<button
 aria-expanded>` that folds the card to its header line (the turn, the last move's loss, the rank, or
 the tutor level stay visible there), remembered per card in localStorage (`web/src/collapse.ts`; any

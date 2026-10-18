@@ -4,7 +4,7 @@
 import { gameBefore } from "../../src/engine/game.ts";
 import { GTP_COLUMNS, movePoint, samePoint } from "../../src/shared/coords.ts";
 import { ratingToRank } from "../../src/shared/rank.ts";
-import { categoryLabel, comeBackText, estimateRankText, plural, rankEstimateText } from "../../src/shared/text.ts";
+import { categoryLabel, colorName, comeBackText, estimateRankText, plural, rankEstimateText } from "../../src/shared/text.ts";
 import { sizeText, thresholdMultiplier, thresholdNum, thresholdText } from "../../src/shared/threshold.ts";
 import type {
   Board,
@@ -95,6 +95,38 @@ export function formatLoss(pointLoss: number): string {
 /** Human moves in order, with their eval when it has arrived. */
 export function humanMoves(moves: MoveRecord[], humanColor: Color): MoveRecord[] {
   return moves.filter((m) => m.move.color === humanColor);
+}
+
+/**
+ * A pass as the game's last move: who passed, and whether it was the second pass in a row, which
+ * ends the game. Null when the last move is a stone (or there are no moves). The UI uses it to make
+ * the bot's pass obvious: a banner on the board and the status line.
+ */
+export interface LastPass {
+  /** Move number of the pass, so each pass gets its banner once. */
+  number: number;
+  color: Color;
+  by: "bot" | "human";
+  /** The other side passed just before: the game is over (its score may not be in yet). */
+  final: boolean;
+}
+
+export function lastPass(moves: MoveRecord[], humanColor: Color): LastPass | null {
+  const last = moves.at(-1);
+  if (!last || !("pass" in last.move)) return null;
+  const before = moves.at(-2);
+  return {
+    number: last.number,
+    color: last.move.color,
+    by: last.move.color === humanColor ? "human" : "bot",
+    final: !!before && "pass" in before.move,
+  };
+}
+
+/** The board banner for the bot's pass ("White passed"), or null when the last move isn't one. */
+export function botPassBanner(pass: LastPass | null): string | null {
+  if (pass?.by !== "bot") return null;
+  return pass.final ? `${colorName(pass.color)} passed too: the game is over` : `${colorName(pass.color)} passed`;
 }
 
 /** The most recent human move (evaluated or not). */
