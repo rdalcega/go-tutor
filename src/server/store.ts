@@ -425,13 +425,17 @@ export class Store {
     return [...eventsAfter(this.rotatedEventsPath, since).events, ...current.events];
   }
 
-  /** The newest logged event `matches` accepts, read from the log's end (then the rotation's) back only as far as needed; null when there is none. */
-  findEvent(matches: (e: TutorEvent) => boolean): TutorEvent | null {
+  /**
+   * The newest logged event `accept` takes, scanning the log (then its rotation) from the end back
+   * only as far as needed; `maybe` skips raw lines that can't be it without parsing them.
+   */
+  private newestEvent(accept: (e: TutorEvent) => boolean, maybe: (line: string) => boolean = () => true): TutorEvent | null {
     for (const path of [this.eventsPath, this.rotatedEventsPath]) {
       let found: TutorEvent | null = null;
       readLinesBackward(path, (line) => {
+        if (!maybe(line)) return false;
         const event = parseEvent(line);
-        if (event && matches(event)) found = event;
+        if (event && accept(event)) found = event;
         return found !== null;
       });
       if (found) return found;
@@ -439,16 +443,14 @@ export class Store {
     return null;
   }
 
-  /** The seq of the last logged event, or 0. Reads the log from its end back to its last complete event. */
+  /** The newest logged event of `type` that `matches` accepts, or null. Lines of other types are skipped unparsed, so a miss is cheap even on a full log. */
+  findEvent(type: TutorEvent["type"], matches: (e: TutorEvent) => boolean): TutorEvent | null {
+    const marker = `"type":"${type}"`;
+    return this.newestEvent((e) => e.type === type && matches(e), (line) => line.includes(marker));
+  }
+
+  /** The seq of the last logged event, or 0: the newest line that parses to an event with a seq (a torn line parses to nothing). */
   lastEventSeq(): number {
-    for (const path of [this.eventsPath, this.rotatedEventsPath]) {
-      let seq: number | null = null;
-      readLinesBackward(path, (line) => {
-        seq = parseEvent(line)?.seq ?? null;
-        return seq !== null;
-      });
-      if (seq !== null) return seq;
-    }
-    return 0;
+    return this.newestEvent((e) => e.seq != null)?.seq ?? 0;
   }
 }

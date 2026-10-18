@@ -180,10 +180,10 @@ export class TutorBridge {
     const open = moment && moment.state !== "resolved" ? moment.id : undefined;
     const problemId = view.mode === "problem" ? view.problem?.id : undefined;
     const newest = [...this.ring].reverse();
-    const latest = (matches: (e: TutorEvent) => boolean) => newest.find(matches) ?? this.store.findEvent(matches);
+    const latest = (type: TutorEvent["type"], matches: (e: TutorEvent) => boolean) => newest.find((e) => e.type === type && matches(e)) ?? this.store.findEvent(type, matches);
     const events = [
-      open && latest((e) => e.type === "teaching_moment" && e.moment.id === open),
-      problemId && latest((e) => e.type === "problem_start" && e.problemId === problemId),
+      open && latest("teaching_moment", (e) => e.type === "teaching_moment" && e.moment.id === open),
+      problemId && latest("problem_start", (e) => e.type === "problem_start" && e.problemId === problemId),
     ];
     return events.filter((e): e is TutorEvent => !!e).sort((a, b) => a.seq - b.seq);
   }

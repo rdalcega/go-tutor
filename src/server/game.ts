@@ -495,13 +495,11 @@ export class GameController {
       this.log(`could not restore game ${saved.id}: ${(err as Error).message}`);
       return false;
     }
-    // The saved records' eval, level, judge mode and help; the moves themselves were just replayed.
+    // Everything the replay doesn't compute (eval, level, judge mode, help, and any field added
+    // later) comes from the saved record, which is trusted like the rest of the file.
     game.moves.forEach((record, i) => {
-      const { eval: evaluation, tutorLevel, judge, assist } = saved.moves[i]!;
-      if (evaluation) record.eval = evaluation;
-      if (tutorLevel) record.tutorLevel = tutorLevel;
-      if (judge) record.judge = judge;
-      if (assist?.length) record.assist = assist;
+      const { move: _move, number: _number, captures: _captures, ...kept } = saved.moves[i]!;
+      Object.assign(record, kept);
     });
     this.resetGameState();
     this.game = game;
@@ -525,10 +523,12 @@ export class GameController {
     // level each move was played at).
     const last = game.lastMove;
     const m = saved.moment;
-    if (m && m.state !== "resolved" && m.moveNumber > game.moves.length) this.restoreRethink(m);
-    else if (last && m && m.moveNumber === last.number) {
+    if (last && m?.moveNumber === last.number) {
       if (m.state === "resolved") this.momentShown.add(last);
       else this.restoreMoment(last, m);
+    } else if (m && m.state !== "resolved" && m.moveNumber > game.moves.length) {
+      // The tutor's rethink took its move back and the learner hadn't played again: it stays open, with the tutor, as retry left it.
+      this.moment = m;
     }
     this.resumeTurn();
     this.changed();
@@ -615,7 +615,7 @@ export class GameController {
     this.save();
   }
 
-  /** The help record for the learner's next move (the current move count), started afresh when it is for an older position. */
+  /** The help record for the learner's next move (the current move count), started afresh when the one kept is for another position (an older one, or one a take-back moved away from). */
   private pendingHelp(): PendingHelp {
     const at = this.game?.moves.length ?? 0;
     if (this.help?.at !== at) this.help = { at, kinds: new Set() };
@@ -931,25 +931,26 @@ export class GameController {
 
   private startMoment(record: MoveRecord): void {
     if (this.result) return;
-    this.openMoment(record, {
+    const game = this.game!;
+    const moment: TeachingMoment = {
       id: `${record.number}-${randomBytes(2).toString("hex")}`,
       moveNumber: record.number,
       pointLoss: round1(judgedLoss(record)!),
       state: "waiting",
       ...(this.tutorAttached && { deadline: this.clock.now() + this.tutorTimeoutMs }),
       level: record.tutorLevel ?? "coach",
-    });
-    const game = this.game!;
+    };
+    this.openMoment(record, moment);
     const before = game.before(record.number);
     this.emit({
       type: "teaching_moment",
       gameId: this.gameId!,
       size: game.size,
-      moment: { ...this.moment! },
+      moment: { ...moment },
       record,
       boardBefore: toAscii(before.board, movePoint(before.lastMove?.move)),
       boardAfter: toAscii(game.board, this.lastPoint()),
-      tutorLevel: this.moment!.level,
+      tutorLevel: moment.level,
     });
     this.save();
     this.settleWaitingMoment();
@@ -971,16 +972,6 @@ export class GameController {
     this.openMoment(record, answered ? rest : { ...rest, state: "waiting" });
     if (!answered && (saved.state === "tutor" || deadline !== undefined)) this.waitForTutor();
     if (fallback && record.eval) this.overlay = this.fallbackFor(this.game!, record, record.eval).overlay;
-  }
-
-  /**
-   * After a restart, a moment whose move the tutor took back (rethink) before the learner played
-   * again: it stays open, with the tutor, for their new move, as it was.
-   */
-  private restoreRethink(saved: TeachingMoment): void {
-    if (!this.takenBack.some((t) => t.moveNumber === saved.moveNumber)) return;
-    const { deadline: _deadline, awaitingLearner: _awaiting, ...rest } = saved;
-    this.moment = { ...rest, state: "tutor" };
   }
 
   /** The game pauses on `moment`, about `record` (the last move): it won't open again for that move. */
@@ -1193,8 +1184,7 @@ export class GameController {
     for (const record of removed) if (record.move.color === settings.humanColor) this.keepTakenBack(record, by, line);
     if (by === "human") this.assistance.takeBacks++;
     else this.assistance.rethinks++;
-    // The move that replaces it is the learner's second try (and nothing else: any help noted was for a later position).
-    this.help = null;
+    // The move that replaces it is the learner's second try.
     this.noteHelp(by === "human" ? "retry" : "rethink");
     this.status = "playing";
     this.overlay = null;
@@ -1303,6 +1293,7 @@ export class GameController {
     const question = text?.trim();
     if (question) this.addChat("user", question, this.activeMoment()?.id);
     this.assistance.hints++;
+    this.save(); // at the end of the tick, so it writes what is set below as well
     this.emit({
       type: "hint_request",
       gameId: this.gameId!,
@@ -1314,11 +1305,10 @@ export class GameController {
     if (this.tutorAttached) {
       this.questionOpen = true; // the tutor got it: on Silent it may answer with one say
       this.pendingHelp().hintAsked = true; // the tutor's answer makes the next move hinted
-      this.system("Asked your tutor for a hint."); // saves the game, with these
+      this.system("Asked your tutor for a hint.");
       this.changed();
       return;
     }
-    this.save();
     const gen = this.gen;
     const moveCount = game.moves.length;
     try {
