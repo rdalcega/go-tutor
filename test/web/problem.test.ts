@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { ProblemView } from "../../src/shared/types.ts";
 import { categoryLabel } from "../../src/shared/text.ts";
-import { attemptsLeftText, generationFact, problemHeading, problemResult } from "../../web/src/geometry.ts";
+import { attemptsLeftText, generationFact, problemHeading, problemResult, recentMoveLabels } from "../../web/src/geometry.ts";
 
 const base: ProblemView = {
   id: "p4",
@@ -94,5 +94,24 @@ describe("problem card helpers", () => {
     expect(problemResult(solved, now)!.text).toMatch(/You'll see this one again tomorrow\.$/);
     // Not while an attempt is left (nothing is scheduled yet).
     expect(problemResult({ ...failed, revealed: false, attempts: 1 }, now)!.text).not.toMatch(/again in/);
+  });
+});
+
+describe("recent move labels", () => {
+  const recentMoves = [
+    { color: "B" as const, point: { x: 2, y: 6 }, ago: 2 },
+    { color: "W" as const, point: { x: 3, y: 5 }, ago: 1 },
+  ];
+
+  it("labels a problem's last moves −2, −1, except under a drawn stone or mark", () => {
+    expect(recentMoveLabels({ problem: { ...base, recentMoves }, overlay: null })).toEqual([
+      { point: { x: 2, y: 6 }, text: "\u22122" },
+      { point: { x: 3, y: 5 }, text: "\u22121" },
+    ]);
+    const variation = { moves: [{ color: "B" as const, point: { x: 3, y: 5 } }] };
+    expect(recentMoveLabels({ problem: { ...base, recentMoves }, overlay: { variation } }).map((l) => l.text)).toEqual(["\u22122"]);
+    expect(recentMoveLabels({ problem: { ...base, recentMoves }, overlay: { marks: [{ point: { x: 2, y: 6 }, kind: "x" }] } }).map((l) => l.text)).toEqual(["\u22121"]);
+    expect(recentMoveLabels({ problem: base, overlay: null })).toEqual([]);
+    expect(recentMoveLabels({ overlay: null })).toEqual([]);
   });
 });

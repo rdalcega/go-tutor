@@ -61,7 +61,7 @@ import { ProblemGenerator } from "./generate.ts";
 import { atLevelEvalFrom, humanPolicyOptions, moveEvalFrom, needsReferenceAnalysis, positionOf, topHumanMove, type Analysis, type Engine, type Position } from "./katago.ts";
 import { migrateRatingModel } from "./migrate.ts";
 import { PracticeSession, type PracticeDeps } from "./practice.ts";
-import { gameSource, generateProblems, pickNextProblem, recategorize, resultOf, schedule, type StoredProblem } from "./problems.ts";
+import { gameSource, generateProblems, pickNextProblem, recategorize, recentFromGame, resultOf, schedule, type StoredProblem } from "./problems.ts";
 import {
   applyEstimate,
   applyGame,
@@ -1815,6 +1815,7 @@ export class GameController {
       if (!next) throw new UserError(this.noProblemsText());
       ({ problem, early } = next);
     }
+    if (!problem.recent && problem.kind === "game") problem = this.backfillRecent(problem);
     const session = new PracticeSession(problem, this.practiceDeps); // checks the setup before the current problem closes
     // Leaving a problem after a wrong attempt reschedules it: the same problem again starts from its new box.
     const rescheduled = this.closePractice();
@@ -1823,6 +1824,25 @@ export class GameController {
     this.lastProblemId = problem.id;
     session.start(early);
     this.changed();
+  }
+
+  /**
+   * A game problem saved before problems kept their recent moves: they come from the game record,
+   * once (none when the record is gone or no longer leads to the position), and are saved with it.
+   */
+  private backfillRecent(problem: StoredProblem): StoredProblem {
+    const source = gameSource(problem);
+    const saved = source && this.store.loadGame(source.gameId);
+    const recent = (saved && recentFromGame(problem, saved)) ?? [];
+    try {
+      this.updateProblems((problems) => {
+        const p = problems.find((q) => q.id === problem.id);
+        if (p) p.recent = recent;
+      });
+    } catch (err) {
+      this.log(`saving the recent moves of problem ${problem.id} failed: ${(err as Error).message}`);
+    }
+    return { ...problem, recent };
   }
 
   /** Why Practice has nothing to show: the first problems are still being generated, or there are none yet. */

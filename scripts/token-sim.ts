@@ -24,9 +24,10 @@ import { TutorBridge } from "../src/server/bridge.ts";
 import type { TutorEventInput } from "../src/server/common.ts";
 import type { GameController } from "../src/server/game.ts";
 import type { Store } from "../src/server/store.ts";
-import { movePoint, toGtp } from "../src/shared/coords.ts";
+import { fromGtp, movePoint, toGtp } from "../src/shared/coords.ts";
 import type {
   ChatMessage,
+  Color,
   GameSettings,
   GameSummary,
   GameView,
@@ -455,8 +456,11 @@ function summaryOf(w: World, pending: boolean): GameSummary {
 }
 
 function problemView(id: string): ProblemView {
-  return { id, prompt: "Black to play. Make this group live.", source: { gameId: "g1", moveNumber: 14 }, attempts: 0, solved: false, kind: "game", category: "life_and_death", toPlay: "B", maxAttempts: 2, revealed: false, box: 1 };
+  return { id, prompt: "Black to play. Make this group live.", source: { gameId: "g1", moveNumber: 14 }, attempts: 0, solved: false, kind: "game", category: "life_and_death", toPlay: "B", maxAttempts: 2, revealed: false, box: 1, recentMoves: RECENT_SIM };
 }
+
+/** The last moves before a problem's position, which the state lists on one line. */
+const RECENT_SIM = (["C2", "B3", "D2", "C3", "E2"] as const).map((gtp, i) => ({ color: (i % 2 === 0 ? "W" : "B") as Color, point: fromGtp(gtp, 9)!, ago: 5 - i }));
 
 // ---------------------------------------------------------------------------
 // The run

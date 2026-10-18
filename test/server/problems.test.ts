@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { GoGame, boardFromDiagram } from "../../src/engine/index.ts";
+import { GoGame, boardFromDiagram, gameFromLine } from "../../src/engine/index.ts";
+import { fromGtp } from "../../src/shared/coords.ts";
 import {
   BOX_INTERVALS,
   acceptedAnswers,
@@ -20,6 +21,9 @@ import {
   problemPosition,
   problemsResponse,
   promptFor,
+  recentFromGame,
+  recentMovesOf,
+  recentMovesView,
   resultOf,
   schedule,
   stonesOf,
@@ -177,6 +181,8 @@ describe("problems from mistakes", () => {
     });
     expect(p.prompt).toBe("Black to play. One of the groups here is fighting for its life. Find the move that settles it in your favor.");
     expect(p.stones).toEqual(stonesOf(boardFromDiagram(DIAGRAM)));
+    expect(p.recent).toEqual([]); // the first move: none, but known
+    expect(problemFromMistake(snapshot({ recent: [{ color: "W", move: "C4" }] }), "p3", NOW)!.recent).toEqual([{ color: "W", move: "C4" }]);
     expect(promptFor("endgame", "W")).toBe("White to play. It's the endgame. Find the biggest move left.");
     // Nothing to find when KataGo would pass.
     expect(problemFromMistake(snapshot({ candidates: [{ move: "pass", lead: 0, visits: 400, pv: [] }] }), "p4", NOW)).toBeNull();
@@ -260,6 +266,56 @@ describe("GET /api/problems body", () => {
     expect(r.generation).toBeUndefined();
     expect(r.problems[1]).toMatchObject({ source: { gameId: "g1", moveNumber: 5 }, difficulty: 5, answers: ["D7"] });
     expect(r.problems[1]!.source).not.toHaveProperty("played");
+  });
+});
+
+describe("recent moves", () => {
+  const setup = { size: 9, komi: 7, handicap: 0 };
+  // White's B1 captures Black's A1, and White fills A1 afterwards.
+  const line = ["C3", "E5", "A1", "A2", "pass", "B1", "pass", "A1"];
+  const at = (gtp: string) => fromGtp(gtp, 9)!;
+
+  it("keeps the last five stones played (passes left out), oldest first, colors swapped on request", () => {
+    const game = gameFromLine(setup, line);
+    expect(recentMovesOf(game)).toEqual([
+      { color: "W", move: "E5" },
+      { color: "B", move: "A1" },
+      { color: "W", move: "A2" },
+      { color: "W", move: "B1" },
+      { color: "W", move: "A1" },
+    ]);
+    expect(recentMovesOf(game, true)[0]).toEqual({ color: "B", move: "E5" });
+    expect(recentMovesOf(new GoGame(9, 7))).toEqual([]);
+  });
+
+  it("labels only stones still on the board, the later move where a point was played twice", () => {
+    const game = gameFromLine(setup, line);
+    const view = recentMovesView({ size: 9, recent: recentMovesOf(game) }, game.board);
+    // Black's A1 (-4) was captured, and White's A1 (-1) is there now.
+    expect(view).toEqual([
+      { color: "W", point: at("E5"), ago: 5 },
+      { color: "W", point: at("A2"), ago: 3 },
+      { color: "W", point: at("B1"), ago: 2 },
+      { color: "W", point: at("A1"), ago: 1 },
+    ]);
+    const twice = [
+      { color: "W" as const, move: "A1" },
+      { color: "W" as const, move: "A1" },
+    ];
+    expect(recentMovesView({ size: 9, recent: twice }, game.board)).toEqual([{ color: "W", point: at("A1"), ago: 1 }]);
+    expect(recentMovesView({ size: 9 }, game.board)).toBeUndefined();
+    expect(recentMovesView({ size: 9, recent: [{ color: "B", move: "J9" }] }, game.board)).toBeUndefined();
+  });
+
+  it("finds an older game problem's recent moves in its game record, if the record still leads to its position", () => {
+    const moves = gameFromLine(setup, [...line, "D4"]).moves;
+    const before = gameFromLine(setup, line);
+    const p = { source: { gameId: "g1", moveNumber: 9, played: "D4" }, hash: positionHash(before.board, "B"), toPlay: "B" as const };
+    const settings = { size: 9 as const, komi: 7, humanColor: "B" as const, botRank: "20k", handicap: 0 };
+    expect(recentFromGame(p, { settings, moves })).toEqual(recentMovesOf(before));
+    expect(recentFromGame({ ...p, hash: "other" }, { settings, moves })).toBeUndefined();
+    expect(recentFromGame({ ...p, source: { ...p.source, takenBack: 0 } }, { settings, moves })).toBeUndefined();
+    expect(recentFromGame({ ...p, source: undefined }, { settings, moves })).toBeUndefined();
   });
 });
 

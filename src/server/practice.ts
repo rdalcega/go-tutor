@@ -6,10 +6,10 @@ import { toAscii, type GoGame } from "../engine/index.ts";
 import { samePoint, toGtp } from "../shared/coords.ts";
 import { plural, round1 } from "../shared/text.ts";
 import { sizeText } from "../shared/threshold.ts";
-import type { ClientAction, Color, GameSettings, GameView, Gtp, Overlay, Point, ProblemAttempt, TutorCommand } from "../shared/types.ts";
+import type { ClientAction, Color, GameSettings, GameView, Gtp, Overlay, Point, ProblemAttempt, RecentMove, TutorCommand } from "../shared/types.ts";
 import { ILLEGAL_TEXT, PV_STONES, UserError, alternatingStones, lineStones, type TutorEventInput } from "./common.ts";
 import { moveEvalFrom, trustedCandidate, type Analysis, type Engine } from "./katago.ts";
-import { ANSWER_MARGIN, MAX_ATTEMPTS, gameSource, generatedInfo, problemGame, problemPosition, promptFor, type StoredProblem } from "./problems.ts";
+import { ANSWER_MARGIN, MAX_ATTEMPTS, gameSource, generatedInfo, problemGame, problemPosition, promptFor, recentMovesView, type StoredProblem } from "./problems.ts";
 
 /** Moves of the follow-up drawn after a correct answer: the answer, the opponent's best reply, the next move. */
 const ANSWER_LINE_LENGTH = 3;
@@ -52,6 +52,8 @@ export class PracticeSession {
   private closed = false;
   /** Analyses of the problem position (key "") and after each attempt (key = the move). */
   private readonly analyses = new Map<string, Promise<Analysis>>();
+  /** The last moves before the position that the board labels (the position never changes). */
+  private readonly recentMoves: RecentMove[] | undefined;
 
   /** Throws a UserError when the problem can't be set up. */
   constructor(
@@ -64,6 +66,7 @@ export class PracticeSession {
     } catch (err) {
       throw new UserError(`Problem ${problem.id} can't be set up: ${(err as Error).message}`);
     }
+    this.recentMoves = recentMovesView(problem, this.game.board);
   }
 
   /** Solved, or out of attempts: the answer is shown and the board is locked. */
@@ -196,6 +199,7 @@ export class PracticeSession {
         ...(this.lastAttempt && { lastAttempt: { ...this.lastAttempt } }),
         ...(this.answer && { answer: { move: this.answer.move, pv: [...this.answer.pv] } }),
         ...(this.nextDue !== undefined && { nextDue: this.nextDue }),
+        ...(this.recentMoves && { recentMoves: this.recentMoves }),
       },
     };
   }

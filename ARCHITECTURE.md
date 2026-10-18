@@ -379,7 +379,14 @@ spaced-repetition state: the learner's own (kind `game`, ids `p1`, `p2`, …) an
 (kind `generated`, ids `gen1`, `gen2`, …; see "Generated problems"). A problem's `source` says which:
 `{ gameId, moveNumber, played, takenBack? }` for the learner's game, `{ kind: "generated", batchId,
 weakerRank, strongerRank, difficultyRank, difficultyRating, moveNumber, played, swapped }` for a
-generated one (`gameSource` / `generatedSource` tell them apart).
+generated one (`gameSource` / `generatedSource` tell them apart). `recent` keeps the last 5 stones
+played before the position (passes left out, oldest first, in the problem's colors: swapped with the
+board for a swapped generated one); problems saved before it was kept lack it, and one from the
+learner's game gets it from the saved game at its first start and keeps it (`recentFromGame`; empty
+when the record is gone or no longer leads to its position). The view's `ProblemView.recentMoves` (`recentMovesView`) holds those whose
+stone is still on the board, numbered back from the position (`ago` 1 = the last move; a point played
+twice keeps the later one), and the board labels them "−1" … "−5" (smaller and lighter than a
+variation's numbers, hidden under a drawn stone or mark); `tutor state` lists them on one line.
 
 - **From mistakes**: when a game finishes, each mistake in its summary (point loss ≥ the threshold the
   game was played with, scaled to its board) becomes a problem: the position before the move as setup stones (no move

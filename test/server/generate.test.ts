@@ -27,6 +27,7 @@ import {
   nextGeneratedId,
   normalizeGeneration,
   removeLegacyBuiltins,
+  storedProblem,
   swapColors,
   wrongGap,
   type CandidateInput,
@@ -249,6 +250,10 @@ describe("examineCandidate", () => {
     // 0.3 at 18k (12) and 0.7 at 15k (15): 13.5.
     expect(verdict.problem.difficultyRating).toBe(13.5);
     expect(verdict.problem.stones.B).toEqual(["D6", "D5", "D4"]);
+    // The last five moves before it, which the board labels.
+    const recent = ["E4", "D5", "E5", "D6", "E6"].map((move, i) => ({ color: i % 2 === 0 ? "W" : "B", move }));
+    expect(verdict.problem.recentMoves).toEqual(recent);
+    expect(storedProblem(verdict.problem, { id: "batch1", weakerRank: "20k", strongerRank: "15k" }, "gen9", 0).recent).toEqual(recent);
     // The deeper analysis, the position after the mistake, then 13 policy queries (one per human-SL profile).
     expect(engine.calls.map((c) => c.opts.maxVisits)).toEqual([CONFIRM_VISITS, 800, ...new Array(13).fill(1)]);
     expect(engine.calls[0]!.pos).toMatchObject({ initialPlayer: "B", komi: 7, moves: [] });
@@ -262,6 +267,7 @@ describe("examineCandidate", () => {
     const verdict = await examineCandidate(input, { analyze: engine.analyze, knownHashes: new Set() });
     if (!verdict.ok) throw new Error(`expected a problem, got ${verdict.reason}`);
     expect(verdict.problem.swapped).toBe(true);
+    expect(verdict.problem.recentMoves.at(-1)).toEqual({ color: "W", move: "D6" }); // Black's D6, swapped
     // White's stones are Black's now, and Black is to play.
     expect(verdict.problem.stones).toEqual({ B: ["E5", "E4"], W: ["D6", "D5", "D4"] });
     expect(verdict.problem.hash).toBe(positionHash(swapColors(input.before.board), "B"));

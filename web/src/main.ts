@@ -32,6 +32,7 @@ import {
   problemResult,
   ratingChangeFor,
   ratingSparkPoints,
+  recentMoveLabels,
   sparklinePoints,
   thresholdFact,
   topCategories,
@@ -235,6 +236,7 @@ function renderBoard(v: GameView | null): void {
     overlay: v.overlay,
     // Only what the drawing holds: KataGo's highlighted move goes when the drawing is hidden or cleared.
     bestMove: v.overlay?.best ?? null,
+    recentLabels: recentMoveLabels(v),
     hoverColor: canMove && !before ? v.settings!.humanColor : null,
   });
   el.boardWrap.classList.toggle("locked", !canMove);

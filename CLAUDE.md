@@ -175,6 +175,7 @@ help; wins and losses only nudge it.
 `problem`, or the learner pressed Practice). It comes together with their first attempt (or a
 question about it), with the position in the state under the lines. The line shows the accepted
 answers; the learner can't see them. Never give the answer or a strong hint before the first attempt.
+The board labels the last moves before the position −1 (the last) to −5; the state's `last moves` line lists them.
 
 **PROBLEM `<id>` attempt N `<move>` ...** — KataGo has judged an attempt.
 - **correct**: celebrate briefly and specifically, and say *why* it works in one or two sentences

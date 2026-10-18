@@ -2,7 +2,7 @@
 // No DOM access here so everything can be unit tested.
 
 import { gameBefore } from "../../src/engine/game.ts";
-import { GTP_COLUMNS, movePoint } from "../../src/shared/coords.ts";
+import { GTP_COLUMNS, movePoint, samePoint } from "../../src/shared/coords.ts";
 import { ratingToRank } from "../../src/shared/rank.ts";
 import { categoryLabel, comeBackText, estimateRankText, plural, rankEstimateText } from "../../src/shared/text.ts";
 import { sizeText, thresholdMultiplier, thresholdNum, thresholdText } from "../../src/shared/threshold.ts";
@@ -14,6 +14,7 @@ import type {
   GenerationStatus,
   MistakeCategory,
   MoveRecord,
+  Overlay,
   Point,
   ProblemView,
   Profile,
@@ -224,6 +225,15 @@ export function generationFact(g: GenerationStatus | undefined): { short: string
     };
   }
   return null;
+}
+
+/**
+ * The labels of a problem's last moves before its position ("−1" on the last move, "−2" on the one
+ * before, …), except where a drawing (a variation stone or a mark) is on the same point.
+ */
+export function recentMoveLabels(v: { problem?: ProblemView | null; overlay: Overlay | null }): { point: Point; text: string }[] {
+  const drawn = [...(v.overlay?.variation?.moves ?? []), ...(v.overlay?.marks ?? [])].map((d) => d.point);
+  return (v.problem?.recentMoves ?? []).filter((m) => !drawn.some((p) => samePoint(p, m.point))).map((m) => ({ point: m.point, text: `\u2212${m.ago}` }));
 }
 
 /** "2 attempts left", "1 attempt left", or "" once the problem is over. */
