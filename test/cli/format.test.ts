@@ -406,6 +406,9 @@ describe("formatState", () => {
     const playout = { ...shown, playout: { line: ["D5", "E4", "C3"], cursor: 2, thinking: false, over: false } };
     expect(problemLines(playout)[3]).toBe("playing it out against KataGo: move 2 of 3 (D5 E4 C3) — unjudged; don't comment, only answer their chat");
     expect(statusLine({ ...v, problem: playout })).toBe("problem=p4 mode=problem status=finished level=coach attempts=2/2 answer shown (D5) playout=2/3");
+    // Its moves are unjudged: no move list headed by losses.
+    const moves = [{ number: 1, move: { color: "B" as const, point: { x: 3, y: 4 } }, captures: [] }];
+    expect(formatState({ ...v, moves, problem: playout })).not.toContain("moves (");
   });
 
   it("handles an idle server", () => {

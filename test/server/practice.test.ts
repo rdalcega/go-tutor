@@ -768,6 +768,30 @@ describe("playing a problem out", () => {
     expect(engine.botCalls).toEqual([]);
   });
 
+  it("steps forward when the learner plays the next move of the line, keeping the rest", async () => {
+    await solveAndPlayOut();
+    const calls = engine.analyzeCalls.length;
+    await act({ type: "play", point: at("E1") });
+    expect(playout()).toMatchObject({ line: ["E1", "D8", "E8"], cursor: 1, thinking: false });
+    expect(engine.analyzeCalls.length).toBe(calls);
+  });
+
+  it("stops KataGo's search when its move is no longer wanted", async () => {
+    await solveAndPlayOut();
+    engine.hold = true;
+    await act({ type: "play", point: at("A9") });
+    const signal = engine.analyzeCalls.at(-1)!.opts?.signal;
+    expect(signal?.aborted).toBe(false);
+    await act({ type: "playout_back" });
+    expect(signal?.aborted).toBe(true);
+    await flush();
+    expect(ctl.view().engineBusy).toBe(false);
+    await act({ type: "play", point: at("A9") });
+    const next = engine.analyzeCalls.at(-1)!.opts?.signal;
+    await act({ type: "leave_problem" });
+    expect(next?.aborted).toBe(true);
+  });
+
   it("drops the moves ahead only for a legal move, and refuses moves on KataGo's turn", async () => {
     await solveAndPlayOut();
     await act({ type: "playout_forward" });
@@ -919,11 +943,13 @@ describe("playing a problem out", () => {
     await expect(act({ type: "playout_forward" })).rejects.toThrow(/practice problem you have answered/);
   });
 
-  it("keeps the tutor out: no drawing, and one say per learner message", async () => {
+  it("keeps the tutor out: no drawing, and one say per answer it owes", async () => {
     ctl.setTutorAttached(true);
     await solveAndPlayOut();
     await expect(ctl.handleTutor({ type: "show", moves: ["E1"] })).rejects.toThrow(/playing the answered problem out/);
     await expect(ctl.handleTutor({ type: "mark", points: ["E1"] })).rejects.toThrow(/playing the answered problem out/);
+    // The learner pressed Play it out before the tutor answered the solve: that answer still goes, once.
+    await ctl.handleTutor({ type: "say", text: "Nice, E1 makes two eyes." });
     await expect(ctl.handleTutor({ type: "say", text: "Nice!" })).rejects.toThrow(/playing the answered problem out/);
     await ctl.handleAction({ type: "chat", text: "why does White play there?" });
     expect(ofType("user_message").at(-1)).toMatchObject({ problemId: LIVE, playout: true });
@@ -933,11 +959,14 @@ describe("playing a problem out", () => {
     // Harmless: clear and resume.
     await ctl.handleTutor({ type: "clear" });
     await ctl.handleTutor({ type: "resume" });
-    // A question asked in one play-out doesn't carry over to the next.
-    await ctl.handleAction({ type: "chat", text: "hm" });
+    // A question asked just before (or with the tutor away) is still answered, once.
     await act({ type: "playout_exit" });
+    ctl.setTutorAttached(false);
+    await ctl.handleAction({ type: "chat", text: "hm" });
     await act({ type: "playout_start" });
-    await expect(ctl.handleTutor({ type: "say", text: "late" })).rejects.toThrow(/one say/);
+    ctl.setTutorAttached(true);
+    await ctl.handleTutor({ type: "say", text: "late answer" });
+    await expect(ctl.handleTutor({ type: "say", text: "later" })).rejects.toThrow(/one say/);
     // Back on the answered problem, the tutor talks and draws as usual.
     await act({ type: "playout_exit" });
     await ctl.handleTutor({ type: "say", text: "Well done." });

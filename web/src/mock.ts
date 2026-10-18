@@ -173,6 +173,8 @@ class MockServer implements Transport {
     answerOverlay: GameView["overlay"];
     base: GameView["board"];
   } | null = null;
+  /** The answer's line as drawn at the reveal (kept even if the learner hides the drawing): a play-out starts with it ahead. */
+  private answerLine: string[] = [];
 
   constructor() {
     this.view = this.sampleView();
@@ -525,7 +527,7 @@ class MockServer implements Transport {
     if (a.type === "playout_start") {
       if (this.playout) return null;
       if (!p.revealed) return "Answer the problem first; then you can play it out.";
-      const line = (v.overlay?.variation?.moves ?? []).map((s) => toGtp(s.point, size));
+      const line = [...this.answerLine];
       this.playout = { line, cursor: 0, game: GoGame.fromBoard(v.board, p.toPlay), thinking: false, gen: 0, answerOverlay: v.overlay, base: v.board };
       v.overlay = null;
       this.msg("system", "Playing it out: KataGo answers at full strength, and nothing here is judged.");
@@ -660,6 +662,7 @@ class MockServer implements Transport {
       p.nextDue = Date.now() + BOX_INTERVALS[p.box]!;
       v.status = "finished";
       const shown = fromGtp(correct ? gtp : answer, size)!;
+      this.answerLine = [toGtp(shown, size)];
       v.overlay = {
         variation: { label: correct ? `${gtp} and how play goes on` : `KataGo's answer: ${answer}`, moves: [{ color: def.toPlay, point: shown }] },
         ...(!correct && { marks: [{ point, kind: "x" as const }] }),

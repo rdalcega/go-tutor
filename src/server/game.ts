@@ -60,7 +60,7 @@ import { estimateRank, rankSamples } from "./estimate.ts";
 import { ProblemGenerator } from "./generate.ts";
 import { atLevelEvalFrom, humanPolicyOptions, moveEvalFrom, needsReferenceAnalysis, positionOf, topHumanMove, type Analysis, type Engine, type Position } from "./katago.ts";
 import { migrateRatingModel } from "./migrate.ts";
-import { PLAYOUT_REFUSAL, PracticeSession, type PracticeDeps } from "./practice.ts";
+import { PracticeSession, type PracticeDeps } from "./practice.ts";
 import { gameSource, generateProblems, pickNextProblem, recategorize, recentFromGame, resultOf, schedule, type StoredProblem } from "./problems.ts";
 import {
   applyEstimate,
@@ -644,11 +644,12 @@ export class GameController {
     // Only the commands that need KataGo (a new game, a problem, a take-back, the bot's move after resume) hold generation off.
     if (cmd.type === "new_game" || cmd.type === "start_problem" || cmd.type === "rethink" || cmd.type === "resume") this.noteActivity();
     this.checkSilent(cmd);
-    // A problem being played out is unjudged: the tutor doesn't draw on it (practice.ts limits say to answering chat).
-    if (this.practice?.playingOut && (cmd.type === "show" || cmd.type === "mark")) throw new UserError(PLAYOUT_REFUSAL);
+    // A problem being played out is unjudged: the tutor stays out of it, except to answer the learner.
+    this.practice?.checkTutor(cmd);
     await this.tutorCommand(cmd);
     // The tutor answered: on Silent, the learner's question has had its one reply.
     if (cmd.type === "say" || cmd.type === "show" || cmd.type === "mark") {
+      this.practice?.tutorAnswered();
       this.noteQuestion(false);
       this.noteTutorHelp(cmd.type);
     }
@@ -1448,12 +1449,12 @@ export class GameController {
       ...(momentId && { momentId }),
       ...(problemId ? { problemId, ...(playout && { playout }) } : this.gameId && { tutorLevel: this.level }),
     });
+    // On a problem the tutor owes an answer, also one it reads later from a replay: a play-out lets
+    // it say only that (the problem's rule; Silent's rule and the saved game are the game's).
+    if (problemId) this.practice!.questionAsked();
     if (this.tutorAttached) {
-      // The tutor got it: on Silent it may answer with one say. A question on a problem isn't the
-      // game's (Silent's rule and the saved game are the game's; problems are open to the tutor,
-      // except a play-out, where it answers each message once).
+      // The tutor got it: on Silent it may answer with one say.
       if (!problemId) this.noteQuestion(true);
-      else this.practice!.questionAsked();
     } else {
       this.system("Your tutor isn't connected right now, so nobody can answer chat. KataGo's feedback still works.");
     }

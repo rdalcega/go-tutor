@@ -429,7 +429,9 @@ export function formatState(v: GameView, now = Date.now(), chatTail = 8, brief =
   if (v.board.length > 0) {
     out.push("", toAscii(v.board, movePoint(v.moves.at(-1)?.move)), "");
   }
-  if (brief && v.moves.length > BRIEF_MOVES) {
+  if (v.problem?.playout) {
+    // A play-out's moves are unjudged, and the problem's line above lists them.
+  } else if (brief && v.moves.length > BRIEF_MOVES) {
     const earlier = v.moves.slice(0, -BRIEF_MOVES).filter((r) => r.move.color === v.settings?.humanColor && r.eval && r.eval.pointLoss >= v.mistakeThreshold);
     out.push(`moves (last ${BRIEF_MOVES}; human loss in pts, ! = mistake):\n${moveListText(v.moves.slice(-BRIEF_MOVES), size, v.mistakeThreshold)}`);
     if (earlier.length) out.push(`earlier mistakes: ${earlier.map((r) => `${r.number} ${moveGtp(r.move, size)} -${num(r.eval!.pointLoss)}`).join(", ")}`);

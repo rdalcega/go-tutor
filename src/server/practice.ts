@@ -18,7 +18,7 @@ const ANSWER_LINE_LENGTH = 3;
 
 /** What the tutor is told when it tries to draw on (or comment on) a problem being played out. */
 export const PLAYOUT_REFUSAL =
-  "The learner is playing the answered problem out against full-strength KataGo: nothing is judged and you don't comment on it. Answer their chat with one say.";
+  "The learner is playing the answered problem out against full-strength KataGo: nothing is judged and you don't comment on it or draw on it. Only a chat message (or the answer you owed them when they started) gets one say.";
 
 /**
  * Playing an answered problem out against KataGo. One line, no branches: playing a move after
@@ -35,8 +35,8 @@ interface Playout {
   gen: number;
   /** KataGo is choosing a move. */
   thinking: boolean;
-  /** The learner chatted: the tutor may answer with one say (the only comment it makes here). */
-  questionOpen: boolean;
+  /** Cancels KataGo's search for the move being chosen, once nobody wants it. */
+  abort: AbortController | null;
 }
 
 /**
@@ -98,6 +98,11 @@ export class PracticeSession {
   private playout: Playout | null = null;
   /** The drawing the reveal left on the board, put back when the play-out ends. */
   private answerOverlay: Overlay | null = null;
+  /**
+   * The tutor hasn't answered the reveal or the learner's latest chat yet: during a play-out that is
+   * the one say it may still send (a reply that crossed the learner's Play it out, or to their chat).
+   */
+  private tutorOwed = false;
 
   /** Throws a UserError when the problem can't be set up. `review`: the problem's place in a review of one game's mistakes. */
   constructor(
@@ -165,6 +170,7 @@ export class PracticeSession {
    */
   close(): StoredProblem | undefined {
     this.closed = true;
+    if (this.playout) this.cancelRequest(this.playout);
     this.playout = null;
     // Unrevealed means unsolved, so any judged attempt was wrong.
     if (this.revealed || !this.lastAttempt) return undefined;
@@ -216,11 +222,6 @@ export class PracticeSession {
   handleTutor(cmd: Extract<TutorCommand, { type: "say" | "rethink" | "resume" }>): void {
     switch (cmd.type) {
       case "say":
-        if (this.playout) {
-          // Playing out, the tutor only answers the learner's chat, once per message.
-          if (!this.playout.questionOpen) throw new UserError(PLAYOUT_REFUSAL);
-          this.playout.questionOpen = false;
-        }
         return this.deps.say(cmd.text, cmd.momentId);
       case "rethink":
         throw new UserError("The learner is on a practice problem; rethink is for games. Use say, show or mark.");
@@ -234,9 +235,24 @@ export class PracticeSession {
     return { moves: alternatingStones(moves, start ?? this.problem.toPlay, this.problem.size), ...(label && { label }) };
   }
 
-  /** The learner chatted with a tutor attached: during a play-out, the tutor may answer it once. */
+  /**
+   * The rule that keeps the tutor out of a play-out, checked before any tutor command runs: no
+   * drawing on it, and one say only when an answer is owed (the reveal's, or the learner's chat).
+   */
+  checkTutor(cmd: TutorCommand): void {
+    if (!this.playout) return;
+    if (cmd.type === "show" || cmd.type === "mark") throw new UserError(PLAYOUT_REFUSAL);
+    if (cmd.type === "say" && !this.tutorOwed) throw new UserError(PLAYOUT_REFUSAL);
+  }
+
+  /** The tutor said or drew something about the problem: what it owed is answered. */
+  tutorAnswered(): void {
+    this.tutorOwed = false;
+  }
+
+  /** The learner chatted about the problem: the tutor owes an answer (also one it reads later, from a replay). */
   questionAsked(): void {
-    if (this.playout) this.playout.questionOpen = true;
+    this.tutorOwed = true;
   }
 
   /** What the shared allowed-actions rules read of the problem. */
@@ -311,7 +327,7 @@ export class PracticeSession {
     if (this.checking) throw new UserError("KataGo is still checking your move.");
     const game = problemGame(this.problem);
     // The drawn line was legal from the problem position (lineStones checked it), so it replays.
-    this.playout = { line: [...this.answerLine], cursor: 0, game, gen: 0, thinking: false, questionOpen: false };
+    this.playout = { line: [...this.answerLine], cursor: 0, game, gen: 0, thinking: false, abort: null };
     this.answerOverlay = this.overlay;
     this.overlay = null;
     this.deps.system(
@@ -323,7 +339,7 @@ export class PracticeSession {
   private exitPlayout(): void {
     const po = this.playout;
     if (!po) return;
-    po.gen++; // an answer KataGo is still choosing is dropped
+    this.cancelRequest(po);
     this.playout = null;
     this.overlay = this.answerOverlay;
     this.answerOverlay = null;
@@ -334,11 +350,18 @@ export class PracticeSession {
   private stepBack(): void {
     const po = this.requirePlayout();
     if (po.cursor === 0) throw new UserError("This is the problem position: there is nothing to step back to.");
+    this.cancelRequest(po);
     po.game.undo(1);
     po.cursor--;
+    this.deps.changed();
+  }
+
+  /** Drop the move KataGo may be choosing: its answer is ignored, and its search stops. */
+  private cancelRequest(po: Playout): void {
     po.gen++;
     po.thinking = false;
-    this.deps.changed();
+    po.abort?.abort();
+    po.abort = null;
   }
 
   /** One move forward: the next move of the line, or at its end KataGo's move for the side to play. */
@@ -384,12 +407,17 @@ export class PracticeSession {
       const reason = po.game.illegalReason(point);
       if (reason) throw new UserError(ILLEGAL_TEXT[reason]);
     }
+    const gtp = toGtp(point, this.problem.size);
+    // The next move of the line itself just steps forward, keeping what follows it.
+    const same = po.line[po.cursor] === gtp;
     // Only a legal move replaces the moves that were ahead.
-    po.line.length = po.cursor;
-    po.line.push(toGtp(point, this.problem.size));
-    this.advance(po, po.line[po.cursor]!);
+    if (!same) {
+      po.line.length = po.cursor;
+      po.line.push(gtp);
+    }
+    this.advance(po, gtp);
     po.gen++;
-    if (po.game.isOver) return this.deps.changed();
+    if (po.game.isOver || po.cursor < po.line.length) return this.deps.changed();
     void this.requestMove(po);
   }
 
@@ -414,18 +442,21 @@ export class PracticeSession {
    */
   private async requestMove(po: Playout): Promise<void> {
     const gen = ++po.gen;
+    const abort = new AbortController();
+    po.abort = abort;
     po.thinking = true;
     this.deps.changed();
     const moves = po.line.slice(0, po.cursor);
     let analysis: Analysis | null = null;
     let failure: Error | null = null;
     try {
-      analysis = await this.deps.busyWhile(this.playoutAnalysis(moves));
+      analysis = await this.deps.busyWhile(this.playoutAnalysis(moves, abort.signal));
     } catch (err) {
       failure = err as Error;
     }
     if (this.closed || this.playout !== po || po.gen !== gen) return this.deps.changed();
     po.thinking = false;
+    po.abort = null;
     if (!analysis) {
       this.deps.system(`KataGo couldn't answer (${failure?.message ?? "no answer"}). Press ▶ to try again.`);
       return this.deps.changed();
@@ -439,10 +470,10 @@ export class PracticeSession {
   }
 
   /** The play-out position after `moves`: the attempts' analyses when they are cached, else a fresh one (not kept, a play-out can wander far). */
-  private playoutAnalysis(moves: Gtp[]): Promise<Analysis> {
+  private playoutAnalysis(moves: Gtp[], signal: AbortSignal): Promise<Analysis> {
     return (
       this.analyses.get(moves.join(" ")) ??
-      this.deps.engine.analyze(problemPosition(this.problem, moves), { maxVisits: this.deps.problemVisits })
+      this.deps.engine.analyze(problemPosition(this.problem, moves), { maxVisits: this.deps.problemVisits, signal })
     );
   }
 
@@ -544,7 +575,10 @@ export class PracticeSession {
       bestMove,
       bestPv: bestPv.slice(0, 8),
     });
-    if (this.revealed) this.nextDue = this.deps.recordResult(problem, this.solved, this.attempts)?.due;
+    if (this.revealed) {
+      this.nextDue = this.deps.recordResult(problem, this.solved, this.attempts)?.due;
+      this.tutorOwed = true; // the tutor answers the result, even once the learner is playing it out
+    }
     this.deps.changed();
   }
 

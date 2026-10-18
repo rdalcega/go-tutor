@@ -198,7 +198,8 @@ The board labels the last moves before the position −1 (the last) to −5; the
 - **Playing it out**: once a problem is answered the learner may press Play it out and keep playing
   from it against full-strength KataGo, stepping back and forward. Nothing there is judged or
   recorded and none of it reaches you; stay out of it: `show` and `mark` are refused, and `say` only
-  answers a USER line ending `(problem p3, playing it out: …)`, with one short reply.
+  answers a USER line ending `(problem p3, playing it out: …)` (or the result you hadn't answered
+  yet when they started), with one short reply.
 Then let them press Next problem or Back to playing; after the planned set, suggest a game. The
 problem card already tells them when it comes back (a failed problem in about 10 minutes, a first-try
 solve after a day or more), so a missed problem is worth one more try later in the session.

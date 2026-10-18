@@ -472,8 +472,12 @@ variation's numbers, hidden under a drawn stone or mark); `tutor state` lists th
   - Nothing is judged or recorded: the moves carry no eval, and the play-out emits no event, writes
     no problem, profile or rating. The view shows the play-out's board, side to move, `moves` (plain
     records) and captures, with `ProblemView.playout` (`line`, `cursor`, `thinking`, `over`).
-  - The tutor stays out: `show` and `mark` are refused, `say` only answers a learner's chat message
-    sent during the play-out (once per message), a fresh `watch` doesn't get the problem's
+  - The tutor stays out (`PracticeSession.checkTutor`, before any tutor command): `show` and `mark`
+    are refused, and `say` only while the tutor owes an answer, once: the reveal it hadn't answered
+    when the learner pressed Play it out, or the learner's latest chat about the problem (sent with
+    the tutor attached or not); any say, show or mark on the problem settles it. Abandoned KataGo
+    requests are cancelled (`AbortSignal`), and playing the next move of the line just steps
+    forward. A fresh `watch` doesn't get the problem's
     `problem_start` replayed, and `watch` attaches no state to a `problem_start` whose problem is
     being played out. `retry` and `take_back` point to Back; resign and hints are refused as in problems.
 
