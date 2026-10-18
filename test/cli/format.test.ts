@@ -72,6 +72,34 @@ describe("formatEvent", () => {
     expect(formatEvent(e, { ...ctx, now: 1_012_000 })).toMatch(/; fallback in 18s$/);
   });
 
+  it("names the reference move of a moment judged at level, and the judge mode changes", () => {
+    const record: MoveRecord = {
+      ...humanMove,
+      judge: "at_level",
+      eval: { ...evalOf(6.2), atLevel: { rank: "17k", move: "D4", pv: ["D4", "E4"], loss: 4.4 } },
+    };
+    const e: TutorEvent = {
+      ...base,
+      type: "teaching_moment",
+      size: 9,
+      gameId: "g12",
+      moment: { id: "m3", moveNumber: 14, pointLoss: 4.4, state: "tutor" },
+      record,
+      boardBefore: "",
+      boardAfter: "",
+    };
+    expect(formatEvent(e, ctx)).toMatch(
+      /^MOMENT m3 game=g12 move 14 B C3 lost 4\.4 pts \(judged at level: vs the 17k move D4, pv D4 E4; vs KataGo's best D5 it lost 6\.2\) — /,
+    );
+    // state's last-move line: a gain shows as +, the reference move itself as 0.
+    const lastMove = (loss: number) => formatState(view({ moves: [{ ...record, number: 1, eval: { ...record.eval!, atLevel: { ...record.eval!.atLevel!, loss } } }] }), 0);
+    expect(lastMove(-1.5)).toContain("best D5 (pv D5 E4 C6), at level +1.5 vs 17k D4");
+    expect(lastMove(0)).toContain(", at level 0 vs 17k D4");
+    expect(formatEvent({ ...base, type: "judge_mode", mode: "at_level", gameId: "g12", atLevelRank: "17k" }, ctx)).toMatch(
+      /^JUDGE judge=at_level ref=17k — moves are scored, and moments opened, against the move a player one rank up/,
+    );
+  });
+
   it("marks replayed moments that are no longer waiting, without a countdown", () => {
     const e = (state: "tutor" | "fallback" | "resolved"): TutorEvent => ({
       ...base,
@@ -310,6 +338,7 @@ const view = (over: Partial<GameView> = {}): GameView => ({
   ],
   tutorAttached: true,
   tutorLevel: "coach",
+  judgeMode: "optimal",
   engineBusy: false,
   profileVersion: 0,
   allowed: ["new_game", "chat", "next_problem", "resign", "continue", "retry"],
@@ -439,6 +468,7 @@ describe("summary and review", () => {
     gamesPlayed: 11,
     problemsSolved: 2,
     tutorLevel: "coach",
+    judgeMode: "optimal",
     ...over,
   });
 
@@ -448,6 +478,7 @@ describe("summary and review", () => {
       "rank estimate 18k (rating 11.6, trend +1.6 over the last 2 rated games), games 11, problems solved 2",
       "bot plays 18k",
       "tutor level coach: full coaching: say, show, mark, and rethink to let them find the move",
+      "judge optimal: moves are scored, and moments opened, against KataGo's best move",
       "mistake threshold 4 pts on 9×9 (6 on 13×13, 8 on 19×19) (last changed 4.5 -> 4 after g11: average loss 1.2 pts per move over the last 3 games)",
       "recent rated games: g10 won vs 20k (+0.4), g11 won vs 19k (+1.2)",
       "mistakes by category (total, in the last 3 games): shape 5 (2, rising), life_and_death 3 (0, falling), opening 1 (0, steady)",

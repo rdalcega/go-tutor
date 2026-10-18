@@ -1,7 +1,19 @@
 import "./style.css";
-import { TUTOR_LEVELS, type ChatMessage, type ClientAction, type Color, type GameView, type GameSettings, type ProfileResponse, type TutorLevel } from "../../src/shared/types.ts";
+import {
+  JUDGE_MODES,
+  TUTOR_LEVELS,
+  type ChatMessage,
+  type ClientAction,
+  type Color,
+  type GameView,
+  type GameSettings,
+  type JudgeMode,
+  type ProfileResponse,
+  type TutorLevel,
+} from "../../src/shared/types.ts";
+import { atLevelOf, judgedLoss } from "../../src/shared/judge.ts";
 import { ratingToRank } from "../../src/shared/rank.ts";
-import { TUTOR_LEVEL_TEXT, categoryLabel, colorName, formatScore, rankEstimateText } from "../../src/shared/text.ts";
+import { JUDGE_MODE_TEXT, TUTOR_LEVEL_TEXT, categoryLabel, colorName, formatScore, rankEstimateText } from "../../src/shared/text.ts";
 import { type ConnectionState, type Transport, httpTransport } from "./api.ts";
 import { BoardView } from "./board.ts";
 import { readCollapsed, writeCollapsed } from "./collapse.ts";
@@ -47,6 +59,8 @@ const el = {
   levelOptions: $("level-options"),
   levelDesc: $("level-desc"),
   levelSummary: $("level-summary"),
+  judgeOptions: $("judge-options"),
+  judgeDesc: $("judge-desc"),
   conn: $("conn"),
   turn: $("turn"),
   captures: $("captures"),
@@ -232,33 +246,56 @@ function renderBoard(v: GameView | null): void {
   el.hideOverlay.disabled = !can(v, "clear_overlay");
 }
 
-/** One radio per tutor level, built once from the shared wording. */
-const levelInputs = TUTOR_LEVELS.map((level) => {
-  const label = document.createElement("label");
-  label.title = TUTOR_LEVEL_TEXT[level].learner;
-  const input = document.createElement("input");
-  input.type = "radio";
-  input.name = "tutor-level";
-  input.value = level;
-  const text = document.createElement("span");
-  text.textContent = TUTOR_LEVEL_TEXT[level].label;
-  label.append(input, text);
-  el.levelOptions.append(label);
-  input.addEventListener("change", () => {
-    if (input.checked) void act({ type: "set_tutor_level", level });
+/**
+ * A segmented control: one radio per option in `container`, labeled from the shared wording, that
+ * sends `pick(option)` when chosen. Built once.
+ */
+function radioGroup<T extends string>(
+  options: readonly T[],
+  name: string,
+  text: Record<T, { label: string; learner: string }>,
+  container: HTMLElement,
+  pick: (option: T) => ClientAction,
+): HTMLInputElement[] {
+  return options.map((option) => {
+    const label = document.createElement("label");
+    label.title = text[option].learner;
+    const input = document.createElement("input");
+    input.type = "radio";
+    input.name = name;
+    input.value = option;
+    const span = document.createElement("span");
+    span.textContent = text[option].label;
+    label.append(input, span);
+    container.append(label);
+    input.addEventListener("change", () => {
+      if (input.checked) void act(pick(option));
+    });
+    return input;
   });
-  return input;
-});
+}
+
+const levelInputs = radioGroup(TUTOR_LEVELS, "tutor-level", TUTOR_LEVEL_TEXT, el.levelOptions, (level) => ({ type: "set_tutor_level", level }));
+const judgeInputs = radioGroup(JUDGE_MODES, "judge-mode", JUDGE_MODE_TEXT, el.judgeOptions, (mode) => ({ type: "set_judge_mode", mode }));
+
+/** Check the radio for `value` and enable the group when the server takes `action`. */
+function renderRadios(inputs: HTMLInputElement[], value: string, v: GameView | null, action: ClientAction["type"]): void {
+  for (const input of inputs) {
+    // While a change is on its way, keep the learner's pick rather than flicker back to the old one.
+    if (!pending) input.checked = input.value === value;
+    input.disabled = !can(v, action);
+  }
+}
 
 function renderLevels(v: GameView | null): void {
   const level: TutorLevel = v?.tutorLevel ?? "coach";
-  for (const input of levelInputs) {
-    // While a change is on its way, keep the learner's pick rather than flicker back to the old level.
-    if (!pending) input.checked = input.value === level;
-    input.disabled = !can(v, "set_tutor_level");
-  }
+  const judge: JudgeMode = v?.judgeMode ?? "optimal";
+  renderRadios(levelInputs, level, v, "set_tutor_level");
+  renderRadios(judgeInputs, judge, v, "set_judge_mode");
   el.levelDesc.textContent = TUTOR_LEVEL_TEXT[level].learner;
-  el.levelSummary.textContent = `Tutor: ${TUTOR_LEVEL_TEXT[level].label}`;
+  const rank = judge === "at_level" && v?.atLevelRank ? ` This game: ${v.atLevelRank}.` : "";
+  el.judgeDesc.textContent = `${JUDGE_MODE_TEXT[judge].learner}${rank}`;
+  el.levelSummary.textContent = `Tutor: ${TUTOR_LEVEL_TEXT[level].label} · Judge: ${JUDGE_MODE_TEXT[judge].label}`;
 }
 
 function renderStatus(v: GameView | null): void {
@@ -319,10 +356,12 @@ function renderMoment(v: GameView | null): void {
   const record = v.moves[m.moveNumber - 1];
   const size = v.board.length;
   const played = record ? moveGtp(record.move, size) : `move ${m.moveNumber}`;
+  const atLevel = record && atLevelOf(record);
   const best = record?.eval?.bestMove;
   el.moment.classList.toggle("fallback", m.state === "fallback");
   el.moment.classList.toggle("awaiting", !!m.awaitingLearner);
-  el.momentTitle.textContent = `Move ${m.moveNumber}: ${played} lost ${m.pointLoss.toFixed(1)} points`;
+  const against = atLevel ? ` vs a ${atLevel.rank}'s ${atLevel.move}` : "";
+  el.momentTitle.textContent = `Move ${m.moveNumber}: ${played} lost ${m.pointLoss.toFixed(1)} points${against}`;
 
   if (m.state === "waiting") {
     el.momentText.textContent = v.tutorAttached
@@ -342,9 +381,11 @@ function renderMoment(v: GameView | null): void {
         ? m.moveNumber > v.moves.length
           ? "Your tutor took this move back. Find a better one."
           : "Your tutor is discussing this move in the chat."
-        : best
-          ? `KataGo preferred ${best}. The highlighted line shows how it continues.`
-          : "KataGo's suggestion is shown on the board.";
+        : atLevel
+          ? `A ${atLevel.rank} player would most likely play ${atLevel.move}. The highlighted line shows how it continues.`
+          : best
+            ? `KataGo preferred ${best}. The highlighted line shows how it continues.`
+            : "KataGo's suggestion is shown on the board.";
   }
 
   el.continueBtn.disabled = !can(v, "continue");
@@ -396,12 +437,25 @@ function renderEval(v: GameView | null): void {
   } else {
     const e = last.eval;
     const played = moveGtp(last.move, size);
-    el.evalLoss.textContent = `${formatLoss(e.pointLoss)} pts`;
-    el.evalLoss.className = `loss card-summary ${level(e.pointLoss)}`;
-    const best = e.pointLoss >= 0.05 && e.bestMove !== played ? ` · best ${e.bestMove}` : "";
+    // Judged at level, the score is against the reference move, and beating it shows as a gain.
+    const atLevel = atLevelOf(last);
+    const loss = judgedLoss(last)!;
+    const gain = atLevel && atLevel.loss <= -0.05 ? -atLevel.loss : 0;
+    el.evalLoss.textContent = gain ? `+${gain.toFixed(1)} pts` : `${formatLoss(loss)} pts`;
+    el.evalLoss.className = `loss card-summary ${gain ? "good" : level(loss)}`;
+    const best = atLevel
+      ? atLevel.move === played
+        ? ` · a ${atLevel.rank}'s move`
+        : ` · vs ${atLevel.rank} ${atLevel.move}`
+      : e.pointLoss >= 0.05 && e.bestMove !== played
+        ? ` · best ${e.bestMove}`
+        : "";
     el.evalDetail.textContent = `Move ${last.number} · ${played}${best} · win ${Math.round(e.winrateAfter * 100)}%`;
   }
-  const losses = humanMoves(v.moves, human).flatMap((m) => (m.eval ? [m.eval.pointLoss] : []));
+  const losses = humanMoves(v.moves, human).flatMap((m) => {
+    const loss = judgedLoss(m);
+    return loss === undefined ? [] : [loss];
+  });
   const base = svg("line", { class: "base", x1: "0", x2: "300", y1: "3", y2: "3" });
   sparkline(el.spark, sparklinePoints(losses, 300, 44), losses.map((l) => ({ class: level(l), title: `${formatLoss(l)} pts` })), [base]);
 }

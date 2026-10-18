@@ -1,7 +1,7 @@
 // Small wording helpers shared by the server, the tutor CLI and the browser.
 
 import { ratingToRank } from "./rank.ts";
-import type { AssistCounts, Color, GameResult, MistakeCategory, RankEstimate, TutorLevel } from "./types.ts";
+import type { AssistCounts, Color, GameResult, JudgeMode, MistakeCategory, RankEstimate, TutorLevel } from "./types.ts";
 
 /** "Black" or "White". */
 export function colorName(c: Color): string {
@@ -51,6 +51,28 @@ export const TUTOR_LEVEL_TEXT: Record<TutorLevel, { label: string; learner: stri
 export function tutorLevelChangedText(level: TutorLevel): string {
   const text = TUTOR_LEVEL_TEXT[level];
   return `Tutor help: ${text.label}. ${text.learner}`;
+}
+
+/** The judge modes in words: the UI's label and description, and what the tutor CLI tells the tutor. */
+export const JUDGE_MODE_TEXT: Record<JudgeMode, { label: string; learner: string; tutor: string }> = {
+  optimal: {
+    label: "Optimal",
+    learner: "Each move is scored against KataGo's best move.",
+    tutor: "moves are scored, and moments opened, against KataGo's best move",
+  },
+  at_level: {
+    label: "At level",
+    learner:
+      "Each move is scored against the move a player one rank above you would most likely play, so the game pauses only for mistakes a slightly stronger player wouldn't make. The review and practice problems still use KataGo's best move.",
+    tutor:
+      "moves are scored, and moments opened, against the move a player one rank up would most likely play (the MOMENT line names it); the review, mistakes and problems still use KataGo's best",
+  },
+};
+
+/** The chat line announcing the learner's new judge mode: "Judging moves: At level (17k). Each move …". */
+export function judgeModeChangedText(mode: JudgeMode, rank?: string): string {
+  const text = JUDGE_MODE_TEXT[mode];
+  return `Judging moves: ${text.label}${mode === "at_level" && rank ? ` (${rank})` : ""}. ${text.learner}`;
 }
 
 /**

@@ -279,6 +279,7 @@ select, input[type="text"] {
 .segmented input:disabled + span { opacity: 0.6; }
 .segmented input:disabled { cursor: default; }
 .level-desc { font-size: 0.8rem; color: var(--muted); }
+#judge-options { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 
 /* --- teaching moment ------------------------------------------------- */
 

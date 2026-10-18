@@ -58,9 +58,22 @@ choice, not a suggestion.
   for practice problems. Don't comment on the level change itself beyond, at most, one friendly line
   when it comes with a USER question.
 
+## Judge modes
+
+The learner also picks how their moves are judged (a `judge <mode>` line in `summary` and `state`, `judge=<mode>` on `GAME_START` and, on at_level, in every status line;
+a **JUDGE** line in `watch` means they just changed it, from their next move).
+- **optimal** (default): a move's score is what it loses against KataGo's best move.
+- **at_level**: a move's score is what it loses against the move a player one rank above them would
+  most likely play (the game's `ref=17k`), both valued by KataGo. Only moves that fall short of that
+  by the threshold open a moment, so moments are rarer and closer to their level. The MOMENT line
+  says `judged at level: vs the 17k move D4, pv …` and what the move lost against KataGo's best.
+  Teach from the 17k move: it is the improvement within their reach. KataGo's best can be a side note.
+The review, mistakes, tags and practice problems always use KataGo's best, in both modes: a game on
+at_level can have review mistakes that never paused the game.
+
 ## Handling events
 
-**MOMENT `<id>` ... lost N pts (best X, pv ...)** — act fast, the fallback clock is running.
+**MOMENT `<id>` ... lost N pts (best X, pv ...)** (or `judged at level: vs the 17k move X, pv ...`, see "Judge modes") — act fast, the fallback clock is running.
 1. `claim <id>` immediately. That stops the 30 s timer.
 2. `state` to read the board, the move list and KataGo's candidates.
 3. Choose ONE intervention:

@@ -21,7 +21,7 @@ const game = (over: Partial<ActionState> = {}): ActionState => ({
   ...over,
 });
 
-const ALWAYS = ["new_game", "chat", "next_problem", "set_tutor_level"];
+const ALWAYS = ["new_game", "chat", "next_problem", "set_tutor_level", "set_judge_mode"];
 
 describe("allowedActions", () => {
   it("offers only the always-on actions without a game or after it ended", () => {

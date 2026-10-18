@@ -22,7 +22,8 @@ import type { ConnectionState, Transport } from "./api.ts";
 import { allowedActions } from "../../src/shared/allowed.ts";
 import { fromGtp, moveGtp, toGtp, tryFromGtp } from "../../src/shared/coords.ts";
 import { BOX_INTERVALS, nextBox, resultOf } from "../../src/shared/schedule.ts";
-import { colorName, round1, tutorLevelChangedText } from "../../src/shared/text.ts";
+import { colorName, judgeModeChangedText, round1, tutorLevelChangedText } from "../../src/shared/text.ts";
+import { atLevelOf, judgedLoss } from "../../src/shared/judge.ts";
 import { thresholdFor } from "../../src/shared/threshold.ts";
 
 /** A batch of generated problems halfway done, for the progress card. */
@@ -192,6 +193,7 @@ class MockServer implements Transport {
       gamesPlayed: games.length,
       problemsSolved: 0,
       tutorLevel: this.view.tutorLevel,
+      judgeMode: this.view.judgeMode,
     };
     return {
       profile,
@@ -310,6 +312,8 @@ class MockServer implements Transport {
       chat: [],
       tutorAttached: this.view?.tutorAttached ?? true,
       tutorLevel: this.view?.tutorLevel ?? "coach",
+      judgeMode: this.view?.judgeMode ?? "optimal",
+      atLevelRank: "18k",
       engineBusy: false,
       problem: null,
       profileVersion: this.view?.profileVersion ?? 0,
@@ -325,21 +329,24 @@ class MockServer implements Transport {
       m.state = "fallback";
       delete m.deadline;
       const rec = this.game?.moves[m.moveNumber - 1];
-      const best = rec?.eval?.bestMove ?? "pass";
+      // Judged at level, the answer is the reference move, as on the server.
+      const atLevel = rec && atLevelOf(rec);
+      const best = atLevel?.move ?? rec?.eval?.bestMove ?? "pass";
       const size = this.game?.size ?? 9;
       const bestPoint = tryFromGtp(best, size);
       this.view.overlay = {
         ...(bestPoint && { best: bestPoint }),
         variation: {
-          label: "KataGo's line",
+          label: atLevel ? `A ${atLevel.rank}'s line` : "KataGo's line",
           fromMove: m.moveNumber,
-          moves: (rec?.eval?.bestPv ?? []).flatMap((g, i) => {
+          moves: (atLevel?.pv ?? rec?.eval?.bestPv ?? []).flatMap((g, i) => {
             const point = tryFromGtp(g, size);
             return point ? [{ color: i % 2 === 0 ? rec!.move.color : opponent(rec!.move.color), point }] : [];
           }),
         },
       };
-      this.msg("system", `That move cost about ${m.pointLoss.toFixed(1)} points. KataGo preferred ${best}.`, m.id);
+      const verdict = atLevel ? `compared with ${best}, the move a ${atLevel.rank} player would most likely play` : `KataGo preferred ${best}`;
+      this.msg("system", `That move cost about ${m.pointLoss.toFixed(1)} points${atLevel ? " " : ". "}${verdict}.`, m.id);
       this.emit();
     }
   }
@@ -366,6 +373,12 @@ class MockServer implements Transport {
         if (this.gameView) this.gameView.view.tutorLevel = a.level;
         v.profileVersion++;
         this.msg("system", tutorLevelChangedText(a.level));
+        return null;
+      case "set_judge_mode":
+        v.judgeMode = a.mode;
+        if (this.gameView) this.gameView.view.judgeMode = a.mode;
+        v.profileVersion++;
+        this.msg("system", judgeModeChangedText(a.mode, v.atLevelRank ?? "18k"));
         return null;
       case "new_game": {
         this.gameView = null;
@@ -511,13 +524,20 @@ class MockServer implements Transport {
     const loss = round1(-Math.log(1 - Math.random() * 0.97) * 1.8);
     const best = this.randomEmpty() ?? { x: 0, y: 0 };
     rec.eval = fakeEval(size, loss, toGtp(best, size), 1);
+    rec.judge = v.judgeMode;
+    if (v.judgeMode === "at_level") {
+      // A reference move a little worse than KataGo's best, so some moves beat it.
+      const reference = toGtp(this.randomEmpty() ?? best, size);
+      rec.eval.atLevel = { rank: v.atLevelRank ?? "18k", move: reference, pv: [reference], loss: round1(loss - Math.random() * 3) };
+    }
+    const judged = judgedLoss(rec)!;
     v.engineBusy = false;
     // On Silent a mistake is recorded but the game doesn't pause.
-    if (loss >= 4 && v.tutorLevel !== "silent") {
+    if (judged >= 4 && v.tutorLevel !== "silent") {
       const id = `mom-${rec.number}`;
       v.status = "paused";
-      v.moment = { id, moveNumber: rec.number, pointLoss: loss, state: "waiting", deadline: Date.now() + 15_000 };
-      this.msg("system", `Paused at move ${rec.number}: that move lost ${loss.toFixed(1)} points.`, id);
+      v.moment = { id, moveNumber: rec.number, pointLoss: judged, state: "waiting", deadline: Date.now() + 15_000 };
+      this.msg("system", `Paused at move ${rec.number}: that move lost ${judged.toFixed(1)} points.`, id);
       this.emit();
       return;
     }

@@ -8,7 +8,7 @@ import { round1 } from "../shared/text.ts";
 import { sizeText } from "../shared/threshold.ts";
 import type { ClientAction, Color, GameSettings, GameView, Gtp, Overlay, Point, ProblemAttempt, TutorCommand } from "../shared/types.ts";
 import { ILLEGAL_TEXT, PV_STONES, UserError, alternatingStones, lineStones, plural, type TutorEventInput } from "./common.ts";
-import { TRUSTED_CANDIDATE_VISITS, moveEvalFrom, type Analysis, type Engine } from "./katago.ts";
+import { moveEvalFrom, trustedCandidate, type Analysis, type Engine } from "./katago.ts";
 import { ANSWER_MARGIN, MAX_ATTEMPTS, gameSource, generatedInfo, problemGame, problemPosition, promptFor, type StoredProblem } from "./problems.ts";
 
 /** Moves of the follow-up drawn after a correct answer: the answer, the opponent's best reply, the next move. */
@@ -162,7 +162,7 @@ export class PracticeSession {
     return { revealed: this.revealed, checking: this.checking };
   }
 
-  view(common: Pick<GameView, "chat" | "tutorAttached" | "tutorLevel" | "engineBusy" | "profileVersion" | "allowed" | "mistakeThreshold" | "generation">, botRank: string): GameView {
+  view(common: Pick<GameView, "chat" | "tutorAttached" | "tutorLevel" | "judgeMode" | "engineBusy" | "profileVersion" | "allowed" | "mistakeThreshold" | "generation">, botRank: string): GameView {
     const { problem } = this;
     const source = gameSource(problem);
     const generated = generatedInfo(problem);
@@ -250,7 +250,7 @@ export class PracticeSession {
     // The attempt is judged either way, but it becomes an answer for good only when KataGo searched
     // it well in the problem position: otherwise its loss compares two separate searches, which
     // disagree by a point or more run to run.
-    if (correct && !known && before && before.moveInfos.some((m) => m.move === move && m.visits >= TRUSTED_CANDIDATE_VISITS)) {
+    if (correct && !known && before && trustedCandidate(before, move)) {
       problem.answers = [...problem.answers, move];
       this.deps.addAnswer(problem.id, move);
     }

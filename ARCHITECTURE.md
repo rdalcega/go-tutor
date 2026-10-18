@@ -22,10 +22,11 @@ The contract for every boundary is `src/shared/types.ts`.
 | `src/shared/types.ts` | All cross-boundary types. |
 | `src/shared/coords.ts` | `toGtp(point, size)`, `fromGtp(gtp, size)` (columns `A`–`T` skipping `I`; row 1 at the bottom), `movePoint(move)`, `moveGtp(move, size)`, `samePoint`. |
 | `src/shared/allowed.ts` | `allowedActions(state)`: the browser actions the server accepts in a given state (mode, status, result, moment, turn, engine, tutor, problem, drawing on the board), used by the controller and the UI mock; `retryBlocked` (Try again) and `takeBackBlocked` (Take back) say why a take-back can't happen. |
-| `src/shared/text.ts` | Wording shared by server, CLI and UI: `colorName`, `categoryLabel`, `round1`, `formatScore`, `TUTOR_LEVEL_TEXT` (each level's label, the learner's description and the tutor's), `tutorLevelChangedText` (the chat line for a level change), `comeBackText` (when a problem is due again), `assistText` ("3 hints, 2 take-backs"), `estimateRankText` and `rankEstimateText` ("Rank estimate 18k from 34 unassisted moves (3 hints, 2 take-backs)"). |
+| `src/shared/text.ts` | Wording shared by server, CLI and UI: `colorName`, `categoryLabel`, `round1`, `formatScore`, `TUTOR_LEVEL_TEXT` (each level's label, the learner's description and the tutor's), `tutorLevelChangedText` (the chat line for a level change), `JUDGE_MODE_TEXT` and `judgeModeChangedText` (the same for judge modes), `comeBackText` (when a problem is due again), `assistText` ("3 hints, 2 take-backs"), `estimateRankText` and `rankEstimateText` ("Rank estimate 18k from 34 unassisted moves (3 hints, 2 take-backs)"). |
 | `src/shared/schedule.ts` | Leitner scheduling for practice problems (`BOX_INTERVALS`, `MAX_BOX`, `resultOf`, `nextBox`, `schedule`), used by the server's problems and the UI mock. |
 | `src/shared/threshold.ts` | The mistake threshold by board size: `THRESHOLD_MULTIPLIERS` (9×9 ×1, 13×13 ×1.5, 19×19 ×2), `thresholdMultiplier(size)`, `thresholdFor(base, size)` (the profile's 9×9 threshold on a board), `sizeText`. Used by the controller, the profile's adaptation, the CLI and the UI so they agree. |
-| `src/shared/rank.ts` | `rankToRating("20k") → 10`, `ratingToRank(10) → "20k"` on the scale 30k=0 … 1k=29, 1d=30 … 9d=38. |
+| `src/shared/rank.ts` | `rankToRating("20k") → 10`, `ratingToRank(10) → "20k"` on the scale 30k=0 … 1k=29, 1d=30 … 9d=38; `atLevelRankFor(rating)` (one rank above the displayed rank, 20k … 9d). |
+| `src/shared/judge.ts` | `judgedLoss(record)`: the loss a move is judged by (against the reference move when played on `at_level`, else `pointLoss`), and `atLevelOf(record)`. Used by the controller, the CLI and the UI. |
 | `src/engine/` | Pure Go rules: `GoGame` class (play/pass/undo, captures, suicide illegal, positional superko; `before(n)` copies the game before move n from its history, `fromBoard` sets up a position), `gameBefore(settings, moves, n)` (replays a saved move list), `movesFromLine`/`gameFromLine` (a GTP move line, colors alternating from the first mover, e.g. a taken-back move's position), `boardFromDiagram`, area scoring with komi, dead-stone input from KataGo ownership, `toAscii(board)`, SGF read/write. No I/O. |
 | `src/server/katago.ts` | Long-lived `katago analysis` child process speaking the JSON analysis protocol; query queue with ids and priorities (`BACKGROUND_PRIORITY` −10, `GENERATION_PRIORITY` −20); `analyze(position, opts)` (an `AbortSignal` in `opts.signal` cancels a query: a waiting one leaves the queue, one KataGo is searching gets KataGo's `terminate` action; either rejects with an `AbortError`), `botMove(position, rank)`, `ownership`. |
 | `src/server/game.ts` | `GameController`: owns the current game, turns, bot replies, per-move evals, teaching-moment detection, pause + fallback timer, chat log, the profile and problem writes, producing `GameView` (with the actions it accepts) and `TutorEvent`s. Takes an engine interface so tests can use a fake. |
@@ -68,8 +69,9 @@ The contract for every boundary is `src/shared/types.ts`.
    no handicap; while the learner rates below 20k, 9×9 as Black gets the profile's handicap stones). Emits `game_start`.
 2. Human `play` → legality check in the rules engine → record → emit `move` → ask KataGo to analyze the
    position before and after (positions are cached, so "before" is usually ready).
-3. Eval arrives → attach `MoveEval` to the record. If `pointLoss >= thresholdFor(profile.mistakeThreshold, size)`
-   (default 4 on 9×9, 6 on 13×13, 8 on 19×19) it is a **teaching moment**: status `paused`, moment state `waiting`, emit `teaching_moment`.
+3. Eval arrives → attach `MoveEval` to the record. If `judgedLoss(record) >= thresholdFor(profile.mistakeThreshold, size)`
+   (default 4 on 9×9, 6 on 13×13, 8 on 19×19; `judgedLoss` is `pointLoss` unless the move was judged
+   at level, see "Judge modes") it is a **teaching moment**: status `paused`, moment state `waiting`, emit `teaching_moment`.
    - If a tutor is attached: wait up to 30 s (`TUTOR_TIMEOUT_MS`) for any tutor command about the moment
      (`claim`, `say`, `rethink`, `show`, `mark`). Any of them sets state `tutor` and cancels the timer.
    - If no tutor is attached or the timer fires: state `fallback`, overlay draws KataGo's PV as a variation
@@ -152,6 +154,28 @@ level, not the current one), and a moment keeps its move's level as `TeachingMom
   `mark` after it yet (a hint KataGo answered doesn't count; a new game, the game's end, and entering
   or leaving a problem drop an unanswered question). Hints work as usual. Practice
   problems, a moment opened before the switch, and the post-game review are not restricted.
+
+**Judge modes** (`Profile.judgeMode`, in `GameView.judgeMode`; default `optimal`): how a human move is
+scored for the learner (the last-move card, its sparkline, the moment banner, KataGo's fallback) and
+whether it opens a teaching moment. The `set_judge_mode` action changes it like the tutor level
+(profile saved, `judge_mode` emitted, a system chat line), and each human `MoveRecord` keeps the
+`judge` it was played in.
+- `optimal`: the score is `pointLoss`, against KataGo's best move.
+- `at_level`: the score is against the **reference move**, the human-SL net's most likely move at the
+  game's reference rank: one rank above the learner's displayed rank when the game started
+  (`atLevelRankFor`, 20k … 9d; `SavedGame.atLevelRank`, `GameView.atLevelRank`, on `game_start`).
+  Evaluating such a move also asks KataGo for that policy (one query, `maxVisits` 1,
+  `humanSLProfile` set, so no search and the cached analyses stay as they are). Both moves are then
+  valued by the main net: within the "before" search when both have `TRUSTED_CANDIDATE_VISITS`,
+  otherwise from the root leads after each move (one more analysis, of the position after the
+  reference move, run alongside the move's own and kept out of the analysis cache). `MoveEval.atLevel` holds the rank, the move, its line, and `loss` (negative when
+  the learner's move is better: the card shows a gain; capped at `pointLoss`). `judgedLoss` clamps it
+  at 0. A fallback for such a moment draws the reference move's line ("A 17k's line instead of …").
+  If the reference can't be had, the move is judged against KataGo's best and a chat line says so.
+Everything else uses `pointLoss` in both modes: the summary's mistakes, heuristic categories, the
+review, tags, profile tallies, threshold adaptation and practice problems (their answers too).
+Since the reference is never better than KataGo's best, a move that opens an at-level moment is
+always a mistake in the summary as well.
 
 `ask_tutor` (the Hint button next to the chat input, with any typed text as `text`, or the H key)
 emits `hint_request` (with the current ASCII board) and adds the text to the chat. With no tutor
@@ -487,6 +511,12 @@ unless `--json`).
   point_out: explain mistakes, don't take moves back … — reply with: claim <id>, then say/show/mark/resume`,
   and a change as `LEVEL <level> — <what it means for the tutor> (from the learner's next move)`.
   `state` and every command's status line (`level=<level>`) show it too.
+- `watch` prints the judge mode on `GAME_START … judge=<mode>` (with ` ref=<rank>` on `at_level`), a
+  change as `JUDGE judge=<mode> … (from the learner's next move)`, an at-level moment as `MOMENT … lost
+  N pts (judged at level: vs the 17k move D4, pv …; vs KataGo's best D5 it lost M)`. `state`'s
+  last-move line ends with `, at level -N vs 17k D4` for a move judged at level (`+N` for a gain, `0`
+  for the reference move itself). `summary` and `state` have a `judge <mode>` line, and the status
+  line has `judge=at_level ref=<rank>` in that mode.
 - `watch` prints `PROBLEM_START <id> <category> <color> to play (<source>, box N) answers … — "<prompt>"`
   and `PROBLEM <id> attempt N <move> correct, first try | wrong, lost X (…; another attempt left | out of
   attempts, answer shown) — best …, pv …` with a hint of what to do next.
@@ -530,7 +560,11 @@ storage failure just means cards start open). The teaching-moment banner and the
 collapsible, so a decision is never hidden. The chat card fills the rest of the panel's height (its
 input always visible), so folding cards gives it room. The controls card has a segmented control
 (radio buttons) for the tutor level, "Silent", "Point out", "Coach", with the selected level's
-description below it (and each one's in its tooltip). The moment banner says "Your tutor is done —
+description below it (and each one's in its tooltip), and a second one, "Judge my moves", for the
+judge mode, "Optimal" or "At level" (the description names the game's reference rank). Judged at
+level, the last-move card shows the loss against the reference move ("−2.1 pts", "Move 14 · C3 ·
+vs 17k D4"), or a gain in green ("+1.5 pts") when the move beat it, and the moment banner's title
+names the reference move ("lost 4.4 points vs a 17k's D4"). The moment banner says "Your tutor is done —
 take your time, then press Continue." while the moment is `awaitingLearner`.
 Practice (or the tutor's `problem`) switches to problem mode (with no problems yet, a toast says the
 first ones are being generated, with the count; the button's tooltip shows it too): a problem card
