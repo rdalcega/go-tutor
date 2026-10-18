@@ -6,6 +6,13 @@ Features to add or change. Newest at the bottom; move an item to "Done" with its
 
 - **Show clearly when the opponent passes.** When the bot passes, nothing signals it clearly, so
   the learner can miss it. Add something that makes an opponent's pass obvious.
+- **Play a practice problem out.** After answering a problem, let the learner keep playing from it
+  to see how it unfolds and why the correct move is good. Not the default: the problem screen gets
+  an option to play the problem out. In that mode moves are not analyzed (no judging, no moments,
+  nothing recorded), and the opponent is always KataGo at full strength, whatever the learner's
+  level. The learner can step forward and back through the moves; stepping forward when it's their
+  turn has KataGo play on their behalf. They can also play any move they like and see how KataGo
+  answers.
 
 ## Done
 
