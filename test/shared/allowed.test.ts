@@ -29,6 +29,12 @@ describe("allowedActions", () => {
     expect(allowedActions(game({ finished: true, moves: [B(0, 0)] }))).toEqual(ALWAYS);
   });
 
+  it("offers a review of a finished game's mistakes once they are practice problems", () => {
+    expect(allowedActions(game({ finished: true, reviewProblems: 2 }))).toEqual([...ALWAYS, "review_game"]);
+    expect(allowedActions(game({ finished: true, reviewProblems: 0 }))).toEqual(ALWAYS);
+    expect(allowedActions(game({ reviewProblems: 2 }))).not.toContain("review_game");
+  });
+
   it("lets the learner play on their turn with KataGo ready", () => {
     expect(allowedActions(game())).toEqual([...ALWAYS, "resign", "play", "pass", "ask_tutor"]);
     // The bot's turn: no play, and no hint either.

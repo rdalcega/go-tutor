@@ -36,6 +36,9 @@ describe("request validation", () => {
     expect(parseClientAction({ type: "set_tutor_level", level: "point_out" })).toEqual({ type: "set_tutor_level", level: "point_out" });
     expect(parseClientAction({ type: "set_judge_mode", mode: "at_level" })).toEqual({ type: "set_judge_mode", mode: "at_level" });
     expect(parseTutorCommand({ type: "start_problem", problemId: "p3" })).toEqual({ type: "start_problem", problemId: "p3" });
+    expect(parseTutorCommand({ type: "start_problem", gameId: "g4" })).toEqual({ type: "start_problem", gameId: "g4" });
+    expect(parseClientAction({ type: "review_game", gameId: "g4" })).toEqual({ type: "review_game", gameId: "g4" });
+    expect(() => parseClientAction({ type: "review_game" })).toThrow(/gameId/);
     expect(parseTutorCommand({ type: "generate", extra: 1 })).toEqual({ type: "generate" });
     expect(parseTutorCommand({ type: "tag", gameId: "g", moveNumber: 3, category: "shape" })).toEqual({
       type: "tag",

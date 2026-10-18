@@ -152,6 +152,8 @@ class MockServer implements Transport {
   private gameView: { view: GameView; game: GoGame | null } | null = null;
   private problemDef: MockProblem | null = null;
   private problemIndex = 0;
+  /** A review of the finished game's mistakes (the mock problems in turn stand in for them). */
+  private review: { gameId: string; index: number; total: number } | null = null;
 
   constructor() {
     this.view = this.sampleView();
@@ -241,6 +243,7 @@ class MockServer implements Transport {
       tutorAttached: v.tutorAttached,
       problem: v.problem ? { revealed: v.problem.revealed, checking: false } : null,
       overlay: v.overlay !== null,
+      reviewProblems: v.reviewProblems ?? 0,
     });
   }
 
@@ -358,12 +361,21 @@ class MockServer implements Transport {
     if (v.mode === "problem" && a.type === "play") return this.problemPlay(a.point);
     switch (a.type) {
       case "next_problem":
+        if (this.review && this.review.index >= this.review.total) {
+          this.leaveProblem();
+          this.msg("system", "Review done.");
+          return null;
+        }
+        if (this.review) this.review.index++;
+        this.startProblem();
+        return null;
+      case "review_game":
+        this.review = { gameId: a.gameId, index: 1, total: v.reviewProblems ?? 0 };
+        this.problemIndex = 0;
         this.startProblem();
         return null;
       case "leave_problem":
-        if (this.gameView) ({ view: this.view, game: this.game } = this.gameView);
-        this.gameView = null;
-        this.problemDef = null;
+        this.leaveProblem();
         return null;
       case "clear_overlay":
         v.overlay = null;
@@ -383,6 +395,7 @@ class MockServer implements Transport {
       case "new_game": {
         this.gameView = null;
         this.problemDef = null;
+        this.review = null;
         const settings: GameSettings = {
           size: 9, komi: 7, humanColor: "B", botRank: s?.botRank ?? "18k", handicap: 0, ...a.settings,
         };
@@ -455,6 +468,13 @@ class MockServer implements Transport {
     }
   }
 
+  private leaveProblem(): void {
+    if (this.gameView) ({ view: this.view, game: this.game } = this.gameView);
+    this.gameView = null;
+    this.problemDef = null;
+    this.review = null;
+  }
+
   /** Problem mode with the mock problems in turn; the game view waits underneath. */
   private startProblem(): void {
     const def = MOCK_PROBLEMS[this.problemIndex++ % MOCK_PROBLEMS.length]!;
@@ -481,9 +501,10 @@ class MockServer implements Transport {
         maxAttempts: 2,
         revealed: false,
         box: 1,
+        ...(this.review && { review: { ...this.review } }),
       },
     };
-    this.msg("system", `Practice problem: ${def.prompt}`);
+    this.msg("system", `${this.review ? `Review ${this.review.index}/${this.review.total}` : "Practice problem"}: ${def.prompt}`);
   }
 
   private problemPlay(point: Point): string | null {
@@ -573,6 +594,8 @@ class MockServer implements Transport {
       .map((r) => ({ moveNumber: r.number, move: moveGtp(r.move, v.board.length), pointLoss: r.eval!.pointLoss, bestMove: r.eval!.bestMove }))
       .sort((a, b) => b.pointLoss - a.pointLoss);
     v.summary = { moves: this.game?.moves.length ?? 0, threshold: v.mistakeThreshold, mistakes, totalPointLoss: mistakes.reduce((n, m) => n + m.pointLoss, 0) };
+    // Each mistake becomes a practice problem (the mock's problems stand in for them).
+    v.reviewProblems = Math.min(mistakes.length, MOCK_PROBLEMS.length);
     v.moment = null;
     v.engineBusy = false;
     v.profileVersion++;

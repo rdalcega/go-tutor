@@ -224,6 +224,10 @@ describe("formatEvent", () => {
     expect(formatEvent({ ...rest, kind: "generated", problemId: "gen4", size: 13, generated }, ctx)).toContain(
       "PROBLEM_START gen4 life_and_death B to play (generated 13x13, difficulty 14k, batch2, box 2)",
     );
+    // A problem in a review of one game's mistakes.
+    expect(formatEvent({ ...start, review: { gameId: "g12", index: 2, total: 4 } }, ctx)).toContain(
+      "PROBLEM_START p4 life_and_death B to play (from g12 move 14, box 2, review g12 2/4) answers D5,E5",
+    );
     // An old starter problem in the log.
     expect(formatEvent({ ...rest, problemId: "b-net" }, ctx)).toContain("PROBLEM_START b-net life_and_death B to play (built-in, box 2)");
 
@@ -384,6 +388,9 @@ describe("formatState", () => {
     ]);
     const shown = { ...problem, attempts: 2, revealed: true, answer: { move: "D5", pv: ["D5", "E4"] } };
     expect(problemLines(shown)[2]).toBe("answer D5 (pv D5 E4)");
+    expect(problemLines({ ...problem, review: { gameId: "g12", index: 1, total: 3 } })[0]).toBe(
+      "problem p4 life_and_death (from g12 move 14, box 1, review g12 1/3) B to play, attempt 2 of 2: Black to play. Live.",
+    );
     const v = view({ gameId: null, mode: "problem", status: "finished", moves: [], moment: null, problem: shown });
     expect(formatState(v)).toContain("problem p4 life_and_death (from g12 move 14, box 1) B to play, answer shown: Black to play. Live.");
     expect(statusLine(v)).toBe("problem=p4 mode=problem status=finished level=coach attempts=2/2 answer shown (D5)");

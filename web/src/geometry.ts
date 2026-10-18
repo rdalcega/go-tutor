@@ -193,14 +193,24 @@ export function latestEstimate(profile: Profile): { short: string; long: string 
   return { short: `${estimateRankText(estimate)} · ${estimate.moves} moves`, long: `Last game: ${rankEstimateText(estimate)}.` };
 }
 
-/** The problem card's title: category, and where the problem comes from (`size`: the problem's board). */
+/** The problem card's title: category, and where the problem comes from (`size`: the problem's board); in a review, its progress ("Review 2/4 · Shape · move 14"). */
 export function problemHeading(p: ProblemView, size = 9): string {
+  if (p.review) {
+    const move = p.source ? ` · move ${p.source.moveNumber}` : "";
+    return `Review ${p.review.index}/${p.review.total} · ${categoryLabel(p.category, { capitalize: true })}${move}`;
+  }
   const from = p.source
     ? `from your game, move ${p.source.moveNumber}`
     : p.generated
       ? `${size}×${size} · about ${p.generated.difficultyRank}`
       : "practice problem";
   return `${categoryLabel(p.category, { capitalize: true })} · ${from}`;
+}
+
+/** The problem card's Next button: on to the next problem, or within a review the next mistake, and after its last, the end. */
+export function nextProblemLabel(p: ProblemView): string {
+  if (!p.review) return "Next problem";
+  return p.review.index < p.review.total ? "Next mistake" : "Finish review";
 }
 
 /**

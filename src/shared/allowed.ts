@@ -22,6 +22,8 @@ export interface ActionState {
   problem: { revealed: boolean; checking: boolean } | null;
   /** A drawing (variation or marks) is on the board, which the learner can hide. */
   overlay: boolean;
+  /** A finished game's practice problems, which Review mistakes goes through. */
+  reviewProblems?: number;
 }
 
 /** Actions the browser can send in any mode. */
@@ -86,6 +88,8 @@ export function allowedActions(s: ActionState): ActionType[] {
     const canPlay = s.problem !== null && !s.problem.revealed && !s.problem.checking && s.engineReady;
     return [...always(s), "leave_problem", ...(canPlay ? (["play"] as const) : [])];
   }
+  // A finished game's mistakes can be reviewed once they are practice problems.
+  if (s.mode === "game" && s.finished && (s.reviewProblems ?? 0) > 0) return [...always(s), "review_game"];
   if (s.mode === "idle" || s.humanColor === null || s.finished) return always(s);
   const allowed: ActionType[] = [...always(s), "resign"];
   const humanToPlay = s.toPlay === s.humanColor;

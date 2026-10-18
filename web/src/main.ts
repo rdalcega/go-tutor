@@ -28,6 +28,7 @@ import {
   nextBotText,
   positionBefore,
   generationFact,
+  nextProblemLabel,
   problemHeading,
   problemResult,
   ratingChangeFor,
@@ -70,6 +71,7 @@ const el = {
   takeBack: $<HTMLButtonElement>("take-back"),
   hint: $<HTMLButtonElement>("hint"),
   practice: $<HTMLButtonElement>("practice"),
+  reviewGame: $<HTMLButtonElement>("review-game"),
   resign: $<HTMLButtonElement>("resign"),
   newGame: $<HTMLFormElement>("new-game"),
   ngSize: $<HTMLSelectElement>("ng-size"),
@@ -110,6 +112,7 @@ const el = {
   resultTitle: $("result-title"),
   resultText: $("result-text"),
   resultMistakes: $<HTMLUListElement>("result-mistakes"),
+  resultReview: $<HTMLButtonElement>("result-review"),
   resultNew: $<HTMLButtonElement>("result-new"),
   resultClose: $<HTMLButtonElement>("result-close"),
   toast: $("toast"),
@@ -336,6 +339,7 @@ function renderControls(v: GameView | null): void {
     ? `Practice problems: from your mistakes, and generated at your level (generating ${generating.found}/${generating.target})`
     : "Practice problems: from your mistakes, and generated at your level";
   el.chatInput.disabled = !v;
+  renderReviewButtons(v);
 
   // Keep the new-game form in sync with the current game unless the user is editing it.
   if (v?.settings && v.mode === "game" && !ngFormTouched) {
@@ -394,6 +398,16 @@ function renderMoment(v: GameView | null): void {
   el.retry.disabled = !can(v, "retry");
 }
 
+/** Review mistakes (in the controls and the result dialog): once a finished game's mistakes are practice problems, with their count. */
+function renderReviewButtons(v: GameView | null): void {
+  const n = v?.allowed.includes("review_game") ? (v.reviewProblems ?? 0) : 0;
+  const title = n ? `Review this game's mistakes: ${n === 1 ? "its practice problem" : `its ${n} practice problems, in move order`}` : "";
+  el.reviewGame.hidden = el.resultReview.hidden = n === 0;
+  el.reviewGame.textContent = el.resultReview.textContent = `Review mistakes (${n})`;
+  el.reviewGame.title = el.resultReview.title = title;
+  el.reviewGame.disabled = el.resultReview.disabled = !can(v, "review_game");
+}
+
 function renderProblem(v: GameView | null): void {
   const p = v?.mode === "problem" ? v.problem : null;
   el.problem.hidden = !p;
@@ -405,6 +419,7 @@ function renderProblem(v: GameView | null): void {
   el.problemResult.hidden = !result;
   el.problemResult.className = `problem-result ${result?.tone ?? ""}`;
   el.problemResult.textContent = result?.text ?? "";
+  el.nextProblem.textContent = nextProblemLabel(p);
   el.nextProblem.disabled = !can(v, "next_problem");
   el.leaveProblem.disabled = !can(v, "leave_problem");
 }
@@ -621,6 +636,13 @@ el.retry.addEventListener("click", () => void act({ type: "retry" }));
 el.nextProblem.addEventListener("click", () => void act({ type: "next_problem" }));
 el.practice.addEventListener("click", () => void act({ type: "next_problem" }));
 el.leaveProblem.addEventListener("click", () => void act({ type: "leave_problem" }));
+function reviewGame(): void {
+  if (!view?.gameId) return;
+  el.resultDialog.close();
+  void act({ type: "review_game", gameId: view.gameId });
+}
+el.reviewGame.addEventListener("click", reviewGame);
+el.resultReview.addEventListener("click", reviewGame);
 el.hideOverlay.addEventListener("click", () => void act({ type: "clear_overlay" }));
 
 // Collapsible cards: the header button folds the card to its header line, remembered per card.

@@ -65,6 +65,10 @@ describe("parseInvocation", () => {
     expect(cmd(["claim", "m3"])).toEqual({ type: "claim", momentId: "m3" });
     expect(cmd(["problem"])).toEqual({ type: "start_problem" });
     expect(cmd(["problem", "p4"])).toEqual({ type: "start_problem", problemId: "p4" });
+    expect(cmd(["problem", "--game", "g12"])).toEqual({ type: "start_problem", gameId: "g12" });
+    expect(cmd(["problem", "--game", "last"])).toEqual({ type: "start_problem", gameId: "last" });
+    expect(() => cmd(["problem", "p4", "--game", "g12"])).toThrow(/not both/);
+    expect(() => cmd(["problem", "--game"])).toThrow(/needs a value/);
   });
 
   it("parses new-game settings", () => {

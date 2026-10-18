@@ -168,11 +168,15 @@ help; wins and losses only nudge it.
    that looks wrong: `life_and_death`, `capturing_race`, `opening`, `direction`, `shape`, `endgame`,
    `tactics`, `other`. For a taken-back first try add `--taken-back <n>` (n from review's "first
    try #n"). Tags replace the heuristic in the profile and steer the next focus.
-5. Offer another game, or two or three problems first: the game's mistakes are now practice problems
-   (a chat line says so), and re-solving one right after discussing it locks the lesson in.
+5. Offer another game, or a review of this game's mistakes first: they are now practice problems
+   (a chat line says so), and re-solving one right after discussing it locks the lesson in. The
+   learner's Review mistakes button (or your `problem --game <gameId>`) runs them in move order, each
+   once; their Next goes on through the review, and after the last it ends and they're back on the board.
 
 **PROBLEM_START `<id>` ... answers ...** — a practice problem is on the board (you started it with
-`problem`, or the learner pressed Practice). It comes together with their first attempt (or a
+`problem`, or the learner pressed Practice or Review mistakes; `review g12 2/4` on the line means the
+2nd of 4 in a review of that game's mistakes: handle it like any problem, and don't start another one
+mid-review). It comes together with their first attempt (or a
 question about it), with the position in the state under the lines. The line shows the accepted
 answers; the learner can't see them. Never give the answer or a strong hint before the first attempt.
 
