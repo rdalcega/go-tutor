@@ -209,3 +209,5 @@ are judged exactly like the learner's own problems.
 - Workspace conventions from the parent `CLAUDE.md` apply: work in worktrees under
   `.claude/worktrees/` on their branch, run `/code-review high` before committing and fix real
   findings, commit only when asked, never push unless asked.
+- Backlog (`BACKLOG.md`): when I ask for a new item to be added, add it directly on `main` (not in
+  a worktree) and commit it right away, without waiting to be asked or running `/code-review`.
