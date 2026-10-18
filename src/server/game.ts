@@ -525,7 +525,10 @@ export class GameController {
     const m = saved.moment;
     if (last && m?.moveNumber === last.number) {
       if (m.state === "resolved") this.momentShown.add(last);
-      else this.restoreMoment(last, m, saved.overlay === undefined);
+      // KataGo's answer from a game saved before drawings were kept (no `overlay` in its file) is
+      // gone with it: the moment waits again, for nobody, so resumeTurn answers it again.
+      else if (m.state === "fallback" && saved.overlay === undefined) this.openMoment(last, { ...m, state: "waiting" });
+      else this.restoreMoment(last, m);
     } else if (m && m.state !== "resolved" && m.moveNumber > game.moves.length) {
       // The tutor's rethink took its move back and the learner hadn't played again: it stays open, with the tutor, as retry left it.
       this.moment = m;
@@ -597,6 +600,7 @@ export class GameController {
 
   /** The learner's latest question reached the tutor (or was answered, or dropped): saved with the game, so a restart keeps Silent's one-answer rule right. */
   private noteQuestion(open: boolean): void {
+    if (this.questionOpen === open) return;
     this.questionOpen = open;
     this.save();
   }
@@ -972,13 +976,11 @@ export class GameController {
    * connection, and KataGo's fallback stays answered; both wait for the learner's Continue. A moment
    * that was waiting for the tutor waits again (a fresh TUTOR_TIMEOUT_MS: `watch` reconnects with
    * its cursor, and the claim it was about to make still works); one nobody was handling falls back
-   * at once (resumeTurn settles it), as does KataGo's answer from a game saved before drawings were
-   * (`drawingUnknown`): given again, so the learner has something to look at.
+   * at once (resumeTurn settles it).
    */
-  private restoreMoment(record: MoveRecord, saved: TeachingMoment, drawingUnknown: boolean): void {
+  private restoreMoment(record: MoveRecord, saved: TeachingMoment): void {
     const { deadline, ...rest } = saved;
-    const again = saved.state === "fallback" && drawingUnknown;
-    this.openMoment(record, again ? { ...rest, state: "waiting" } : rest);
+    this.openMoment(record, rest);
     if (saved.state === "waiting" && deadline !== undefined) this.waitForTutor();
   }
 
