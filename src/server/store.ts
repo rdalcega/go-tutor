@@ -443,9 +443,9 @@ export class Store {
     return null;
   }
 
-  /** The newest logged event of `type` that `matches` accepts, or null. Lines of other types are skipped unparsed, so a miss is cheap even on a full log. */
+  /** The newest logged event of `type` that `matches` accepts, or null. Lines that don't even name the type are skipped unparsed, so a miss is cheap even on a full log. */
   findEvent(type: TutorEvent["type"], matches: (e: TutorEvent) => boolean): TutorEvent | null {
-    const marker = `"type":"${type}"`;
+    const marker = `"${type}"`;
     return this.newestEvent((e) => e.type === type && matches(e), (line) => line.includes(marker));
   }
 

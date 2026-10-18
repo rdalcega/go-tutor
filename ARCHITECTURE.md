@@ -127,7 +127,8 @@ was waiting for the tutor (it had a deadline) waits `TUTOR_TIMEOUT_MS` again bef
 one nobody was handling falls back at once, as does KataGo's answer from a game saved before
 drawings were (it is given again); one whose move the tutor took back (`rethink`) stays open, with
 the tutor, for the learner's new move. A mistake whose eval arrived but never opened a moment opens
-one now.
+one now. A game resigned while its last move was being evaluated, and stopped before the verdict
+landed (a result on file but no summary), finishes now, without it.
 `SavedGame.assistance` / `GameSummary.assistance` count hint requests, the learner's take-backs and
 the tutor's rethinks. Assisted moves don't count for the rank estimate.
 

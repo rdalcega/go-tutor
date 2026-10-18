@@ -485,10 +485,14 @@ export class GameController {
     this.maybeBotMove();
   }
 
-  /** Picks up the newest unfinished saved game, e.g. after a server restart. */
+  /**
+   * Picks up the newest unfinished saved game, e.g. after a server restart. A game resigned while
+   * its last move was being evaluated, and stopped before the verdict landed (a result but no
+   * summary), finishes now, without it.
+   */
   restoreLastGame(): boolean {
     const saved = this.store.lastGame();
-    if (!saved || saved.result) return false;
+    if (!saved || (saved.result && (saved.summary || saved.result.reason === "abandon"))) return false;
     let game: GoGame;
     try {
       game = GoGame.fromMoves(saved.settings.size, saved.settings.komi, saved.settings.handicap, saved.moves.map((r) => r.move));
@@ -519,6 +523,11 @@ export class GameController {
     this.chat = saved.chat ?? [];
     this.nextChatId = Math.max(this.nextChatId, nextNumber(this.chat.map((m) => m.id), "c"));
     this.system(`Picked up where you left off: game ${saved.id}, move ${game.moves.length}.`);
+    if (saved.result) {
+      this.finish(saved.result);
+      this.changed();
+      return true;
+    }
     // A mistake the learner dismissed stays dismissed; an open moment comes back as it was (its
     // move on the board, or taken back by the tutor's rethink); a mistake whose eval arrived but
     // never opened a moment opens one now (unless it was played on Silent: resumeTurn reads the
@@ -1402,10 +1411,11 @@ export class GameController {
     const result: GameResult = { winner: opponent(settings.humanColor), margin: 0, reason: "resign" };
     if (!this.evaluating) return this.finish(result);
     // The move still being evaluated keeps its verdict (it may be the blunder they resign over): the
-    // result is in at once (no moment opens, the bot doesn't reply, nothing else is accepted) and the
-    // game finishes when the verdict lands, unless a new game replaced it first (newGame then ends
-    // it without the verdict).
+    // result is in at once (no moment opens, the bot doesn't reply, nothing else is accepted, and it
+    // is on file, so a restart finishes the game) and the game finishes when the verdict lands,
+    // unless a new game replaced it first (newGame then ends it without the verdict).
     this.result = result;
+    this.save();
     this.changed();
     void this.evaluation.then(() => {
       if (this.game === game && this.result === result && this.status !== "finished") this.finish(result);

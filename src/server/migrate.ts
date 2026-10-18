@@ -29,7 +29,7 @@ import {
 } from "../shared/types.ts";
 import { estimateRank, positionFor, rankSamples, type PolicyEngine } from "./estimate.ts";
 import { BACKGROUND_PRIORITY } from "./katago.ts";
-import { addProblems, generateProblems, nextProblemId, type StoredProblem } from "./problems.ts";
+import { addProblems, gameSource, generateProblems, nextProblemId, promptFor, type StoredProblem } from "./problems.ts";
 import {
   MIN_BOT_RATING,
   RECENT_MISTAKES_CAP,
@@ -443,11 +443,17 @@ export async function migrateRatingModel(deps: MigrationDeps): Promise<Migration
   profile.recentMistakes = profile.recentMistakes.sort((a, b) => b.ts - a.ts).slice(0, RECENT_MISTAKES_CAP);
   store.saveProfile(profile);
 
-  // The problems as they are now (practice may have changed them), with fresh ids.
+  // The problems as they are now (practice may have changed them), with fresh ids and the category
+  // of the summary written above (a tag the tutor made while KataGo worked reaches them too).
   const problems = store.loadProblems();
   const problemsAdded: string[] = [];
   for (const p of candidates) {
-    const [added] = addProblems(problems, [{ ...p, id: nextProblemId(problems) }]);
+    const source = gameSource(p);
+    const category = written
+      .find((w) => w.saved.id === source?.gameId)
+      ?.summary.mistakes.find((m) => m.moveNumber === source?.moveNumber && m.takenBack === source?.takenBack)?.category;
+    const fresh = { ...p, id: nextProblemId(problems), ...(category && { category, prompt: promptFor(category, p.toPlay) }) };
+    const [added] = addProblems(problems, [fresh]);
     if (added) problemsAdded.push(added.id);
   }
   if (problemsAdded.length) store.saveProblems(problems);

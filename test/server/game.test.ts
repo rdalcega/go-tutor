@@ -783,6 +783,26 @@ describe("GameController", () => {
     expect(store.lastGame({ finished: true })!.moves[0]!.eval?.pointLoss).toBe(6);
   });
 
+  it("a restart right after such a resignation finishes the resigned game without the verdict", async () => {
+    await startGame();
+    engine.hold = true;
+    engine.lossAfter(["C3"], 6);
+    ctl.play(C3);
+    await ctl.handleAction({ type: "resign" });
+    ctl.flush(); // as on shutdown: the result is on file, the summary isn't
+    const id = ctl.view().gameId!;
+    expect(store.loadGame(id)).toMatchObject({ result: { reason: "resign" }, summary: null });
+    const again = new GameController({ engine: new FakeEngine(), store, clock, botDelayMs: 0 });
+    const ended: TutorEventInput[] = [];
+    again.onEvent((e) => ended.push(e));
+    expect(again.restoreLastGame()).toBe(true);
+    expect(again.view()).toMatchObject({ gameId: id, status: "finished", result: { reason: "resign" } });
+    expect(again.view().summary?.mistakes).toEqual([]);
+    expect(ended.map((e) => e.type)).toEqual(["game_end"]);
+    expect(store.loadGame(id)!.summary).toBeTruthy();
+    expect(store.loadProfile().gamesPlayed).toBe(1);
+  });
+
   it("a new game right after such a resignation ends the resigned game without the verdict", async () => {
     await startGame();
     engine.hold = true;

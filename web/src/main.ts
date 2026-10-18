@@ -317,6 +317,7 @@ function turnText(v: GameView): string {
   }
   if (v.mode === "idle" || !s) return "Start a new game to begin.";
   if (v.status === "finished") return "Game over.";
+  if (v.result) return "You resigned. KataGo is finishing its verdict on your last move…";
   if (v.status === "paused") return "Paused for a teaching moment.";
   if (v.toPlay === s.humanColor) return v.engineBusy ? "Analyzing your position…" : `Your move (${colorName(s.humanColor)}).`;
   return "Bot is thinking…";

@@ -159,11 +159,14 @@ describe("rating model migration", () => {
       store.saveGame(game, store.loadSgf(gameId)!);
       return undefined;
     };
-    await migrateRatingModel({ store, engine, now: () => 1_800_000_000_000, log: () => {}, threshold: 4 });
+    const report = await migrateRatingModel({ store, engine, now: () => 1_800_000_000_000, log: () => {}, threshold: 4 });
     expect(tagged).toBe(true);
     const saved = store.loadGame(gameId)!;
     expect(saved.takenBack![0]!.tag).toEqual({ category: "shape", note: "empty triangle" });
     expect(saved.summary!.mistakes).toMatchObject([{ moveNumber: 3, takenBack: 0, category: "shape", categorySource: "tutor" }]);
+    // The practice problem made from it carries the tag's category too, not the heuristic's.
+    expect(report.problemsAdded).toHaveLength(1);
+    expect(store.loadProblems().find((p) => p.id === report.problemsAdded[0])).toMatchObject({ category: "shape", prompt: expect.stringMatching(/good shape/) });
   });
 
   it("re-estimates the rating from the moves, adds the first attempts' mistakes and problems, backs up, and is idempotent", async () => {
