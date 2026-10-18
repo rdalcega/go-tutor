@@ -32,6 +32,7 @@ import {
   positionBefore,
   generationFact,
   nextProblemLabel,
+  playoutPass,
   playoutText,
   problemHeading,
   problemResult,
@@ -272,7 +273,10 @@ let passBannerTimer: ReturnType<typeof setTimeout> | undefined;
  * pass. It is visual only: the status line says the same and is the live region screen readers hear.
  */
 function renderPassBanner(v: GameView | null): void {
-  const text = v?.mode === "game" && v.settings ? botPassBanner(lastPass(v.moves, v.settings.humanColor)) : null;
+  const po = v?.mode === "problem" ? v.problem?.playout : undefined;
+  const text = po && v?.problem
+    ? botPassBanner(playoutPass(po, v.problem.toPlay))
+    : v?.mode === "game" && v.settings ? botPassBanner(lastPass(v.moves, v.settings.humanColor)) : null;
   if (!text || !v) {
     clearTimeout(passBannerTimer);
     el.passBanner.hidden = true;
@@ -280,7 +284,7 @@ function renderPassBanner(v: GameView | null): void {
     passBannerShownFor = null;
     return;
   }
-  const key = `${v.gameId}|${v.moves.length}`;
+  const key = po ? `${v.problem?.id}|playout|${po.cursor}` : `${v.gameId}|${v.moves.length}`;
   if (key === passBannerShownFor) return;
   passBannerShownFor = key;
   el.passBanner.textContent = text;
@@ -360,7 +364,9 @@ function turnText(v: GameView): string {
     if (po) {
       if (po.thinking) return "KataGo is thinking…";
       if (po.over) return "Both sides passed.";
-      return v.toPlay === p.toPlay ? `Playing it out: your move (${colorName(p.toPlay)}).` : "Playing it out: press Forward for KataGo's move.";
+      const pass = playoutPass(po, p.toPlay);
+      const passed = pass ? `${colorName(pass.color)} passed. ` : "";
+      return v.toPlay === p.toPlay ? `${passed}Playing it out: your move (${colorName(p.toPlay)}).` : `${passed}Playing it out: press Forward for KataGo's move.`;
     }
     if (p.revealed) return p.solved ? "Problem solved." : "Here's the answer.";
     return v.engineBusy ? "Checking your move…" : `Problem: ${colorName(p.toPlay)} to play.`;
