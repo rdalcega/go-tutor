@@ -108,8 +108,17 @@
           </div>
           <p id="problem-text"></p>
           <p class="problem-result" id="problem-result" hidden></p>
+          <div class="playout" id="playout" hidden>
+            <span id="playout-text"></span>
+            <div class="row">
+              <button id="playout-back" title="Previous move (←)" aria-label="Previous move">◀ Back</button>
+              <button id="playout-forward" title="Next move (→)" aria-label="Next move">Forward ▶</button>
+              <button id="playout-exit" title="Back to the answered problem">Done</button>
+            </div>
+          </div>
           <div class="row">
             <button id="next-problem" class="primary">Next problem</button>
+            <button id="playout-start" title="Keep playing from here against full-strength KataGo, to see how it unfolds. Nothing is judged." hidden>Play it out</button>
             <button id="leave-problem">Back to playing</button>
           </div>
         </section>

@@ -21,6 +21,7 @@ import { gtpLine, moveGtp, movePoint } from "../../src/shared/coords.ts";
 import {
   attemptsLeftText,
   formatLoss,
+  forwardTitle,
   humanMoves,
   lastHumanMove,
   latestEstimate,
@@ -29,6 +30,7 @@ import {
   positionBefore,
   generationFact,
   nextProblemLabel,
+  playoutText,
   problemHeading,
   problemResult,
   ratingChangeFor,
@@ -91,6 +93,12 @@ const el = {
   problemResult: $("problem-result"),
   nextProblem: $<HTMLButtonElement>("next-problem"),
   leaveProblem: $<HTMLButtonElement>("leave-problem"),
+  playoutStart: $<HTMLButtonElement>("playout-start"),
+  playout: $("playout"),
+  playoutText: $("playout-text"),
+  playoutBack: $<HTMLButtonElement>("playout-back"),
+  playoutForward: $<HTMLButtonElement>("playout-forward"),
+  playoutExit: $<HTMLButtonElement>("playout-exit"),
   evalCard: $("eval"),
   evalLoss: $("eval-loss"),
   evalDetail: $("eval-detail"),
@@ -317,6 +325,12 @@ function turnText(v: GameView): string {
   const s = v.settings;
   const p = v.problem;
   if (v.mode === "problem" && p) {
+    const po = p.playout;
+    if (po) {
+      if (po.thinking) return "KataGo is thinking…";
+      if (po.over) return "Both sides passed.";
+      return v.toPlay === p.toPlay ? `Playing it out: your move (${colorName(p.toPlay)}).` : "Playing it out: press Forward for KataGo's move.";
+    }
     if (p.revealed) return p.solved ? "Problem solved." : "Here's the answer.";
     return v.engineBusy ? "Checking your move…" : `Problem: ${colorName(p.toPlay)} to play.`;
   }
@@ -416,7 +430,17 @@ function renderProblem(v: GameView | null): void {
   el.problemTitle.textContent = problemHeading(p, v.board.length);
   el.problemAttempts.textContent = attemptsLeftText(p);
   el.problemText.textContent = p.prompt;
-  const result = problemResult(p);
+  // Playing out, the play-out's controls take the place of the attempt's verdict.
+  const po = p.playout;
+  el.playout.hidden = !po;
+  el.playoutStart.hidden = !v.allowed.includes("playout_start");
+  el.playoutStart.disabled = !can(v, "playout_start");
+  el.playoutText.textContent = playoutText(p);
+  el.playoutBack.disabled = !can(v, "playout_back");
+  el.playoutForward.disabled = !can(v, "playout_forward");
+  el.playoutForward.title = forwardTitle(p, v.toPlay);
+  el.playoutExit.disabled = !can(v, "playout_exit");
+  const result = po ? null : problemResult(p);
   el.problemResult.hidden = !result;
   el.problemResult.className = `problem-result ${result?.tone ?? ""}`;
   el.problemResult.textContent = result?.text ?? "";
@@ -637,6 +661,10 @@ el.retry.addEventListener("click", () => void act({ type: "retry" }));
 el.nextProblem.addEventListener("click", () => void act({ type: "next_problem" }));
 el.practice.addEventListener("click", () => void act({ type: "next_problem" }));
 el.leaveProblem.addEventListener("click", () => void act({ type: "leave_problem" }));
+el.playoutStart.addEventListener("click", () => void act({ type: "playout_start" }));
+el.playoutBack.addEventListener("click", () => void act({ type: "playout_back" }));
+el.playoutForward.addEventListener("click", () => void act({ type: "playout_forward" }));
+el.playoutExit.addEventListener("click", () => void act({ type: "playout_exit" }));
 function reviewGame(): void {
   if (!view?.gameId) return;
   el.resultDialog.close();
@@ -736,6 +764,13 @@ document.addEventListener("keydown", (e) => {
   } else if (key === "h" && !el.hint.disabled) {
     e.preventDefault();
     void act({ type: "ask_tutor" });
+  } else if (e.key === "ArrowLeft" && can(view, "playout_back")) {
+    // Stepping through a play-out.
+    e.preventDefault();
+    void act({ type: "playout_back" });
+  } else if (e.key === "ArrowRight" && can(view, "playout_forward")) {
+    e.preventDefault();
+    void act({ type: "playout_forward" });
   } else if (e.key === "Enter" && can(view, "continue") && !el.moment.hidden) {
     // Don't steal Enter from a focused button.
     if (target?.closest("button")) return;

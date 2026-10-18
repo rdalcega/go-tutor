@@ -241,9 +241,37 @@ export function generationFact(g: GenerationStatus | undefined): { short: string
  * The labels of a problem's last moves before its position ("−1" on the last move, "−2" on the one
  * before, …), except where a drawing (a variation stone or a mark) is on the same point.
  */
-export function recentMoveLabels(v: { problem?: ProblemView | null; overlay: Overlay | null }): { point: Point; text: string }[] {
+export function recentMoveLabels(v: { problem?: ProblemView | null; overlay: Overlay | null; moves?: readonly MoveRecord[] }): { point: Point; text: string }[] {
   const drawn = [...(v.overlay?.variation?.moves ?? []), ...(v.overlay?.marks ?? [])].map((d) => d.point);
-  return (v.problem?.recentMoves ?? []).filter((m) => !drawn.some((p) => samePoint(p, m.point))).map((m) => ({ point: m.point, text: `\u2212${m.ago}` }));
+  const free = (p: Point) => !drawn.some((d) => samePoint(d, p));
+  // Played out past the position: the play-out's moves are numbered instead (1 is the learner's
+  // first), except the last, which has the last-move marker; the latest move on a point wins.
+  if (v.problem?.playout && v.problem.playout.cursor > 0) {
+    const labels = new Map<string, { point: Point; text: string }>();
+    (v.moves ?? []).forEach((r, i) => {
+      const point = movePoint(r.move);
+      if (point) labels.set(`${point.x},${point.y}`, { point, text: String(i + 1) });
+    });
+    const last = movePoint(v.moves?.at(-1)?.move);
+    if (last) labels.delete(`${last.x},${last.y}`);
+    return [...labels.values()].filter((l) => free(l.point));
+  }
+  return (v.problem?.recentMoves ?? []).filter((m) => free(m.point)).map((m) => ({ point: m.point, text: `\u2212${m.ago}` }));
+}
+
+/** The play-out card's line: where the learner is in it, and that nothing here counts. */
+export function playoutText(p: ProblemView): string {
+  const po = p.playout;
+  if (!po) return "";
+  const at = po.cursor === 0 ? "The problem position" : `Move ${po.cursor} of ${po.line.length}`;
+  return `${at} · nothing here is judged`;
+}
+
+/** The Forward button's tooltip: the next move of the line, or at its end KataGo moving for the side to play. */
+export function forwardTitle(p: ProblemView, toPlay: Color): string {
+  const po = p.playout;
+  if (po && po.cursor >= po.line.length) return toPlay === p.toPlay ? "KataGo plays your move (→)" : "KataGo's move (→)";
+  return "Next move (→)";
 }
 
 /** "2 attempts left", "1 attempt left", or "" once the problem is over. */

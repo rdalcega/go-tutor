@@ -299,6 +299,8 @@ select, input[type="text"] {
   background: color-mix(in srgb, var(--accent) 7%, var(--surface));
 }
 .problem .attempts { color: var(--muted); font-size: 0.85rem; white-space: nowrap; }
+.playout { display: flex; flex-direction: column; gap: 6px; padding: 6px 8px; border-radius: 6px; border-left: 3px solid var(--border); }
+.playout #playout-text { color: var(--muted); font-size: 0.85rem; }
 .problem-result { margin: 0; padding: 6px 8px; border-radius: 6px; border-left: 3px solid var(--border); }
 .problem-result.good { border-left-color: var(--good); background: color-mix(in srgb, var(--good) 10%, transparent); }
 .problem-result.bad { border-left-color: var(--bad); background: color-mix(in srgb, var(--bad) 9%, transparent); }
