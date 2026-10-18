@@ -4,6 +4,9 @@ Features to add or change. Newest at the bottom; move an item to "Done" with its
 
 ## To do
 
+- **Show clearly when the opponent passes.** When the bot passes, nothing signals it clearly, so
+  the learner can miss it. Add something that makes an opponent's pass obvious.
+
 ## Done
 
 - **Review a game's mistakes as practice.** At the end of a game, add a button option for review
