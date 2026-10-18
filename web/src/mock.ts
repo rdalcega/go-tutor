@@ -439,6 +439,7 @@ class MockServer implements Transport {
         this.msg("system", judgeModeChangedText(a.mode, v.atLevelRank ?? "18k"));
         return null;
       case "new_game": {
+        this.playout = null;
         this.gameView = null;
         this.problemDef = null;
         this.review = null;
@@ -588,10 +589,15 @@ class MockServer implements Transport {
       case "pass": {
         if (po.thinking || po.game.isOver || po.game.toPlay !== p.toPlay) return "It isn't your turn.";
         if (a.type === "play" && !po.game.isLegal(a.point)) return "That point is not a legal move.";
-        po.line.length = po.cursor;
-        po.line.push(a.type === "play" ? toGtp(a.point, size) : "pass");
-        advance(po.line[po.cursor]!);
-        if (!po.game.isOver) reply();
+        const gtp = a.type === "play" ? toGtp(a.point, size) : "pass";
+        // As on the server: the next move of the line itself just steps forward, keeping what follows it.
+        if (po.line[po.cursor] !== gtp) {
+          po.line.length = po.cursor;
+          po.line.push(gtp);
+        }
+        advance(gtp);
+        po.gen++;
+        if (!po.game.isOver && po.cursor === po.line.length) reply();
         return null;
       }
     }
