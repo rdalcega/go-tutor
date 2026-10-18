@@ -14,6 +14,8 @@ export interface BoardScene {
   overlay: Overlay | null;
   /** KataGo's preferred move, highlighted (the overlay's `best`, from its fallback answer). */
   bestMove: Point | null;
+  /** Labels on stones already on the board: a problem's last moves before its position ("−1", "−2", …). */
+  recentLabels: { point: Point; text: string }[];
   /** Color of the hover ghost, or null when the board does not accept input. */
   hoverColor: Color | null;
 }
@@ -151,6 +153,7 @@ export class BoardView {
           if (c) this.drawStone(g, { x, y }, c, r, 1);
         }),
       );
+      for (const l of s.recentLabels) this.drawRecentLabel(g, l, s.board, r);
       if (s.bestMove) this.drawBestMove(g, s.bestMove, r);
       if (s.lastMove) {
         const c = s.board[s.lastMove.y]?.[s.lastMove.x];
@@ -294,6 +297,23 @@ export class BoardView {
     ctx.beginPath();
     ctx.arc(x, y, r * 0.45, 0, Math.PI * 2);
     ctx.stroke();
+  }
+
+  /**
+   * A small, lighter label than the variation's numbers, with a minus sign, so "−1" can't be read
+   * as a move to play. Only on a stone (a captured one's point is left out by the server).
+   */
+  private drawRecentLabel(ctx: Ctx, l: { point: Point; text: string }, board: Board, r: number): void {
+    const stone = board[l.point.y]?.[l.point.x];
+    if (!stone) return;
+    const { x, y } = pointToPixel(this.layout, l.point);
+    ctx.save();
+    ctx.fillStyle = stone === "B" ? "rgba(255,255,255,0.92)" : "rgba(0,0,0,0.8)";
+    ctx.font = `500 ${r * 0.72}px ui-sans-serif, system-ui, sans-serif`;
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+    ctx.fillText(l.text, x, y + r * 0.04);
+    ctx.restore();
   }
 
   private drawBestMove(ctx: Ctx, p: Point, r: number): void {

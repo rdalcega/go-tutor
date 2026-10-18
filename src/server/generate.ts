@@ -56,8 +56,10 @@ import {
   problemGame,
   problemPosition,
   promptFor,
+  recentMovesOf,
   stonesOf,
   type Candidate,
+  type StoredMove,
   type StoredProblem,
 } from "./problems.ts";
 import { MAX_BOT_RATING, MIN_BOT_RATING, classifyPlayed, flippedChains, ownershipFlipped } from "./profile.ts";
@@ -393,6 +395,8 @@ export interface CandidateProblem {
   moveNumber: number;
   played: Gtp;
   swapped: boolean;
+  /** The last moves before the position, in the problem's colors (the board labels them). */
+  recentMoves: StoredMove[];
 }
 
 /** What the deeper analysis measured, for the log and for tuning the filters. */
@@ -485,6 +489,7 @@ export async function examineCandidate(input: CandidateInput, ctx: ExamineContex
       moveNumber: input.moveNumber,
       played,
       swapped,
+      recentMoves: recentMovesOf(before, swapped),
     },
     metrics,
   };
@@ -509,6 +514,7 @@ export function storedProblem(c: CandidateProblem, batch: Pick<GeneratedBatch, "
     komi: GENERATED_KOMI,
     stones: c.stones,
     toPlay: "B",
+    recent: c.recentMoves,
     prompt: promptFor(c.category, "B"),
     category: c.category,
     answers: c.answers,

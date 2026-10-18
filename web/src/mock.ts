@@ -58,6 +58,8 @@ interface MockProblem {
   board: readonly string[];
   answers: readonly string[];
   generated?: GeneratedProblemInfo;
+  /** The last moves before the position, oldest first (labeled −5 … −1 on the board). */
+  recent?: readonly [Color, string][];
 }
 
 const MOCK_PROBLEMS: readonly MockProblem[] = [
@@ -78,6 +80,13 @@ const MOCK_PROBLEMS: readonly MockProblem[] = [
       ". O X . . . X O .",
     ],
     answers: ["E1"],
+    recent: [
+      ["W", "H2"],
+      ["B", "G1"],
+      ["W", "H1"],
+      ["B", "C1"],
+      ["W", "B1"],
+    ],
   },
   {
     id: "gen1",
@@ -481,6 +490,7 @@ class MockServer implements Transport {
         maxAttempts: 2,
         revealed: false,
         box: 1,
+        ...(def.recent && { recentMoves: def.recent.map(([color, gtp], i) => ({ color, point: fromGtp(gtp, board.length)!, ago: def.recent!.length - i })) }),
       },
     };
     this.msg("system", `Practice problem: ${def.prompt}`);

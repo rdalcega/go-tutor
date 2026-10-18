@@ -305,6 +305,9 @@ export function problemLines(p: ProblemView, size?: number): string[] {
   const a = p.lastAttempt;
   if (a) lines.push(`last attempt ${a.move} ${a.correct ? "correct" : "wrong"}${a.pointLoss !== null ? `, lost ${num(a.pointLoss)}` : ""}`);
   if (p.answer) lines.push(`answer ${p.answer.move} (pv ${pv(p.answer.pv)})`);
+  if (p.recentMoves?.length && size !== undefined) {
+    lines.push(`last moves (labeled on the board): ${[...p.recentMoves].reverse().map((m) => `-${m.ago} ${m.color} ${toGtp(m.point, size)}`).join(", ")}`);
+  }
   return lines;
 }
 

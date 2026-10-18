@@ -384,6 +384,11 @@ describe("formatState", () => {
     ]);
     const shown = { ...problem, attempts: 2, revealed: true, answer: { move: "D5", pv: ["D5", "E4"] } };
     expect(problemLines(shown)[2]).toBe("answer D5 (pv D5 E4)");
+    const recentMoves = [
+      { color: "B" as const, point: { x: 2, y: 6 }, ago: 2 },
+      { color: "W" as const, point: { x: 3, y: 5 }, ago: 1 },
+    ];
+    expect(problemLines({ ...problem, recentMoves }, 9).at(-1)).toBe("last moves (labeled on the board): -1 W D4, -2 B C3");
     const v = view({ gameId: null, mode: "problem", status: "finished", moves: [], moment: null, problem: shown });
     expect(formatState(v)).toContain("problem p4 life_and_death (from g12 move 14, box 1) B to play, answer shown: Black to play. Live.");
     expect(statusLine(v)).toBe("problem=p4 mode=problem status=finished level=coach attempts=2/2 answer shown (D5)");

@@ -483,6 +483,43 @@ describe("problem mode", () => {
     expect(loads).toBe(1);
   });
 
+  it("keeps the moves before a game problem's position and labels them, from the game record for older problems", async () => {
+    ctl.newGame();
+    await flush();
+    engine.lossAfter(["C3", "A9", "D4", "B9", "F6"], 7);
+    for (const gtp of ["C3", "D4", "F6"]) {
+      await ctl.handleAction({ type: "play", point: at(gtp) });
+      await flush();
+    }
+    await ctl.handleAction({ type: "continue" });
+    await ctl.handleAction({ type: "resign" });
+    await flush(10);
+    const problem = store.loadProblems().find((p) => p.kind === "game")!;
+    expect(problem.recent).toEqual([
+      { color: "B", move: "C3" },
+      { color: "W", move: "A9" },
+      { color: "B", move: "D4" },
+      { color: "W", move: "B9" },
+    ]);
+    const labels = [
+      { color: "B", point: at("C3"), ago: 4 },
+      { color: "W", point: at("A9"), ago: 3 },
+      { color: "B", point: at("D4"), ago: 2 },
+      { color: "W", point: at("B9"), ago: 1 },
+    ];
+    await ctl.handleTutor({ type: "start_problem", problemId: problem.id });
+    expect(ctl.view().problem?.recentMoves).toEqual(labels);
+    // A problem saved before they were kept gets them from its game, once.
+    store.saveProblems(store.loadProblems().map((p) => (p.id === problem.id ? { ...p, recent: undefined } : p)));
+    await ctl.handleAction({ type: "leave_problem" });
+    await ctl.handleTutor({ type: "start_problem", problemId: problem.id });
+    expect(ctl.view().problem?.recentMoves).toEqual(labels);
+    expect(stored(problem.id).recent).toEqual(problem.recent);
+    // A generated problem saved without them shows none.
+    await startLive();
+    expect(ctl.view().problem?.recentMoves).toBeUndefined();
+  });
+
   it("turns a finished game's mistakes into problems, re-analyzing thin candidates", async () => {
     ctl.newGame();
     await flush();

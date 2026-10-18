@@ -5,7 +5,7 @@
 
 import { createHash } from "node:crypto";
 import { GoGame, emptyBoard, gameBefore, gameFromLine, opponent, positionKey, setCell } from "../engine/index.ts";
-import { toGtp, tryFromGtp } from "../shared/coords.ts";
+import { samePoint, toGtp, tryFromGtp } from "../shared/coords.ts";
 import { MAX_BOX, freshSchedule } from "../shared/schedule.ts";
 import { colorName, round1 } from "../shared/text.ts";
 import type {
@@ -22,8 +22,10 @@ import type {
   ProblemKind,
   ProblemListItem,
   ProblemsResponse,
+  RecentMove,
   TakenBackMove,
 } from "../shared/types.ts";
+import { RECENT_MOVES } from "../shared/types.ts";
 import { nextNumber } from "./common.ts";
 import { BACKGROUND_PRIORITY, TRUSTED_CANDIDATE_VISITS, type Analysis, type AnalyzeOptions, type Position } from "./katago.ts";
 import { mistakeKey } from "./profile.ts";
@@ -68,6 +70,8 @@ export interface StoredProblem {
   /** The position: every stone on the board, as GTP. */
   stones: { B: Gtp[]; W: Gtp[] };
   toPlay: Color;
+  /** The last moves before the position (up to RECENT_MOVES, passes left out), oldest first, in the problem's colors. Absent in problems saved before they were kept (the first start of a game problem fills it in). */
+  recent?: StoredMove[];
   prompt: string;
   category: MistakeCategory;
   /** Accepted answers: KataGo's moves within ANSWER_MARGIN of its best, plus moves later found to be as good. */
@@ -89,6 +93,12 @@ export interface StoredProblem {
   solves: number;
   lastResult?: "first_try" | "solved" | "failed";
   lastSeen?: number;
+}
+
+/** A stone played before a problem's position. */
+export interface StoredMove {
+  color: Color;
+  move: Gtp;
 }
 
 export interface Candidate {
@@ -137,6 +147,50 @@ export function problemBoard(p: Pick<StoredProblem, "size" | "stones">): Board {
     }
   }
   return board;
+}
+
+/** The last RECENT_MOVES stones played in `game` (passes left out), oldest first; colors swapped with `swapped`. */
+export function recentMovesOf(game: Pick<GoGame, "moves" | "size">, swapped = false): StoredMove[] {
+  return game.moves
+    .flatMap((r) => ("point" in r.move ? [{ color: swapped ? opponent(r.move.color) : r.move.color, move: toGtp(r.move.point, game.size) }] : []))
+    .slice(-RECENT_MOVES);
+}
+
+/**
+ * The recent moves of a problem from the learner's game saved before problems kept them, from the
+ * game record: undefined when it isn't from a game, or the record no longer leads to its position.
+ */
+export function recentFromGame(
+  p: Pick<StoredProblem, "source" | "hash" | "toPlay">,
+  game: { settings: GameSettings; moves: readonly MoveRecord[]; takenBack?: readonly TakenBackMove[] },
+): StoredMove[] | undefined {
+  const source = gameSource(p);
+  if (!source) return undefined;
+  const first = source.takenBack !== undefined ? game.takenBack?.[source.takenBack] : undefined;
+  if (source.takenBack !== undefined && !first) return undefined;
+  try {
+    const before = first ? gameFromLine(game.settings, first.before) : gameBefore(game.settings, game.moves, source.moveNumber);
+    return positionHash(before.board, p.toPlay) === p.hash ? recentMovesOf(before) : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * What the board labels of a problem's recent moves: each one whose stone is still on the board,
+ * oldest first, numbered back from the position (`ago` 1 = the last move). A captured stone's point
+ * is empty, or holds a later stone, which keeps its own label.
+ */
+export function recentMovesView(p: Pick<StoredProblem, "recent" | "size">, board: Board): RecentMove[] | undefined {
+  const recent = p.recent ?? [];
+  const out: RecentMove[] = [];
+  // Newest first, so a point played twice keeps the later label.
+  for (let ago = 1; ago <= recent.length; ago++) {
+    const m = recent[recent.length - ago]!;
+    const point = tryFromGtp(m.move, p.size);
+    if (point && board[point.y]?.[point.x] === m.color && !out.some((o) => samePoint(o.point, point))) out.push({ color: m.color, point, ago });
+  }
+  return out.length ? out.reverse() : undefined;
 }
 
 /** The rules engine at the problem position, with the learner to move. */
@@ -233,6 +287,8 @@ export interface MistakeSnapshot {
   candidates: Candidate[];
   /** A taken-back first attempt: its index in the game's `takenBack`. */
   takenBack?: number;
+  /** The last moves before it. */
+  recent?: StoredMove[];
 }
 
 /** A practice problem from a mistake, or null when there is nothing to find (KataGo would pass, or no answer). */
@@ -248,6 +304,7 @@ export function problemFromMistake(m: MistakeSnapshot, id: string, now: number):
     komi: m.komi,
     stones: stonesOf(m.board),
     toPlay: m.toPlay,
+    recent: m.recent ?? [],
     prompt: promptFor(m.category, m.toPlay),
     category: m.category,
     answers,
@@ -348,6 +405,7 @@ export async function generateProblems(
       board: before.board,
       toPlay: record.move.color,
       candidates: evaluation.candidates.map((c) => ({ move: c.move, lead: c.lead, visits: c.visits, pv: c.pv })),
+      recent: recentMovesOf(before),
       ...(m.takenBack !== undefined && { takenBack: m.takenBack }),
     };
     snapshots.push(snapshot);

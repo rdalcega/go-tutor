@@ -292,6 +292,21 @@ export interface ProblemView {
   answer?: { move: Gtp; pv: Gtp[] };
   /** When the problem is due again (ms epoch), once its result is recorded (spaced repetition). */
   nextDue?: number;
+  /**
+   * The last moves before the position (up to RECENT_MOVES, passes left out) whose stones are still
+   * on the board, oldest first: `ago` 1 is the last move. Absent when the problem doesn't know them.
+   */
+  recentMoves?: RecentMove[];
+}
+
+/** How many of the moves before a problem's position it labels on the board (-1 … -5). */
+export const RECENT_MOVES = 5;
+
+/** A stone of one of the last moves before a problem's position: `ago` 1 is the last move, 2 the one before, … */
+export interface RecentMove {
+  color: Color;
+  point: Point;
+  ago: number;
 }
 
 export interface ProblemAttempt {
