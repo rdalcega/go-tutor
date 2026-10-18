@@ -16,9 +16,10 @@ describe("parseInvocation", () => {
   });
 
   it("parses read commands", () => {
-    expect(parseInvocation(["watch"])).toEqual({ kind: "watch", json: false });
-    expect(parseInvocation(["watch", "--since", "41"])).toEqual({ kind: "watch", since: 41, json: false });
-    expect(parseInvocation(["watch", "--since=7", "--json"])).toEqual({ kind: "watch", since: 7, json: true });
+    expect(parseInvocation(["watch"])).toEqual({ kind: "watch", all: false, json: false });
+    expect(parseInvocation(["watch", "--all"])).toEqual({ kind: "watch", all: true, json: false });
+    expect(parseInvocation(["watch", "--since", "41"])).toEqual({ kind: "watch", since: 41, all: false, json: false });
+    expect(parseInvocation(["watch", "--since=7", "--json"])).toEqual({ kind: "watch", since: 7, all: false, json: true });
     expect(parseInvocation(["state", "--json"])).toEqual({ kind: "state", json: true });
     expect(parseInvocation(["review"])).toEqual({ kind: "review", gameId: "last", json: false });
     expect(parseInvocation(["review", "g12"])).toEqual({ kind: "review", gameId: "g12", json: false });

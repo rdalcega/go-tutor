@@ -66,7 +66,7 @@ describe("formatEvent", () => {
       boardAfter: "",
     };
     expect(formatEvent(e, ctx)).toBe(
-      "MOMENT m3 game=g12 move 14 B C3 lost 6.2 pts (best D5, pv D5 E4 C6) — reply with: claim m3, then say/show/rethink/resume; fallback in 30s",
+      "MOMENT m3 game=g12 move 14 B C3 lost 6.2 pts (best D5, pv D5 E4 C6) — answer in one call: claim m3 && show/say/rethink (&& resume); fallback in 30s",
     );
     // The countdown runs from now, not from when the event was stamped.
     expect(formatEvent(e, { ...ctx, now: 1_012_000 })).toMatch(/; fallback in 18s$/);
@@ -112,7 +112,7 @@ describe("formatEvent", () => {
       boardAfter: "",
     });
     expect(formatEvent(e("fallback"), ctx)).toBe(
-      "MOMENT m3 game=g12 move 14 B C3 lost 6.2 pts (best D5, pv D5 E4 C6) — reply with: claim m3, then say/show/rethink/resume (replayed; now fallback)",
+      "MOMENT m3 game=g12 move 14 B C3 lost 6.2 pts (best D5, pv D5 E4 C6) — answer in one call: claim m3 && show/say/rethink (&& resume) (replayed; now fallback)",
     );
     expect(formatEvent(e("resolved"), ctx)).toBe("MOMENT m3 game=g12 move 14 B C3 lost 6.2 pts (best D5, pv D5 E4 C6) (replayed; already resolved)");
   });
@@ -299,7 +299,7 @@ describe("formatEvent", () => {
       tutorLevel: "point_out",
     };
     expect(formatEvent(moment, ctx)).toBe(
-      "MOMENT m3 game=g12 move 14 B C3 lost 6.2 pts (best D5, pv D5 E4 C6) — level point_out: explain mistakes, don't take moves back (rethink is refused) — reply with: claim m3, then say/show/mark/resume; fallback in 30s",
+      "MOMENT m3 game=g12 move 14 B C3 lost 6.2 pts (best D5, pv D5 E4 C6) — level point_out: explain mistakes, don't take moves back (rethink is refused) — answer in one call: claim m3 && show/mark/say && resume; fallback in 30s",
     );
   });
 });

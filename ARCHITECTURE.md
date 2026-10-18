@@ -213,7 +213,20 @@ tutor attached, the server adds a system reply saying the tutor isn't connected.
   that never reached the log can be reused after a restart), and `since` is where the replay starts.
   Replayed teaching moments carry the moment's current state (the game's, also while a practice
   problem is on the board). A stream without `since` gets the open teaching moment and the problem on
-  the board, if any (their events from memory, or from the log for a moment restored after a restart).
+  the board, if any (their events from memory, or from the log for a moment restored after a restart),
+  and, when it opens within 10 minutes of the last tutor stream closing (the Monitor tool restarts
+  `watch` every 30 minutes), every event that stream wasn't sent. A `game_end` whose rank estimate is
+  still running is logged at once but sent to the tutor streams with its `rating` event, in one write
+  (or alone after 15 s, or before any other event); a stream opened meanwhile gets a cursor before it.
+  The tutor's `watch` marks its stream `rejoin=1`: only such streams use or leave the backlog above.
+  On such a stream, events that need no answer of their own (`game_start`, `problem_start`, a
+  finished batch, `fallback`) are held and written with the next event that does, so they don't
+  wake the tutor alone (a problem start over an open moment is sent at once); held frames don't
+  count as sent, so a fresh `watch` gets them, and while a GAME_END is held they wait with it. While
+  one is attached the controller knows (`setTutorWatching`): a teaching moment then opens with the
+  longer wait, `TUTOR_GRACE_MS` (75 s) instead of `TUTOR_TIMEOUT_MS` (30 s), and a moment already
+  waiting when it attaches gets it the first time, at least 30 s after that (`extendMoment`). The
+  tutor answers a moment in one chained call that starts with `claim <id>`.
 - `/api/*` rejects requests with a foreign `Origin` (anything but this server and the Vite dev server
   on port 5173) with 403, and POSTs without `content-type: application/json` with 415. The server
   listens on 127.0.0.1 only.
@@ -498,9 +511,21 @@ refutation after the second miss.
 Designed to be run by a Claude Code session. Every command prints compact, readable text (not JSON
 unless `--json`).
 
-- `watch` — long-running. Connects to the event stream and prints **one line per event** (that is what Claude Code's
-  Monitor tool turns into notifications). Teaching moments and hint requests print a single line with
-  the essentials: moment id, move, point loss, best move, PV. Reconnects with `since=` on drop.
+- `watch` — long-running. Connects to the event stream and prints one line per event the tutor acts
+  on; what arrives in one chunk goes out in one stdout write, which Claude Code's Monitor tool turns
+  into one notification (one Claude turn, the main cost of a session). Left out unless `--all`: moves,
+  level and judge changes, batch starts, and take-backs except those undoing the position of an open
+  moment or hint (`undo.during`). A waiting teaching moment, a hint request, a problem start or a
+  learner's message while its game is in play (not one about a problem) comes with the `state`
+  output under it, and a `game_end` with the `review` output, when the server
+  answers within 3 s and the state is still about that event (else the line says to run it).
+  A PROBLEM_START the server held back whose problem has left the board by the time it goes out is
+  dropped. The attached state is brief (no chat tail or boilerplate lines; the last 12 moves and the
+  earlier mistakes; one state fetch per write, each printed once; a question on a board that hasn't
+  changed since the last state printed gets a one-line note instead) and the review leaves out the move list.
+  `--json` prints every event raw. Reconnects with `since=` on drop. `npm run sim:tokens`
+  (`scripts/token-sim.ts`) runs a scripted session through the real bridge and `watch` and prices the
+  Claude calls it would cause.
 - `state` — the current position as ASCII plus move list with evals, the mistake threshold on this
   board, moment, and chat tail. In a game every command's status line has `threshold=<pts>` too.
 - `say <text>`, `rethink <text>`, `show <moves...> [--label L] [--start B|W]`, `mark <pts...> [--kind circle] [--text T]`,
@@ -512,7 +537,7 @@ unless `--json`).
   when there is only one).
 - `watch` prints `GAME_END …` with the help the learner had and "rank estimate running (a RATING line
   follows)" for a rated game, then `RATING <gameId> rank estimate 18k from 25 unassisted moves (1 hint);
-  rating 10 -> 11.9 (+1.9, rank 18k); next bot 18k`.
+  rating 10 -> 11.9 (+1.9, rank 18k); next bot 18k` (usually in the same write, see the bridge).
 - `summary` — learner profile: rank estimate with the trend over the last 5 rated games, the last
   game's move-quality estimate (rank, unassisted moves, help), each recent rated game's estimate, bot rank (and
   handicap), the tutor level and what it means for the tutor, the threshold on each board size ("4 pts on
@@ -530,7 +555,8 @@ unless `--json`).
 - `watch` prints chat sent during a problem as `USER "<text>" (problem <id>)`.
 - `watch` prints the level on `GAME_START … level=<level>`, a `point_out` moment as `MOMENT … — level
   point_out: explain mistakes, don't take moves back … — reply with: claim <id>, then say/show/mark/resume`,
-  and a change as `LEVEL <level> — <what it means for the tutor> (from the learner's next move)`.
+  a change (with `--all`) as `LEVEL <level> — <what it means for the tutor> (from the learner's next
+  move)`, and a game's chat as `USER "…" game=<id> level=<level>` (`user_message.tutorLevel`).
   `state` and every command's status line (`level=<level>`) show it too.
 - `watch` prints the judge mode on `GAME_START … judge=<mode>` (with ` ref=<rank>` on `at_level`), a
   change as `JUDGE judge=<mode> … (from the learner's next move)`, an at-level moment as `MOMENT … lost

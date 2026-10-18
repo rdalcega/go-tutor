@@ -16,24 +16,35 @@ Coordinates are GTP: column letters A-T without I, row 1 at the bottom (e.g. D4)
 Exit codes: 0 ok, 1 server error (message on stderr), 2 usage error. Add --json to any command for raw JSON.
 
 SESSION FLOW
-  1. summary                 learner's rank, weak categories, recommended focus: decide what to do
-  2. watch                   start under the Monitor tool; prints one line per event, forever
-  3. on MOMENT:  claim <id> within the deadline, run state, then teach with say/show/mark/rethink,
-                 and finish with resume. A drawing you made stays up after resume: the game stays
-                 paused until the learner presses Continue when ready. If you don't claim in time
-                 a FALLBACK line appears: KataGo's answer is already shown; you can still add a say.
-  4. on HINT:    run state, then say/show/mark. Don't give the answer outright unless asked. (The
+  1. summary [--wait]        learner's rank, weak categories, recommended focus: decide what to do
+                             (--wait: right after npm start, waits for the server instead of failing)
+  2. watch                   start under the Monitor tool; prints each event you act on, forever.
+                 MOMENT, HINT, PROBLEM_START and a USER line during a game come with the state
+                 under them, GAME_END with the review: don't run state or review again.
+                 Chain one answer's commands with &&.
+  3. on MOMENT:  read the state below the line, then answer in one call that starts with the
+                 claim: claim <id> && show ... && say ... && resume (the claim fails if the moment is
+                 gone, which stops the chain). Once watch has delivered it you have 75 s.
+                 A drawing you made stays up after resume: the game stays
+                 paused until the learner presses Continue when ready. If you don't answer in time
+                 a FALLBACK line comes with your next event: KataGo's answer is already shown.
+  4. on HINT:    read the state below the line, then say/show/mark. Don't give the answer outright unless asked. (The
                  learner presses Hint next to the chat input; anything they typed comes as the question.
                  Your answer marks their next move as helped, so it doesn't count for the rank estimate.)
   5. on USER:    answer with say (pass --moment <id> when the line names one).
-  6. on GAME_END: review last, discuss the top 1-2 mistakes, tag categories, maybe new-game. The rank
-                 estimate runs after the game; a RATING line brings the rating change a few seconds later.
+  6. on GAME_END: read the review below the line, discuss the top 1-2 mistakes, tag categories, maybe
+                 new-game. The server waits up to 15 s for the rank estimate, so the RATING line
+                 usually comes with GAME_END; a slower one follows on its own.
   7. on PROBLEM_START / PROBLEM: the learner is on a practice problem. Let them try; after a wrong
                  first attempt ask what they see (say); after the answer is shown, explain it with show.
-  8. on LEVEL:   the learner changed how much you step in (see TUTOR LEVELS); follow it from now on.
-  9. on JUDGE:   the learner changed how their moves are judged (see JUDGING); nothing to do.
-  10. on BATCH:  a batch of generated practice problems started or finished (see GENERATED PROBLEMS);
-                 mention a finished one when it fits, not in the middle of a game on Silent.
+  8. on BATCH:   a batch of generated practice problems finished (see GENERATED PROBLEMS); mention
+                 it when it fits, not in the middle of a game on Silent.
+  GAME_START, PROBLEM_START, BATCH finished and FALLBACK need no answer of their own: watch prints
+  them at the top of the next event you answer (a PROBLEM_START with the learner's first attempt).
+  Not in the stream (watch --all prints them): moves, tutor level and judge changes (USER lines in
+  a game carry level=..., and state shows both), batch starts, and take-backs (UNDO), except the
+  learner's take-back of a MOMENT's or HINT's position and their move made before your hint answer
+  ("MOVE ... — played before your hint answer: that position is gone").
 
 GENERATED PROBLEMS
   Besides the problems from the learner's own mistakes, the server generates problems in the
@@ -76,30 +87,36 @@ RANK ESTIMATE AND HELP
   mistakes appear in review (marked "first try #n, taken back"), in summary and as practice problems.
 
 COMMANDS
-  watch [--since N]
-      Follow the event stream. stdout carries exactly one line per event; diagnostics go to stderr.
+  watch [--since N] [--all]
+      Follow the event stream. stdout carries the events you act on; what arrives together goes out
+      in one write (one notification). A waiting MOMENT, a HINT or a PROBLEM_START comes with the
+      state printed under it, a GAME_END with the review (the server sends it with its RATING line
+      when the rank estimate takes under 15 s). Diagnostics go to stderr. A watch started without
+      --since within 10 minutes of the last one closing first gets what that one missed.
+      --all prints every event as one bare line (moves, UNDO, LEVEL, JUDGE, BATCH started too);
+      --json prints every event as raw JSON.
       Reconnects by itself (resuming after the last seq) with backoff, and follows a restarted server's
       replay. --since N replays events after seq N. A replayed MOMENT shows its current state instead of
       a countdown, e.g. "(replayed; now fallback)" or "(replayed; already resolved)".
       Lines:
         GAME_START g12 9x9 komi 7 human=B bot=20k level=coach judge=optimal
-        MOVE 15 W D6 (bot)
-        MOMENT m3 game=g12 move 14 B C3 lost 6.2 pts (best D5, pv D5 E4 C6) — reply with: claim m3, ...
-        MOMENT m4 ... — level point_out: explain mistakes, don't take moves back ... — reply with: ...
+        MOVE 15 W D6 (bot)   (--all only)
+        MOMENT m3 game=g12 move 14 B C3 lost 6.2 pts (best D5, pv D5 E4 C6) — answer in one call: claim m3 && show/say/rethink (&& resume); fallback in 75s — state below
+        MOMENT m4 ... — level point_out: explain mistakes, don't take moves back ... — answer in one call: ...
         MOMENT m5 game=g12 move 20 B G2 lost 4.4 pts (judged at level: vs the 17k move F3, pv F3 G4; vs KataGo's best E3 it lost 7.1) — ...
-        LEVEL silent — no teaching moments; ... (from the learner's next move)
-        JUDGE judge=at_level ref=17k — moves are scored, and moments opened, against ... (from the learner's next move)
-        HINT game=g12 B to play — user asks: "where now?" — run: state, then say/show/mark
-        USER "why was that bad?" (moment m3) game=g12
+        LEVEL silent — no teaching moments; ... (from the learner's next move)   (--all only)
+        JUDGE judge=at_level ref=17k — moves are scored, and moments opened, against ... (from the learner's next move)   (--all only)
+        HINT game=g12 B to play — user asks: "where now?" — state below; answer with say/show/mark
+        USER "why was that bad?" (moment m3) game=g12 level=coach — state below   (state while the game is in play)
         FALLBACK m3 (tutor too slow; KataGo answer shown)
-        UNDO game=g12 by human: back to move 13, B to play   (Try again or Take back; the position you were discussing is gone)
-        GAME_END g12 W+3.5 — 3 mistakes (1 taken back), worst move 14 (6.2), total loss 15 over 61 moves, help: 1 hint, rank estimate running (a RATING line follows) — run: review g12
+        UNDO game=g12 by human: back to move 13, B to play   (with a MOMENT or HINT open, or --all)
+        GAME_END g12 W+3.5 — 3 mistakes (1 taken back), worst move 14 (6.2), total loss 15 over 61 moves, help: 1 hint, rank estimate running (a RATING line follows) — review below
         RATING g12 rank estimate 18k from 25 unassisted moves (1 hint); rating 10 -> 11.9 (+1.9, rank 18k); next bot 18k
-        PROBLEM_START p4 life_and_death B to play (from g12 move 14, box 1) answers D5 — "Black to play. ..." — run: state; ...
+        PROBLEM_START p4 life_and_death B to play (from g12 move 14, box 1) answers D5 — "Black to play. ..." — state below; ...
         PROBLEM_START gen7 tactics B to play (generated 13x13, difficulty 14k, batch1, box 1) answers K4 — ...
         PROBLEM p4 attempt 1 C7 wrong, lost 5.2 (life_and_death; another attempt left) — ask what they see, ...
         PROBLEM p4 attempt 2 D5 correct (life_and_death) — best D5, pv D5 E4 C6 — say why it works
-        BATCH batch2 started (mastery): 20 problems from 17k vs 12k self-play, difficulty band 17k–13k; ...
+        BATCH batch2 started (mastery): 20 problems from 17k vs 12k self-play, difficulty band 17k–13k; ...   (--all only)
         BATCH batch2 finished: 20 new problems (7 on 9x9, 6 on 13x13, 7 on 19x19), difficulty band 17k–13k — ...
       Example: npm run -s tutor -- watch
 
@@ -111,7 +128,9 @@ COMMANDS
       Example: npm run -s tutor -- state
 
   claim <momentId>
-      Take ownership of a teaching moment; cancels the KataGo fallback timer. Do this first.
+      Take ownership of a teaching moment; cancels the KataGo fallback timer. Start your answer's
+      chained call with it (claim m3 && show ... && say ... && resume): it fails when the moment is
+      no longer current, so the rest doesn't run on the wrong board.
       Example: npm run -s tutor -- claim m3
 
   say <text> [--moment <id>]
@@ -192,8 +211,8 @@ COMMANDS
       Example: npm run -s tutor -- tag g12 14 direction "played toward thickness"
       Example: npm run -s tutor -- tag g12 9 tactics --taken-back 2
 
-  summary
-      Learner profile: rank estimate and rating trend, the last game's move-quality estimate (from how
+  summary [--wait]
+      With --wait it first waits (up to 100 s) for a server that is still starting. Learner profile: rank estimate and rating trend, the last game's move-quality estimate (from how
       many unassisted moves, and the help left out), the bot's rank (and handicap stones while the
       learner is below 20k), the tutor level, the mistake threshold on each board size and its last
       change, mistake counts by category with the last 3 games,

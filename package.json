@@ -10,6 +10,7 @@
     "start": "vite build && tsx src/server/index.ts",
     "tutor": "tsx src/cli/tutor.ts",
     "setup:katago": "bash scripts/setup-katago.sh",
+    "sim:tokens": "tsx scripts/token-sim.ts",
     "test": "vitest run",
     "typecheck": "tsc --noEmit"
   },

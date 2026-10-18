@@ -156,6 +156,59 @@ describe("GameController", () => {
     expect(ctl.view().overlay?.variation).toEqual({ moves: [{ color: "B", point: E5 }] });
   });
 
+  it("gives a moment delivered to the tutor's watch the longer wait, which its first command claims", async () => {
+    setup({ tutor: true });
+    await startGame();
+    engine.lossAfter(["C3"], 8);
+    ctl.play(C3);
+    await flush();
+    const m = ctl.view().moment!;
+    ctl.extendMoment("nope");
+    expect(ctl.view().moment?.deadline).toBe(clock.now() + 30_000);
+    const deadline = clock.now() + 75_000;
+    ctl.extendMoment(m.id);
+    expect(ctl.view().moment?.deadline).toBe(deadline);
+    clock.advance(40_000);
+    // The grace once per moment: a watch that comes back with time left doesn't renew it...
+    ctl.extendMoment(m.id);
+    expect(ctl.view().moment?.deadline).toBe(deadline);
+    clock.advance(30_000);
+    // ...but it always leaves at least the 30 s.
+    ctl.extendMoment(m.id);
+    expect(ctl.view().moment?.deadline).toBe(clock.now() + 30_000);
+    expect(ctl.view().moment?.state).toBe("waiting");
+    await ctl.handleTutor({ type: "say", text: "What does C3 do for your stones?" });
+    expect(ctl.view().moment?.state).toBe("tutor");
+    clock.advance(120_000);
+    expect(types()).not.toContain("fallback");
+  });
+
+  it("opens a moment with the longer wait while the tutor's watch is attached", async () => {
+    setup({ tutor: true });
+    ctl.setTutorWatching(true);
+    await startGame();
+    engine.lossAfter(["C3"], 8);
+    ctl.play(C3);
+    await flush();
+    expect(ctl.view().moment).toMatchObject({ state: "waiting", deadline: clock.now() + 75_000 });
+    expect(events.find((e) => e.type === "teaching_moment")).toMatchObject({ moment: { deadline: clock.now() + 75_000 } });
+    clock.advance(74_000);
+    expect(ctl.view().moment?.state).toBe("waiting");
+  });
+
+  it("gives an unanswered moment's fallback at the end of the longer wait", async () => {
+    setup({ tutor: true });
+    await startGame();
+    engine.lossAfter(["C3"], 8);
+    ctl.play(C3);
+    await flush();
+    ctl.extendMoment(ctl.view().moment!.id);
+    clock.advance(74_000);
+    expect(types()).not.toContain("fallback");
+    clock.advance(1_000);
+    expect(ctl.view().moment?.state).toBe("fallback");
+  });
+
   it("with a tutor attached, waits; a claim cancels the fallback timer", async () => {
     setup({ tutor: true });
     await startGame();
@@ -350,7 +403,7 @@ describe("GameController", () => {
     await expect(ctl.handleAction({ type: "retry" })).rejects.toThrow(/already taken back/);
     expect(ctl.view().moves).toHaveLength(2);
     expect(ctl.view().moment).toMatchObject({ id: m.id, state: "tutor" });
-    expect(events.filter((e) => e.type === "undo")).toEqual([{ type: "undo", gameId: ctl.view().gameId, moves: 2, toPlay: "B", by: "tutor" }]);
+    expect(events.filter((e) => e.type === "undo")).toEqual([{ type: "undo", gameId: ctl.view().gameId, moves: 2, toPlay: "B", by: "tutor", during: "moment" }]);
   });
 
   it("refuses moves, hints and passes once the game has ended by resignation", async () => {
@@ -413,7 +466,7 @@ describe("GameController", () => {
     await ctl.handleTutor({ type: "tag", gameId, moveNumber: 1, category: "shape" });
     expect(store.loadProfile().mistakeCounts.shape).toBe(1);
     await ctl.handleAction({ type: "retry" });
-    expect(events.at(-1)).toEqual({ type: "undo", gameId, moves: 0, toPlay: "B", by: "human" });
+    expect(events.at(-1)).toEqual({ type: "undo", gameId, moves: 0, toPlay: "B", by: "human", during: "moment" });
     // The mistake still counts, now as the taken-back first attempt.
     expect(store.loadProfile().mistakeCounts.shape).toBe(1);
     expect(store.loadProfile().recentMistakes).toMatchObject([{ gameId, moveNumber: 1, category: "shape", takenBack: 0 }]);
@@ -717,8 +770,11 @@ describe("GameController", () => {
     await ctl.handleAction({ type: "ask_tutor" });
     expect(ctl.view().overlay).toBeNull();
     await ctl.handleAction({ type: "chat", text: "why did the bot play there?" });
-    expect(events.at(-1)).toMatchObject({ type: "user_message", text: "why did the bot play there?" });
+    expect(events.at(-1)).toMatchObject({ type: "user_message", text: "why did the bot play there?", tutorLevel: "coach" });
     expect(ctl.view().chat.at(-1)!.from).toBe("user");
+    // Playing before the tutor answered the hint: the move says so, since the tutor's answer would be about the old position.
+    ctl.play(E5);
+    expect(events.find((e) => e.type === "move")).toMatchObject({ by: "human", hintPending: true });
   });
 
   it("tells the user when no tutor is connected for chat", async () => {
