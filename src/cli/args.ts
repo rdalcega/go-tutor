@@ -13,10 +13,12 @@ export type Invocation =
   | { kind: "summary"; json: boolean }
   | { kind: "problems"; json: boolean }
   | { kind: "review"; gameId: string; json: boolean }
+  /** `generate --status` (the default) or `generate --now` (start the next batch first). */
+  | { kind: "generate"; now: boolean; json: boolean }
   | { kind: "command"; command: TutorCommand; json: boolean };
 
 /** Flags that never take a value. Every other `--flag` consumes the next token (or `=value`). */
-const BOOLEAN_FLAGS = new Set(["json", "help"]);
+const BOOLEAN_FLAGS = new Set(["json", "help", "status", "now"]);
 /** Flags with an optional number: they consume the next token only when it is one (`--taken-back 2`). */
 const OPTIONAL_NUMBER_FLAGS = new Set(["taken-back"]);
 
@@ -167,6 +169,13 @@ export function parseInvocation(argv: string[]): Invocation {
       case "review": {
         if (positional.length > 1) throw new UsageError(`review takes one game id (or "last")`);
         return { kind: "review", gameId: positional[0] ?? "last", json };
+      }
+      case "generate": {
+        noPositionals(positional, name);
+        const status = flags.boolean("status");
+        const now = flags.boolean("now");
+        if (status && now) throw new UsageError("generate takes --status or --now, not both");
+        return { kind: "generate", now, json };
       }
       case "say":
       case "rethink": {

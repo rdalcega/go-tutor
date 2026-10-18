@@ -1,15 +1,16 @@
 import { describe, expect, it } from "vitest";
-import { GoGame, boardFromDiagram, groupAt } from "../../src/engine/index.ts";
-import { tryFromGtp } from "../../src/shared/coords.ts";
-import type { MistakeCategory } from "../../src/shared/types.ts";
-import { BUILTIN_PROBLEMS } from "../../src/server/builtin-problems.ts";
+import { GoGame, boardFromDiagram } from "../../src/engine/index.ts";
 import {
   BOX_INTERVALS,
   acceptedAnswers,
   addProblems,
-  builtinProblem,
   candidatesThin,
+  gameSource,
+  generatedInfo,
+  generatedSource,
   hasKoBan,
+  isLegacyBuiltin,
+  listItem,
   nextProblemId,
   pickNextProblem,
   positionHash,
@@ -22,10 +23,10 @@ import {
   resultOf,
   schedule,
   stonesOf,
-  withBuiltins,
   type MistakeSnapshot,
   type StoredProblem,
 } from "../../src/server/problems.ts";
+import { liveProblem } from "./fakes.ts";
 
 const NOW = Date.UTC(2026, 9, 16, 12);
 
@@ -63,31 +64,33 @@ function gameProblem(over: Partial<StoredProblem> = {}): StoredProblem {
   };
 }
 
-describe("built-in problems", () => {
-  it("are a dozen well-formed 9×9 positions covering the classic themes", () => {
-    expect(BUILTIN_PROBLEMS.length).toBeGreaterThanOrEqual(12);
-    expect(new Set(BUILTIN_PROBLEMS.map((p) => p.id)).size).toBe(BUILTIN_PROBLEMS.length);
-    const categories = new Set(BUILTIN_PROBLEMS.map((p) => p.category));
-    for (const c of ["life_and_death", "capturing_race", "tactics", "shape"] as MistakeCategory[]) expect(categories).toContain(c);
-    for (const def of BUILTIN_PROBLEMS) {
-      const p = builtinProblem(def);
-      const board = problemBoard(p);
-      expect(board).toHaveLength(9);
-      // Every group on the board has a liberty (a legal position).
-      board.forEach((row, y) =>
-        row.forEach((c, x) => {
-          if (c) expect(groupAt(board, { x, y }).liberties, `${def.id} stone at ${x},${y}`).toBeGreaterThan(0);
-        }),
-      );
-      // Every answer is a legal move for the side to play.
-      const game = problemGame(p);
-      for (const answer of def.answers) {
-        const point = tryFromGtp(answer, 9);
-        expect(point, `${def.id} answer ${answer}`).toBeTruthy();
-        expect(game.illegalReason(point!), `${def.id} answer ${answer}`).toBeNull();
-      }
-      expect(def.prompt).toMatch(/^(Black|White) to play\./);
-    }
+describe("problem sources", () => {
+  it("tells a problem from the learner's game from a generated one, and recognizes the old built-ins", () => {
+    const own = gameProblem({ source: { gameId: "g1", moveNumber: 5, played: "A1" } });
+    const generated = liveProblem();
+    expect(gameSource(own)).toEqual({ gameId: "g1", moveNumber: 5, played: "A1" });
+    expect(generatedSource(own)).toBeUndefined();
+    expect(gameSource(generated)).toBeUndefined();
+    expect(generatedSource(generated)).toMatchObject({ batchId: "batch1", difficultyRating: 13.2, swapped: false });
+    expect(generatedInfo(generated)).toEqual({ batchId: "batch1", difficultyRank: "17k", weakerRank: "20k", strongerRank: "15k" });
+    expect(generatedInfo(own)).toBeUndefined();
+    expect(isLegacyBuiltin({ id: "b-live-straight-three", kind: "builtin" })).toBe(true);
+    expect(isLegacyBuiltin(own)).toBe(false);
+    expect(isLegacyBuiltin(generated)).toBe(false);
+  });
+
+  it("keeps generated problems apart from game ones when adding: only the position decides", () => {
+    const problems = [gameProblem({ id: "p1", source: { gameId: "g1", moveNumber: 30, played: "A1" } })];
+    // Same move number as p1's source, but generated: not a duplicate.
+    const added = addProblems(problems, [liveProblem({ id: "gen1" }), liveProblem({ id: "gen2" })]);
+    expect(added.map((p) => p.id)).toEqual(["gen1"]); // gen2 is the same position
+    expect(problems.map((p) => p.id)).toEqual(["p1", "gen1"]);
+  });
+
+  it("lists a problem's board size, and a generated problem's origin", () => {
+    const item = listItem(liveProblem({ size: 9 }), NOW);
+    expect(item).toMatchObject({ id: "gen1", kind: "generated", size: 9, generated: { batchId: "batch1", difficultyRank: "17k" } });
+    expect(item.source).toBeUndefined();
   });
 });
 
@@ -192,26 +195,6 @@ describe("problems from mistakes", () => {
   });
 });
 
-describe("built-ins in the store", () => {
-  it("merge stored progress and found answers into the source definitions, and drop removed ones", () => {
-    const def = BUILTIN_PROBLEMS[0]!;
-    const stored: StoredProblem[] = [
-      gameProblem(),
-      { ...builtinProblem(def), box: 3, due: NOW + 5, seen: 4, solves: 3, lastResult: "first_try", answers: [...def.answers, "Z9"], prompt: "old" },
-      { ...builtinProblem(def), id: "b-gone" },
-    ];
-    const merged = withBuiltins(stored);
-    expect(merged.filter((p) => p.kind === "builtin")).toHaveLength(BUILTIN_PROBLEMS.length);
-    expect(merged.find((p) => p.id === "b-gone")).toBeUndefined();
-    expect(merged[0]!.id).toBe("p1");
-    const b = merged.find((p) => p.id === def.id)!;
-    expect(b).toMatchObject({ box: 3, due: NOW + 5, seen: 4, solves: 3, lastResult: "first_try", prompt: def.prompt });
-    expect(b.answers).toEqual([...def.answers, "Z9"]);
-    const fresh = withBuiltins([]).find((p) => p.id === def.id)!;
-    expect(fresh).toMatchObject({ box: 1, due: 0, seen: 0 });
-  });
-});
-
 describe("spaced repetition", () => {
   it("moves a first-try solve up a box, keeps a later solve's box, and sends a failure to box 1", () => {
     expect([resultOf(true, 1), resultOf(true, 2), resultOf(false, 2)]).toEqual(["first_try", "solved", "failed"]);
@@ -228,13 +211,13 @@ describe("spaced repetition", () => {
     expect(BOX_INTERVALS[1]).toBeLessThan(BOX_INTERVALS[2]!);
   });
 
-  it("picks a due problem: the focus category first (own before built-in), then own problems, then built-ins", () => {
+  it("picks a due problem: the focus category first (own before generated), then own problems, then generated", () => {
     const own = gameProblem({ id: "p1", category: "shape" });
     const ownFocus = gameProblem({ id: "p2", category: "tactics", box: 2 });
-    const builtinFocus = gameProblem({ id: "b-x", kind: "builtin", category: "tactics" });
-    const builtin = gameProblem({ id: "b-y", kind: "builtin", category: "shape" });
+    const generatedFocus = gameProblem({ id: "gen1", kind: "generated", category: "tactics" });
+    const generated = gameProblem({ id: "gen2", kind: "generated", category: "shape" });
     const notDue = gameProblem({ id: "p9", category: "tactics", due: NOW + 1000 });
-    const all = [builtin, builtinFocus, own, ownFocus, notDue];
+    const all = [generated, generatedFocus, own, ownFocus, notDue];
     const order: string[] = [];
     let pool = all;
     for (;;) {
@@ -243,7 +226,7 @@ describe("spaced repetition", () => {
       order.push(next.problem.id);
       pool = pool.filter((p) => p !== next.problem);
     }
-    expect(order).toEqual(["p2", "b-x", "p1", "b-y"]);
+    expect(order).toEqual(["p2", "gen1", "p1", "gen2"]);
     expect(pickNextProblem(all, { now: NOW, focus: "endgame" })!.problem.id).toBe("p1");
     // Lower boxes first within a group.
     expect(pickNextProblem([gameProblem({ id: "p5", box: 3 }), gameProblem({ id: "p6", box: 1 })], { now: NOW })!.problem.id).toBe("p6");
@@ -265,15 +248,16 @@ describe("GET /api/problems body", () => {
     const problems = [
       gameProblem({ id: "p1", due: NOW + 1000 }),
       gameProblem({ id: "p2", category: "shape", box: 2, source: { gameId: "g1", moveNumber: 5, played: "A1" }, difficulty: 5 }),
-      gameProblem({ id: "b-x", kind: "builtin", category: "tactics" }),
+      gameProblem({ id: "gen1", kind: "generated", category: "tactics" }),
     ];
     const r = problemsResponse(problems, NOW, { category: "tactics", reason: "", suggestion: "problems" });
     expect(r.problems.map((p) => [p.id, p.isDue])).toEqual([
-      ["b-x", true],
+      ["gen1", true],
       ["p2", true],
       ["p1", false],
     ]);
-    expect(r.counts).toEqual({ total: 3, due: 2, fromGames: 2, builtin: 1, byBox: [2, 1, 0, 0, 0], dueByCategory: { tactics: 1, shape: 1 } });
+    expect(r.counts).toEqual({ total: 3, due: 2, fromGames: 2, generated: 1, byBox: [2, 1, 0, 0, 0], dueByCategory: { tactics: 1, shape: 1 } });
+    expect(r.generation).toBeUndefined();
     expect(r.problems[1]).toMatchObject({ source: { gameId: "g1", moveNumber: 5 }, difficulty: 5, answers: ["D7"] });
     expect(r.problems[1]!.source).not.toHaveProperty("played");
   });

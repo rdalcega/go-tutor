@@ -6,7 +6,18 @@ import { GTP_COLUMNS, movePoint } from "../../src/shared/coords.ts";
 import { ratingToRank } from "../../src/shared/rank.ts";
 import { categoryLabel, comeBackText, estimateRankText, rankEstimateText } from "../../src/shared/text.ts";
 import { sizeText, thresholdMultiplier, thresholdNum, thresholdText } from "../../src/shared/threshold.ts";
-import type { Board, Color, GameSettings, MistakeCategory, MoveRecord, Point, ProblemView, Profile } from "../../src/shared/types.ts";
+import type {
+  Board,
+  Color,
+  GameSettings,
+  GenerationBatchStatus,
+  GenerationStatus,
+  MistakeCategory,
+  MoveRecord,
+  Point,
+  ProblemView,
+  Profile,
+} from "../../src/shared/types.ts";
 
 export interface BoardLayout {
   size: number;
@@ -187,10 +198,37 @@ export function latestEstimate(profile: Profile): { short: string; long: string 
   return { short: `${estimateRankText(estimate)} · ${estimate.moves} moves`, long: `Last game: ${rankEstimateText(estimate)}.` };
 }
 
-/** The problem card's title: category, and where the problem comes from. */
-export function problemHeading(p: ProblemView): string {
-  const from = p.source ? `from your game, move ${p.source.moveNumber}` : "classic problem";
+/** The problem card's title: category, and where the problem comes from (`size`: the problem's board). */
+export function problemHeading(p: ProblemView, size = 9): string {
+  const from = p.source
+    ? `from your game, move ${p.source.moveNumber}`
+    : p.generated
+      ? `${size}×${size} · about ${p.generated.difficultyRank}`
+      : "practice problem";
   return `${categoryLabel(p.category, { capitalize: true })} · ${from}`;
+}
+
+/**
+ * The progress card's problem-generation line: "Generating 7/20" while a batch is being made,
+ * else how close the next batch is ("Next batch at 15: 9 mastered"); the details for its tooltip.
+ */
+export function generationFact(g: GenerationStatus | undefined): { short: string; long: string } | null {
+  if (!g) return null;
+  const sizes = (b: GenerationBatchStatus) => b.sizes.map((s) => `${s.found}/${s.target} on ${s.size}×${s.size}`).join(", ");
+  if (g.current) {
+    const paused = g.state === "waiting" ? " It pauses while you play and picks up when KataGo is free." : "";
+    return {
+      short: `Generating ${g.current.found}/${g.current.target}`,
+      long: `New practice problems from games KataGo plays against itself at ${g.current.weakerRank} vs ${g.current.strongerRank}: ${sizes(g.current)}. Each joins Practice as soon as it's found.${paused}`,
+    };
+  }
+  if (g.last) {
+    return {
+      short: `${g.last.mastered}/${g.last.needed} mastered`,
+      long: `Batch ${g.last.number}: ${g.last.problems} generated problems around ${g.last.band}. Master ${g.last.needed} of them (solve each on the first try twice) and a new batch is made at your level.`,
+    };
+  }
+  return null;
 }
 
 /** "2 attempts left", "1 attempt left", or "" once the problem is over. */

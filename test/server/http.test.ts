@@ -4,13 +4,12 @@ import type { Server } from "node:http";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { TutorBridge, parseClientAction, parseTutorCommand, type StreamHello } from "../../src/server/bridge.ts";
-import { BUILTIN_PROBLEMS } from "../../src/server/builtin-problems.ts";
 import { GameController } from "../../src/server/game.ts";
 import { crashLimiter, createApp, isAllowedOrigin } from "../../src/server/index.ts";
 import { Store, defaultProfile } from "../../src/server/store.ts";
 import type { GameView, ProblemsResponse, ProfileResponse, TutorEvent } from "../../src/shared/types.ts";
 import { SseParser } from "../../src/cli/sse.ts";
-import { FakeEngine, flush, tempDir, tempStore } from "./fakes.ts";
+import { FakeEngine, flush, liveProblem, seedProblems, tempDir, tempStore } from "./fakes.ts";
 
 describe("request validation", () => {
   it("accepts well-formed actions and commands", () => {
@@ -36,6 +35,7 @@ describe("request validation", () => {
     expect(() => parseTutorCommand({ type: "tag", gameId: "g", moveNumber: 3, category: "shape", takenBack: 0 })).toThrow(/takenBack/);
     expect(parseClientAction({ type: "set_tutor_level", level: "point_out" })).toEqual({ type: "set_tutor_level", level: "point_out" });
     expect(parseTutorCommand({ type: "start_problem", problemId: "p3" })).toEqual({ type: "start_problem", problemId: "p3" });
+    expect(parseTutorCommand({ type: "generate", extra: 1 })).toEqual({ type: "generate" });
     expect(parseTutorCommand({ type: "tag", gameId: "g", moveNumber: 3, category: "shape" })).toEqual({
       type: "tag",
       gameId: "g",
@@ -77,15 +77,22 @@ describe("Store", () => {
     expect(store.loadProfile()).toEqual(defaultProfile());
   });
 
-  it("keeps practice problems with built-in progress, and sets a corrupt problems file aside", () => {
+  it("keeps practice problems with their progress, and sets a corrupt problems file aside", () => {
     const store = tempStore();
-    const problems = store.loadProblems();
-    expect(problems.map((p) => p.id)).toEqual(BUILTIN_PROBLEMS.map((p) => p.id));
-    problems[0]!.box = 3;
-    store.saveProblems(problems);
+    expect(store.loadProblems()).toEqual([]);
+    store.saveProblems([liveProblem({ box: 3 })]);
     expect(store.loadProblems()[0]!.box).toBe(3);
     writeFileSync(join(store.dir, "problems.json"), "{not json");
-    expect(store.loadProblems()[0]!.box).toBe(1);
+    expect(store.loadProblems()).toEqual([]);
+  });
+
+  it("keeps generation.json, and sets a corrupt one aside", () => {
+    const store = tempStore();
+    expect(store.loadGeneration()).toEqual({ version: 1, batches: [], progress: null });
+    store.saveGeneration({ version: 1, batches: [], progress: { batchId: "batch1", game: { size: 9, weaker: "B", moves: ["E5"] }, reserve: [] } });
+    expect(store.loadGeneration().progress?.game?.moves).toEqual(["E5"]);
+    writeFileSync(join(store.dir, "generation.json"), "{not json");
+    expect(store.loadGeneration()).toEqual({ version: 1, batches: [], progress: null });
   });
 
   it("creates the data dir on demand and reads events since a seq", () => {
@@ -126,7 +133,14 @@ describe("HTTP server", () => {
     server = null;
   });
 
-  async function start(distDir?: string, store = tempStore(), log?: (msg: string) => void) {
+  /** A data dir with one practice problem, a generated one. */
+  function seededStore(): Store {
+    const store = tempStore();
+    seedProblems(store);
+    return store;
+  }
+
+  async function start(distDir?: string, store = seededStore(), log?: (msg: string) => void) {
     server?.closeAllConnections();
     server?.close();
     bridge?.close();
@@ -338,11 +352,14 @@ describe("HTTP server", () => {
     const res = await fetch(`${base}/api/problems`);
     expect(res.status).toBe(200);
     const body = (await res.json()) as ProblemsResponse;
-    expect(body.counts).toMatchObject({ total: BUILTIN_PROBLEMS.length, due: BUILTIN_PROBLEMS.length, fromGames: 0, builtin: BUILTIN_PROBLEMS.length });
-    expect(body.counts.byBox[0]).toBe(BUILTIN_PROBLEMS.length);
+    expect(body.counts).toMatchObject({ total: 1, due: 1, fromGames: 0, generated: 1 });
+    expect(body.counts.byBox[0]).toBe(1);
     expect(body.focus.category).toBe("life_and_death");
     // Due first, the focus category first among them.
-    expect(body.problems[0]).toMatchObject({ kind: "builtin", category: "life_and_death", box: 1, isDue: true });
+    expect(body.problems[0]).toMatchObject({ kind: "generated", size: 9, category: "life_and_death", box: 1, isDue: true, generated: { batchId: "batch1", difficultyRank: "17k" } });
+    // No batch has started (the server starts generation, this test doesn't).
+    expect(body.generation).toMatchObject({ state: "idle", current: null, last: null, batches: 0 });
+    expect(await (await fetch(`${base}/api/generation`)).json()).toEqual(body.generation);
     // A cross-site page can't read it.
     expect((await fetch(`${base}/api/problems`, { headers: { origin: "https://evil.example" } })).status).toBe(403);
 

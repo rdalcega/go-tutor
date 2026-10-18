@@ -15,6 +15,9 @@ import type {
   GameSettings,
   GameSummary,
   GameView,
+  GeneratedProblemInfo,
+  GenerationBatchStatus,
+  GenerationStatus,
   Move,
   MoveRecord,
   Overlay,
@@ -77,6 +80,56 @@ export function ratingChangeText(r: RatingChange): string {
 }
 
 const lowerFirst = (s: string) => s.charAt(0).toLowerCase() + s.slice(1);
+
+/**
+ * Where a problem comes from: "from g12 move 14", or "generated 13x13, difficulty 14k, batch2"
+ * ("built-in" for the old starter problems in events logged before they were removed).
+ */
+export function problemOrigin(p: { source?: { gameId: string; moveNumber: number }; generated?: GeneratedProblemInfo; size?: number }): string {
+  if (p.source) return `from ${p.source.gameId} move ${p.source.moveNumber}`;
+  const size = p.size ?? 9;
+  if (p.generated) return `generated ${size}x${size}, difficulty ${p.generated.difficultyRank}, ${p.generated.batchId}`;
+  return "built-in";
+}
+
+/** "batch2 (17k vs 12k): 7/20 (9x9 3/7, 13x13 2/7, 19x19 2/6)". */
+function batchText(b: GenerationBatchStatus): string {
+  const sizes = b.sizes.map((s) => `${s.size}x${s.size} ${s.found}/${s.target}`).join(", ");
+  return `${b.id} (${b.weakerRank} vs ${b.strongerRank}): ${b.found}/${b.target} (${sizes})`;
+}
+
+/** KataGo time per board size: "9x9 12 min (5 games), 13x13 …". */
+function batchTimeText(b: GenerationBatchStatus): string {
+  const total = b.sizes.reduce((sum, s) => sum + s.minutes, 0);
+  return `${b.sizes.map((s) => `${s.size}x${s.size} ${num(s.minutes)} min (${s.games} game${s.games === 1 ? "" : "s"})`).join(", ")}; ${num(total)} min in all`;
+}
+
+/** Problem generation in `summary`: the batch in progress, or how close the next one is. */
+export function generationLines(g: GenerationStatus): string[] {
+  const out: string[] = [];
+  if (g.current) {
+    const state = g.state === "generating" ? "generating now" : "paused while the learner plays (or KataGo is starting)";
+    out.push(`problem generation: ${batchText(g.current)}, ${state}; difficulty band ${g.current.band}; new problems join practice as they're found`);
+  }
+  if (g.last) {
+    const next = g.current ? "" : `; the next batch starts at ${g.last.needed} mastered (box 3+): ${g.last.mastered}/${g.last.needed}`;
+    out.push(`last generated batch: ${g.last.id} (${g.last.weakerRank} vs ${g.last.strongerRank}), ${g.last.problems} problems, difficulty band ${g.last.band}${next}`);
+  }
+  if (!g.current && !g.last) out.push("problem generation: no batch yet (the first starts once KataGo is ready)");
+  return out;
+}
+
+/** `tutor generate --status`: the batch in progress and the last finished one, with KataGo time per board size. */
+export function formatGeneration(g: GenerationStatus): string {
+  const out = generationLines(g);
+  if (g.current) out.push(`  time so far: ${batchTimeText(g.current)}`);
+  if (g.last) {
+    const took = g.last.finishedAt !== undefined ? `, finished ${new Date(g.last.finishedAt).toLocaleString()}` : "";
+    out.push(`  ${g.last.id} took: ${batchTimeText(g.last)}${took}`);
+  }
+  out.push(`finished batches: ${g.batches}`);
+  return out.join("\n");
+}
 
 export interface EventContext {
   /** Current time (ms epoch) for countdowns. Default Date.now(). */
@@ -160,12 +213,18 @@ function formatKnownEvent(e: TutorEvent, ctx: EventContext): string {
     }
     case "rating":
       return `RATING ${e.gameId} ${ratingChangeText(e.rating)}`;
-    case "problem_start": {
-      const from = e.source ? `from ${e.source.gameId} move ${e.source.moveNumber}` : "built-in";
+    case "problem_start":
       return (
-        `PROBLEM_START ${e.problemId} ${e.category} ${e.toPlay} to play (${from}, box ${e.box}) answers ${e.answers.join(",")} — ` +
+        `PROBLEM_START ${e.problemId} ${e.category} ${e.toPlay} to play (${problemOrigin(e)}, box ${e.box}) answers ${e.answers.join(",")} — ` +
         `${quote(e.prompt)} — run: state; let them try, don't give the answer`
       );
+    case "generation": {
+      const b = e.batch;
+      if (e.status === "started") {
+        return `BATCH ${b.id} started (${b.trigger}): ${b.target} problems from ${b.weakerRank} vs ${b.strongerRank} self-play, difficulty band ${b.band}; they join practice as they're found`;
+      }
+      const sizes = b.sizes.map((s) => `${s.found} on ${s.size}x${s.size}`).join(", ");
+      return `BATCH ${b.id} finished: ${b.found} new problems (${sizes}), difficulty band ${b.band} — tell the learner when it fits (not mid-game on Silent)`;
     }
     case "problem_attempt": {
       const head = `PROBLEM ${e.problemId} attempt ${e.attempt} ${e.move}`;
@@ -226,8 +285,8 @@ function chatLine(c: ChatMessage): string {
 }
 
 /** The problem on the board in problem mode: what it is, where the learner is, and the answer once shown. */
-export function problemLines(p: ProblemView): string[] {
-  const from = p.source ? `from ${p.source.gameId} move ${p.source.moveNumber}` : "built-in";
+export function problemLines(p: ProblemView, size?: number): string[] {
+  const from = problemOrigin({ ...p, ...(size !== undefined && { size }) });
   const state = p.revealed ? (p.solved ? "solved" : "answer shown") : `attempt ${p.attempts + 1} of ${p.maxAttempts}`;
   const lines = [`problem ${p.id} ${p.category} (${from}, box ${p.box}) ${p.toPlay} to play, ${state}: ${p.prompt}`];
   const a = p.lastAttempt;
@@ -300,7 +359,7 @@ export function formatState(v: GameView, now = Date.now(), chatTail = 8): string
     out.push(`mistake threshold ${thresholdNum(v.mistakeThreshold)} pts on ${sizeText(size)} (a move losing this much or more is a teaching moment)`);
   }
   if (v.result) out.push(`result ${resultText(v.result)}`);
-  if (v.problem) out.push(...problemLines(v.problem));
+  if (v.problem) out.push(...problemLines(v.problem, size));
   if (v.board.length > 0) {
     out.push("", toAscii(v.board, movePoint(v.moves.at(-1)?.move)), "");
   }
@@ -429,7 +488,7 @@ export function dueText(due: number, now: number): string {
 }
 
 function problemItemText(p: ProblemListItem, now: number, withAnswers: boolean): string {
-  const bits = [p.id, p.category, p.source ? `from ${p.source.gameId} move ${p.source.moveNumber}` : "built-in"];
+  const bits = [p.id, p.category, problemOrigin(p)];
   if (p.difficulty !== undefined) bits.push(`(lost ${num(p.difficulty)})`);
   bits.push(`box ${p.box}`, `due ${dueText(p.due, now)}`);
   if (p.seen) bits.push(`solved ${p.solves}/${p.seen}${p.lastResult ? ` last ${p.lastResult}` : ""}`);
@@ -444,16 +503,17 @@ export function formatProblems(r: ProblemsResponse, now = Date.now(), show = 5):
     .sort((a, b) => b[1] - a[1])
     .map(([cat, n]) => `${cat} ${n}`);
   const head =
-    `practice problems: ${c.total} (${c.fromGames} from the learner's games, ${c.builtin} built-in), ` +
+    `practice problems: ${c.total} (${c.fromGames} from the learner's games, ${c.generated} generated), ` +
     `${c.due} due now${dueCats.length ? ` (${dueCats.join(", ")})` : ""}; boxes ${c.byBox.map((n, i) => `${i + 1}:${n}`).join(" ")}`;
+  const generation = r.generation ? generationLines(r.generation) : [];
   const due = r.problems.filter((p) => p.isDue).slice(0, show);
-  if (due.length === 0) return `${head}\nnothing is due; "problem" still starts the one due soonest`;
-  return [`${head}`, `next due (the first is what "problem" starts):`, ...due.map((p) => `  ${problemItemText(p, now, false)}`)].join("\n");
+  if (due.length === 0) return [head, ...generation, `nothing is due${c.total ? `; "problem" still starts the one due soonest` : ""}`].join("\n");
+  return [head, ...generation, `next due (the first is what "problem" starts):`, ...due.map((p) => `  ${problemItemText(p, now, false)}`)].join("\n");
 }
 
 /** `tutor problems`: every problem in the order next_problem picks them, with the accepted answers. */
 export function formatProblemList(r: ProblemsResponse, now = Date.now()): string {
-  const out = [`problems: ${r.counts.total}, ${r.counts.due} due; focus ${r.focus.category} (next_problem prefers it, then the learner's own, then built-ins)`];
+  const out = [`problems: ${r.counts.total}, ${r.counts.due} due; focus ${r.focus.category} (next_problem prefers it, then the learner's own, then generated)`];
   for (const p of r.problems) out.push(`  ${problemItemText(p, now, true)}`);
   out.push("start one with: problem <id> (or problem for the next due)");
   return out.join("\n");

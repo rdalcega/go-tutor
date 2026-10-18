@@ -374,6 +374,7 @@ export function parseTutorCommand(body: unknown): TutorCommand {
     }
     case "clear":
     case "resume":
+    case "generate":
       return { type: o.type };
     case "claim":
       return { type: "claim", momentId: str(o, "momentId", true) };

@@ -1,10 +1,10 @@
-// Practice problems: built from the learner's own mistakes when a game ends, plus a built-in
-// starter set (builtin-problems.ts), scheduled with Leitner boxes and judged against KataGo.
+// Practice problems: built from the learner's own mistakes when a game ends, and generated from
+// KataGo's self-play (generate.ts), scheduled with Leitner boxes and judged against KataGo.
 // Mostly pure functions over StoredProblem; `generateProblems` makes the KataGo calls for a
 // finished game through the controller (game.ts), and store.ts reads and writes data/problems.json.
 
 import { createHash } from "node:crypto";
-import { GoGame, boardFromDiagram, emptyBoard, gameBefore, gameFromLine, opponent, positionKey, setCell } from "../engine/index.ts";
+import { GoGame, emptyBoard, gameBefore, gameFromLine, opponent, positionKey, setCell } from "../engine/index.ts";
 import { toGtp, tryFromGtp } from "../shared/coords.ts";
 import { MAX_BOX } from "../shared/schedule.ts";
 import { colorName, round1 } from "../shared/text.ts";
@@ -14,14 +14,16 @@ import type {
   FocusRecommendation,
   GameSettings,
   GameSummary,
+  GeneratedProblemInfo,
+  GenerationStatus,
   Gtp,
   MistakeCategory,
   MoveRecord,
+  ProblemKind,
   ProblemListItem,
   ProblemsResponse,
   TakenBackMove,
 } from "../shared/types.ts";
-import { BUILTIN_PROBLEMS, type BuiltinProblem } from "./builtin-problems.ts";
 import { BACKGROUND_PRIORITY, TRUSTED_CANDIDATE_VISITS, type Analysis, type AnalyzeOptions, type Position } from "./katago.ts";
 import { mistakeKey } from "./profile.ts";
 
@@ -36,12 +38,31 @@ export const THIN_VISITS = 200;
 /** Visits for that re-analysis. */
 export const DEEP_VISITS = 1000;
 
+/** Where a problem from the learner's game comes from. `takenBack`: a first attempt that was taken back (its index in the game's `takenBack`). */
+export interface GameProblemSource {
+  kind?: "game";
+  gameId: string;
+  moveNumber: number;
+  played: Gtp;
+  takenBack?: number;
+}
+
+/** Where a generated problem comes from: a mistake by the weaker side of a self-play game (generate.ts). */
+export interface GeneratedProblemSource extends GeneratedProblemInfo {
+  kind: "generated";
+  /** On the rank scale (20k = 10), unrounded: where the answers' human-SL probability crosses 50%. */
+  difficultyRating: number;
+  /** The mistake in the self-play game: its move number and the move played (in the problem's coordinates). */
+  moveNumber: number;
+  played: Gtp;
+  /** The mistake was White's: every stone's color was swapped so Black is to play. */
+  swapped: boolean;
+}
+
 /** One problem in data/problems.json. */
 export interface StoredProblem {
   id: string;
-  kind: "game" | "builtin";
-  /** What a built-in problem teaches (for the tutor). */
-  title?: string;
+  kind: ProblemKind;
   size: number;
   komi: number;
   /** The position: every stone on the board, as GTP. */
@@ -51,13 +72,12 @@ export interface StoredProblem {
   category: MistakeCategory;
   /** Accepted answers: KataGo's moves within ANSWER_MARGIN of its best, plus moves later found to be as good. */
   answers: Gtp[];
-  /** KataGo's best move and line when the problem was made (game problems). */
+  /** KataGo's best move and line when the problem was made. */
   bestMove?: Gtp;
   bestPv?: Gtp[];
-  /** Points the learner's move lost in the game. */
+  /** Points the mistake lost: the learner's move in their game, or the weaker side's in self-play. */
   difficulty?: number;
-  /** `takenBack`: made from a first attempt that was taken back (its index in the game's `takenBack`). */
-  source?: { gameId: string; moveNumber: number; played: Gtp; takenBack?: number };
+  source?: GameProblemSource | GeneratedProblemSource;
   /** Hash of the position and side to move; one problem per position. */
   hash: string;
   createdAt: number;
@@ -77,6 +97,22 @@ export interface Candidate {
   lead: number;
   visits: number;
   pv: Gtp[];
+}
+
+/** The learner's game and move a problem comes from, or undefined for a generated problem. */
+export function gameSource(p: Pick<StoredProblem, "source">): GameProblemSource | undefined {
+  return p.source && p.source.kind !== "generated" ? p.source : undefined;
+}
+
+/** A generated problem's self-play source, or undefined for a problem from the learner's game. */
+export function generatedSource(p: Pick<StoredProblem, "source">): GeneratedProblemSource | undefined {
+  return p.source?.kind === "generated" ? p.source : undefined;
+}
+
+/** What views, events and lists show of a generated problem's origin. */
+export function generatedInfo(p: Pick<StoredProblem, "source">): GeneratedProblemInfo | undefined {
+  const s = generatedSource(p);
+  return s && { batchId: s.batchId, difficultyRank: s.difficultyRank, weakerRank: s.weakerRank, strongerRank: s.strongerRank };
 }
 
 // ---------------------------------------------------------------------------
@@ -126,60 +162,12 @@ export function positionHash(board: Board, toPlay: Color): string {
   return createHash("sha1").update(`${board.length}|${toPlay}|${positionKey(board)}`).digest("hex").slice(0, 16);
 }
 
-// ---------------------------------------------------------------------------
-// Built-in problems
-// ---------------------------------------------------------------------------
-
-export function builtinProblem(def: BuiltinProblem): StoredProblem {
-  const board = boardFromDiagram(def.board);
-  return {
-    id: def.id,
-    kind: "builtin",
-    title: def.title,
-    size: board.length,
-    komi: 7,
-    stones: stonesOf(board),
-    toPlay: def.toPlay,
-    prompt: def.prompt,
-    category: def.category,
-    answers: [...def.answers],
-    hash: positionHash(board, def.toPlay),
-    createdAt: 0,
-    box: 1,
-    due: 0,
-    seen: 0,
-    solves: 0,
-  };
-}
-
-/** The built-in set as fresh problems, parsed once. */
-const BUILTINS: readonly StoredProblem[] = BUILTIN_PROBLEMS.map(builtinProblem);
-
 /**
- * The stored problems with the built-in set merged in: a built-in's position, prompt and answers
- * come from the source file (plus any answers found since), its progress from the stored copy.
- * Built-ins no longer in the source are dropped.
+ * The built-in starter problems this app used to ship (ids "b-…", kind "builtin"), which generated
+ * problems replaced. The startup migration (generate.ts) removes them from problems.json.
  */
-export function withBuiltins(stored: readonly StoredProblem[]): StoredProblem[] {
-  const byId = new Map(stored.map((p) => [p.id, p]));
-  const builtins = BUILTINS.map((builtin) => {
-    // A copy: callers change problems in place (scheduling, new answers).
-    const fresh = { ...builtin, answers: [...builtin.answers] };
-    const old = byId.get(builtin.id);
-    if (!old) return fresh;
-    const { box, due, seen, solves, lastResult, lastSeen } = old;
-    return {
-      ...fresh,
-      box,
-      due,
-      seen,
-      solves,
-      ...(lastResult && { lastResult }),
-      ...(lastSeen !== undefined && { lastSeen }),
-      answers: [...new Set([...fresh.answers, ...(old.answers ?? [])])],
-    };
-  });
-  return [...stored.filter((p) => p.kind !== "builtin"), ...builtins];
+export function isLegacyBuiltin(p: { id?: unknown; kind?: unknown }): boolean {
+  return p.kind === "builtin";
 }
 
 // ---------------------------------------------------------------------------
@@ -276,13 +264,17 @@ export function nextProblemId(problems: readonly Pick<StoredProblem, "id">[]): s
   return `p${max + 1}`;
 }
 
-/** Adds new problems, skipping any whose position (or source move, `mistakeKey`) is already a problem. */
+/** Adds new problems, skipping any whose position (or, from the learner's game, source move: `mistakeKey`) is already a problem. */
 export function addProblems(problems: StoredProblem[], fresh: readonly StoredProblem[]): StoredProblem[] {
+  const keyOf = (p: StoredProblem) => {
+    const source = gameSource(p);
+    return source ? mistakeKey(source) : null;
+  };
   const hashes = new Set(problems.map((p) => p.hash));
-  const sources = new Set(problems.flatMap((p) => (p.source ? [mistakeKey(p.source)] : [])));
+  const sources = new Set(problems.flatMap((p) => keyOf(p) ?? []));
   const added: StoredProblem[] = [];
   for (const p of fresh) {
-    const source = p.source ? mistakeKey(p.source) : null;
+    const source = keyOf(p);
     if (hashes.has(p.hash) || (source && sources.has(source))) continue;
     hashes.add(p.hash);
     if (source) sources.add(source);
@@ -406,8 +398,9 @@ export async function generateProblems(
 // Leitner boxes: src/shared/schedule.ts (BOX_INTERVALS, MAX_BOX, resultOf, schedule).
 
 /**
- * Selection order: problems in the focus category first (the learner's own before built-ins), then
- * the learner's own problems, then built-ins; within a group, lower boxes and older due times first.
+ * Selection order: problems in the focus category first (the learner's own before generated ones),
+ * then the learner's own problems, then generated ones; within a group, lower boxes and older due
+ * times first.
  */
 function rank(p: StoredProblem, focus: MistakeCategory | undefined): [number, number, number, number] {
   const group = p.category === focus ? (p.kind === "game" ? 0 : 1) : p.kind === "game" ? 2 : 3;
@@ -445,9 +438,12 @@ export function pickNextProblem(
 // ---------------------------------------------------------------------------
 
 export function listItem(p: StoredProblem, now: number): ProblemListItem {
+  const source = gameSource(p);
+  const generated = generatedInfo(p);
   return {
     id: p.id,
     kind: p.kind,
+    size: p.size,
     category: p.category,
     toPlay: p.toPlay,
     prompt: p.prompt,
@@ -458,13 +454,14 @@ export function listItem(p: StoredProblem, now: number): ProblemListItem {
     seen: p.seen,
     solves: p.solves,
     ...(p.lastResult && { lastResult: p.lastResult }),
-    ...(p.source && { source: { gameId: p.source.gameId, moveNumber: p.source.moveNumber } }),
+    ...(source && { source: { gameId: source.gameId, moveNumber: source.moveNumber } }),
     ...(p.difficulty !== undefined && { difficulty: p.difficulty }),
+    ...(generated && { generated }),
   };
 }
 
 /** GET /api/problems. */
-export function problemsResponse(problems: readonly StoredProblem[], now: number, focus: FocusRecommendation): ProblemsResponse {
+export function problemsResponse(problems: readonly StoredProblem[], now: number, focus: FocusRecommendation, generation?: GenerationStatus): ProblemsResponse {
   const ordered = orderProblems(problems, now, focus.category);
   const due = ordered.filter((p) => p.due <= now);
   const byBox = Array.from({ length: MAX_BOX }, (_, i) => problems.filter((p) => p.box === i + 1).length);
@@ -476,10 +473,11 @@ export function problemsResponse(problems: readonly StoredProblem[], now: number
       total: problems.length,
       due: due.length,
       fromGames: problems.filter((p) => p.kind === "game").length,
-      builtin: problems.filter((p) => p.kind === "builtin").length,
+      generated: problems.filter((p) => p.kind === "generated").length,
       byBox,
       dueByCategory,
     },
     focus,
+    ...(generation && { generation }),
   };
 }

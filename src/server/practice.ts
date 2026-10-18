@@ -5,10 +5,11 @@
 import { toAscii, type GoGame } from "../engine/index.ts";
 import { samePoint, toGtp } from "../shared/coords.ts";
 import { round1 } from "../shared/text.ts";
+import { sizeText } from "../shared/threshold.ts";
 import type { ClientAction, Color, GameSettings, GameView, Gtp, Overlay, Point, ProblemAttempt, TutorCommand } from "../shared/types.ts";
 import { ILLEGAL_TEXT, PV_STONES, UserError, alternatingStones, lineStones, plural, type TutorEventInput } from "./common.ts";
 import { TRUSTED_CANDIDATE_VISITS, moveEvalFrom, type Analysis, type Engine } from "./katago.ts";
-import { ANSWER_MARGIN, MAX_ATTEMPTS, problemGame, problemPosition, promptFor, type StoredProblem } from "./problems.ts";
+import { ANSWER_MARGIN, MAX_ATTEMPTS, gameSource, generatedInfo, problemGame, problemPosition, promptFor, type StoredProblem } from "./problems.ts";
 
 /** Moves of the follow-up drawn after a correct answer: the answer, the opponent's best reply, the next move. */
 const ANSWER_LINE_LENGTH = 3;
@@ -77,9 +78,14 @@ export class PracticeSession {
   /** Put the problem on the board: tell the learner and the tutor, and let KataGo read the position. */
   start(early: boolean): void {
     const { problem } = this;
-    const source = problem.source;
+    const source = gameSource(problem);
+    const generated = generatedInfo(problem);
     const firstTry = source?.takenBack !== undefined ? ", your first try before the take-back" : "";
-    const from = source ? ` from your game ${source.gameId} (move ${source.moveNumber}${firstTry})` : "";
+    const from = source
+      ? ` from your game ${source.gameId} (move ${source.moveNumber}${firstTry})`
+      : generated
+        ? ` on ${sizeText(problem.size)} (about ${generated.difficultyRank} level)`
+        : "";
     this.deps.system(`Practice problem${from}: ${problem.prompt}${early ? " (Nothing is due right now, so this is an early review.)" : ""}`);
     this.deps.emit({
       type: "problem_start",
@@ -90,7 +96,9 @@ export class PracticeSession {
       prompt: problem.prompt,
       answers: [...problem.answers],
       box: problem.box,
-      ...(problem.source && { source: { gameId: problem.source.gameId, moveNumber: problem.source.moveNumber } }),
+      size: problem.size,
+      ...(source && { source: { gameId: source.gameId, moveNumber: source.moveNumber } }),
+      ...(generated && { generated }),
       board: toAscii(this.game.board, null),
     });
     if (this.deps.engineNotReady() === null) this.analysis([]).catch(() => {});
@@ -154,8 +162,10 @@ export class PracticeSession {
     return { revealed: this.revealed, checking: this.checking };
   }
 
-  view(common: Pick<GameView, "chat" | "tutorAttached" | "tutorLevel" | "engineBusy" | "profileVersion" | "allowed" | "mistakeThreshold">, botRank: string): GameView {
+  view(common: Pick<GameView, "chat" | "tutorAttached" | "tutorLevel" | "engineBusy" | "profileVersion" | "allowed" | "mistakeThreshold" | "generation">, botRank: string): GameView {
     const { problem } = this;
+    const source = gameSource(problem);
+    const generated = generatedInfo(problem);
     return {
       gameId: null,
       mode: "problem",
@@ -173,7 +183,8 @@ export class PracticeSession {
       problem: {
         id: problem.id,
         prompt: problem.prompt,
-        ...(problem.source && { source: { gameId: problem.source.gameId, moveNumber: problem.source.moveNumber } }),
+        ...(source && { source: { gameId: source.gameId, moveNumber: source.moveNumber } }),
+        ...(generated && { generated }),
         attempts: this.attempts,
         solved: this.solved,
         kind: problem.kind,

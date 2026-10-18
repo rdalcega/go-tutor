@@ -1,9 +1,9 @@
 // Entry point: `npm run -s tutor -- <command> [args]`.
 
-import type { FocusRecommendation, ProblemsResponse, Profile, ProfileResponse, SavedGame } from "../shared/types.ts";
+import type { FocusRecommendation, GenerationStatus, ProblemsResponse, Profile, ProfileResponse, SavedGame } from "../shared/types.ts";
 import { parseInvocation, UsageError, type Invocation } from "./args.ts";
 import { Client, ServerError, serverUrl } from "./client.ts";
-import { commandJson, commandOutput, formatProblemList, formatProblems, formatProfile, formatReview, formatState, reviewThreshold } from "./format.ts";
+import { commandJson, commandOutput, formatGeneration, formatProblemList, formatProblems, formatProfile, formatReview, formatState, reviewThreshold } from "./format.ts";
 import { HELP, USAGE } from "./help.ts";
 import { watch } from "./watch.ts";
 
@@ -37,6 +37,15 @@ async function problems(client: Client, json: boolean): Promise<void> {
   const body = await getProblems(client);
   if (!body) throw new ServerError("this server has no practice problems (GET /api/problems failed)", 404);
   print(json ? JSON.stringify(body) : formatProblemList(body));
+}
+
+/** `generate`: with `now`, start the next batch of generated problems first; then print the status. */
+async function generate(client: Client, now: boolean, json: boolean): Promise<void> {
+  // The command's view carries the status; a status query reads it on its own.
+  const status = now ? ((await client.send({ type: "generate" })).generation ?? null) : await client.getJson<GenerationStatus>("/api/generation");
+  if (!status) throw new ServerError("this server doesn't generate problems (GET /api/generation returned 404)", 404);
+  if (json) print(JSON.stringify(status));
+  else print(`${now ? `ok started ${status.current?.id ?? "a batch"}\n` : ""}${formatGeneration(status)}`);
 }
 
 async function review(client: Client, gameId: string, json: boolean): Promise<void> {
@@ -78,6 +87,8 @@ async function run(inv: Invocation, client: Client): Promise<void> {
       return problems(client, inv.json);
     case "review":
       return review(client, inv.gameId, inv.json);
+    case "generate":
+      return generate(client, inv.now, inv.json);
     case "command": {
       const view = await client.send(inv.command);
       print(inv.json ? commandJson(inv.command, view) : commandOutput(inv.command, view));

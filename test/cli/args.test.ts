@@ -22,6 +22,12 @@ describe("parseInvocation", () => {
     expect(parseInvocation(["state", "--json"])).toEqual({ kind: "state", json: true });
     expect(parseInvocation(["review"])).toEqual({ kind: "review", gameId: "last", json: false });
     expect(parseInvocation(["review", "g12"])).toEqual({ kind: "review", gameId: "g12", json: false });
+    expect(parseInvocation(["generate"])).toEqual({ kind: "generate", now: false, json: false });
+    expect(parseInvocation(["generate", "--status", "--json"])).toEqual({ kind: "generate", now: false, json: true });
+    expect(parseInvocation(["generate", "--now"])).toEqual({ kind: "generate", now: true, json: false });
+    expect(() => parseInvocation(["generate", "--now", "--status"])).toThrow(/not both/);
+    expect(() => parseInvocation(["generate", "batch2"])).toThrow(/takes no arguments/);
+    expect(() => parseInvocation(["generate", "--soon", "1"])).toThrow(/unknown option --soon/);
     expect(parseInvocation(["problems", "--json"])).toEqual({ kind: "problems", json: true });
     expect(() => parseInvocation(["problems", "p4"])).toThrow(/takes no arguments/);
   });

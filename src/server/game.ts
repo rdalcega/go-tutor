@@ -25,6 +25,7 @@ import {
   type GameStatus,
   type GameSummary,
   type GameView,
+  type GenerationStatus,
   type Gtp,
   type MistakeCategory,
   type Move,
@@ -53,10 +54,11 @@ import {
   type TutorEventInput,
 } from "./common.ts";
 import { estimateRank, rankSamples } from "./estimate.ts";
+import { ProblemGenerator } from "./generate.ts";
 import { moveEvalFrom, type Analysis, type Engine, type Position } from "./katago.ts";
 import { migrateRatingModel } from "./migrate.ts";
 import { PracticeSession, type PracticeDeps } from "./practice.ts";
-import { generateProblems, pickNextProblem, promptFor, resultOf, schedule, type StoredProblem } from "./problems.ts";
+import { gameSource, generateProblems, pickNextProblem, promptFor, resultOf, schedule, type StoredProblem } from "./problems.ts";
 import {
   applyEstimate,
   applyGame,
@@ -92,7 +94,17 @@ export interface ControllerOptions {
   /** Visits for checking a practice-problem attempt. Default 600. */
   problemVisits?: number;
   log?: (msg: string) => void;
+  /** Receives problem generation's per-candidate lines (generate.ts), for tuning its filters. */
+  debug?: (msg: string) => void;
+  /** RNG for problem generation's self-play moves. Default Math.random. */
+  random?: () => number;
 }
+
+/**
+ * After the learner's last action, problem generation waits this long before it uses KataGo again
+ * (the evals, the bot's reply and the next analysis come first).
+ */
+export const LEARNER_ACTIVE_MS = 10_000;
 
 export const DEFAULT_SETTINGS: Omit<GameSettings, "botRank"> = { size: 9, komi: 7, humanColor: "B", handicap: 0 };
 const CHAT_LIMIT = 200;
@@ -200,6 +212,10 @@ export class GameController {
   private practice: PracticeSession | null = null;
   /** The problem shown last, so Next problem moves on to a different one. */
   private lastProblemId: string | undefined;
+  /** Generated practice problems, made in the background while the learner doesn't need KataGo. */
+  private readonly generator: ProblemGenerator;
+  /** When the learner (or the tutor) last did something; problem generation waits LEARNER_ACTIVE_MS after it. */
+  private lastActivity = -Infinity;
 
   /** Bumped whenever a pending engine reply could become stale. */
   private gen = 0;
@@ -244,6 +260,61 @@ export class GameController {
       addAnswer: (id, move) => this.addProblemAnswer(id, move),
       recordResult: (problem, solved, attempts) => this.recordProblemResult(problem, solved, attempts),
     };
+    this.generator = new ProblemGenerator({
+      engine: this.engine,
+      store: this.store,
+      clock: this.clock,
+      log: this.log,
+      ...(opts.debug && { debug: opts.debug }),
+      ...(opts.random && { random: opts.random }),
+      rating: () => this.profile.rating,
+      mayRun: () => this.engineFreeForGeneration(),
+      updateProblems: (change) => this.updateProblems(change),
+      changed: () => this.changed(),
+      emit: (e) => this.emit(e),
+      system: (text) => this.system(text),
+    });
+  }
+
+  /**
+   * Start generating practice problems in the background: resume the batch in progress, or start
+   * the next one if it is due (the first one when there is none). It runs whenever KataGo is ready
+   * and the learner isn't using it.
+   */
+  startGeneration(): void {
+    this.generator.start();
+  }
+
+  /** Problem generation's status (GET /api/generation, and every view's `generation`). */
+  generationStatus(): GenerationStatus {
+    return this.generator.status();
+  }
+
+  /** Stop problem generation (shutdown); the batch in progress resumes at the next start. */
+  stopGeneration(): Promise<void> {
+    this.generator.stop();
+    return this.generator.idle();
+  }
+
+  /**
+   * Whether problem generation may use KataGo now: it is ready, nothing the learner waits on is in
+   * flight (a move eval, the bot's move, scoring, a hint, a problem check), and the learner has been
+   * idle for LEARNER_ACTIVE_MS.
+   */
+  private engineFreeForGeneration(): boolean {
+    return (
+      this.engineState === "ready" &&
+      this.busy === 0 &&
+      this.evaluating === null &&
+      this.botFor === null &&
+      this.clock.now() - this.lastActivity >= LEARNER_ACTIVE_MS
+    );
+  }
+
+  /** The learner or the tutor did something: problem generation steps aside (its query in flight is cancelled). */
+  private noteActivity(): void {
+    this.lastActivity = this.clock.now();
+    this.generator.noteActivity();
   }
 
   onEvent(fn: (e: TutorEventInput) => void): void {
@@ -266,6 +337,7 @@ export class GameController {
       allowed: this.allowed(),
       // A problem shows the current game's threshold, or the next one's on the last game's board.
       mistakeThreshold: this.threshold,
+      generation: this.generator.status(),
     };
     if (this.practice) return this.practice.view(common, this.settings?.botRank ?? this.profile.botRank);
     const game = this.game;
@@ -354,6 +426,7 @@ export class GameController {
       this.botFailures = 0;
       this.resumeTurn();
     }
+    this.generator.wake();
     this.changed();
   }
 
@@ -434,6 +507,7 @@ export class GameController {
   // --- browser actions -------------------------------------------------------
 
   async handleAction(action: ClientAction): Promise<void> {
+    this.noteActivity();
     switch (action.type) {
       case "new_game":
         return this.newGame(action.settings);
@@ -473,6 +547,8 @@ export class GameController {
   // --- tutor commands -----------------------------------------------------------
 
   async handleTutor(cmd: TutorCommand): Promise<void> {
+    // Only the commands that need KataGo (a new game, a problem, a take-back, the bot's move after resume) hold generation off.
+    if (cmd.type === "new_game" || cmd.type === "start_problem" || cmd.type === "rethink" || cmd.type === "resume") this.noteActivity();
     this.checkSilent(cmd);
     await this.tutorCommand(cmd);
     // The tutor answered: on Silent, the learner's question has had its one reply.
@@ -511,6 +587,9 @@ export class GameController {
         return this.newGame(cmd.settings);
       case "start_problem":
         return this.startProblem(cmd.problemId);
+      case "generate":
+        this.generator.startNow();
+        return this.changed();
       case "tag":
         return this.tag(cmd.gameId, cmd.moveNumber, cmd.category, cmd.note, cmd.takenBack);
       // Drawings go on the problem in problem mode, else on the game. They are checked before the
@@ -1511,7 +1590,10 @@ export class GameController {
 
   /** A tag changes what a mistake was about; the practice problem made from it follows. */
   private retagProblem(gameId: string, moveNumber: number, category: MistakeCategory, takenBack: number | undefined): void {
-    const fromMove = (p: StoredProblem) => p.source?.gameId === gameId && p.source.moveNumber === moveNumber && p.source.takenBack === takenBack;
+    const fromMove = (p: StoredProblem) => {
+      const source = gameSource(p);
+      return source?.gameId === gameId && source.moveNumber === moveNumber && source.takenBack === takenBack;
+    };
     // The problem may be on the board right now: its result and attempts count for the new category.
     if (this.practice && fromMove(this.practice.problem)) this.practice.retag(category);
     try {
@@ -1530,7 +1612,7 @@ export class GameController {
 
   /**
    * Enter problem mode with problem `id`, or the next one due: the recommended focus category
-   * first, then the learner's own problems, then the built-ins (src/server/problems.ts).
+   * first, then the learner's own problems, then generated ones (src/server/problems.ts).
    */
   private startProblem(id?: string): void {
     const problems = this.store.loadProblems();
@@ -1541,7 +1623,7 @@ export class GameController {
       if (!problem) throw new UserError(`No practice problem "${id}". List them with: tutor problems`);
     } else {
       const next = pickNextProblem(problems, { now: this.clock.now(), focus: recommendFocus(this.profile).category, exclude: this.lastProblemId });
-      if (!next) throw new UserError("There are no practice problems yet.");
+      if (!next) throw new UserError(this.noProblemsText());
       ({ problem, early } = next);
     }
     const session = new PracticeSession(problem, this.practiceDeps); // checks the setup before the current problem closes
@@ -1552,6 +1634,14 @@ export class GameController {
     this.lastProblemId = problem.id;
     session.start(early);
     this.changed();
+  }
+
+  /** Why Practice has nothing to show: the first problems are still being generated, or there are none yet. */
+  private noProblemsText(): string {
+    const current = this.generator.status().current;
+    if (!current) return "There are no practice problems yet. Play a game: your mistakes become problems.";
+    const waiting = this.engineState !== "ready" ? " (it starts once KataGo is ready)" : "";
+    return `Your first practice problems are being generated from games KataGo plays against itself: ${current.found}/${current.target} so far${waiting}. Each one joins Practice as soon as it's found, so try again in a few minutes, or play a game meanwhile.`;
   }
 
   /** Back to playing: the game (paused, finished or mid-turn) as it was, or the idle board. */
@@ -1588,6 +1678,8 @@ export class GameController {
     } catch (err) {
       this.log(`updating the profile after problem ${problem.id} failed: ${(err as Error).message}`);
     }
+    // Enough of the newest generated batch mastered: the next batch starts.
+    this.generator.checkTrigger();
     return stored;
   }
 
@@ -1620,6 +1712,7 @@ export class GameController {
     const problems = this.store.loadProblems();
     const result = change(problems);
     this.store.saveProblems(problems);
+    this.generator.problemsChanged(problems);
     return result;
   }
 

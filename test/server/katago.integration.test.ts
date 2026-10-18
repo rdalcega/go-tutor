@@ -1,9 +1,7 @@
 // Runs against the real KataGo. Skipped when `katago` is not on PATH.
 // Prints measured latencies so the server can size its timeouts.
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { BUILTIN_PROBLEMS } from "../../src/server/builtin-problems.ts";
-import { KataGo, moveEvalFrom, type Position } from "../../src/server/katago.ts";
-import { ANSWER_MARGIN, builtinProblem, problemPosition } from "../../src/server/problems.ts";
+import { KataGo, isAbortError, moveEvalFrom, type Position } from "../../src/server/katago.ts";
 import { hasKataGo } from "./fakes.ts";
 
 const empty9: Position = { size: 9, komi: 7, moves: [], rules: "chinese" };
@@ -114,39 +112,24 @@ describe.skipIf(!hasKataGo())("KataGo (real engine)", () => {
     expect(good.candidates.length).toBeLessThanOrEqual(5);
   }, 300_000);
 
-  // The built-in practice problems (src/server/builtin-problems.ts): KataGo's best move is one of
-  // the answers, every answer loses at most ANSWER_MARGIN (the server's check for an attempt), and
-  // each problem is clear: passing costs at least 3 points and the best wrong move at least 2.
-  it("agrees with every built-in problem's answers, and each problem has a clear best move", async () => {
-    const VISITS = 1200;
-    const reports = await timed("built-in problems (1200 visits)", () =>
-      Promise.all(
-        BUILTIN_PROBLEMS.map(async (def) => {
-          const p = builtinProblem(def);
-          const analyze = (moves: string[] = []) => kg.analyze(problemPosition(p, moves), { maxVisits: VISITS });
-          const [root, pass, ...answers] = await Promise.all([analyze(), analyze(["pass"]), ...p.answers.map((a) => analyze([a]))]);
-          const best = root.moveInfos[0]!;
-          const wrong = root.moveInfos.find((m) => !p.answers.includes(m.move) && m.move !== "pass");
-          const round = (n: number) => Math.round(n * 10) / 10;
-          return {
-            id: p.id,
-            best: best.move,
-            answerLosses: Object.fromEntries(p.answers.map((a, i) => [a, round(moveEvalFrom(root, answers[i]!).pointLoss)])),
-            passLoss: round(moveEvalFrom(root, pass).pointLoss),
-            wrong: wrong ? { move: wrong.move, gap: round(best.scoreLead - wrong.scoreLead) } : null,
-          };
-        }),
-      ),
-    );
-    console.log("built-in problems:", JSON.stringify(reports));
-    for (const r of reports) {
-      const def = BUILTIN_PROBLEMS.find((d) => d.id === r.id)!;
-      expect(def.answers, `${r.id}: KataGo's best ${r.best} is an answer`).toContain(r.best);
-      for (const [move, loss] of Object.entries(r.answerLosses)) {
-        expect(loss, `${r.id}: answer ${move} loses ${loss}`).toBeLessThanOrEqual(ANSWER_MARGIN);
-      }
-      expect(r.passLoss, `${r.id}: passing loses ${r.passLoss}`).toBeGreaterThanOrEqual(3);
-      if (r.wrong) expect(r.wrong.gap, `${r.id}: the best wrong move ${r.wrong.move} is ${r.wrong.gap} worse`).toBeGreaterThanOrEqual(2);
-    }
-  }, 600_000);
+  // Problem generation cancels its queries when the learner needs KataGo (generate.ts).
+  it("cancels a query in flight and one still waiting, and keeps answering others", async () => {
+    const empty19: Position = { size: 19, komi: 7, moves: [], rules: "chinese" };
+    const abort = new AbortController();
+    const t0 = performance.now();
+    // Concurrency 2: two long searches fill KataGo, the third waits in our queue.
+    const running = [kg.analyze(empty19, { maxVisits: 100_000, signal: abort.signal }), kg.analyze({ ...empty19, komi: 6.5 }, { maxVisits: 100_000, signal: abort.signal })];
+    const waiting = kg.analyze({ ...empty19, komi: 6 }, { maxVisits: 100_000, signal: abort.signal });
+    // Settled together: the waiting query rejects the moment it is cancelled.
+    const settled = Promise.allSettled([...running, waiting]);
+    await new Promise((r) => setTimeout(r, 300));
+    abort.abort();
+    for (const r of await settled) expect(r.status === "rejected" && isAbortError(r.reason)).toBe(true);
+    const cancelMs = Math.round(performance.now() - t0);
+    timings["cancel two 100k-visit searches"] = cancelMs;
+    expect(cancelMs).toBeLessThan(10_000);
+    const after = await kg.analyze(empty9, { maxVisits: 50 });
+    expect(after.rootInfo.visits).toBeGreaterThan(0);
+    await expect(kg.analyze(empty9, { maxVisits: 50, signal: abort.signal })).rejects.toSatisfy(isAbortError);
+  }, 300_000);
 });

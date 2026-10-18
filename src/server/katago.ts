@@ -56,6 +56,11 @@ export interface AnalyzeOptions {
   overrideSettings?: Record<string, string | number | boolean>;
   /** Higher runs first, both in our queue and inside KataGo. Default 0. */
   priority?: number;
+  /**
+   * Cancels the query: a waiting one leaves the queue, one KataGo is searching is terminated. Either
+   * way the promise rejects with an `AbortError`.
+   */
+  signal?: AbortSignal;
 }
 
 /**
@@ -63,6 +68,21 @@ export interface AnalyzeOptions {
  * the rating migration): below the live game's queries (0) and the bot's moves (10).
  */
 export const BACKGROUND_PRIORITY = -10;
+/** Priority for problem generation's self-play (generate.ts): below everything else. */
+export const GENERATION_PRIORITY = -20;
+/** A terminated query's slot frees after this long even if KataGo never answers it. */
+const TERMINATE_GRACE_MS = 10_000;
+
+/** The error an aborted query rejects with. */
+export function abortError(): Error {
+  const err = new Error("The KataGo query was cancelled");
+  err.name = "AbortError";
+  return err;
+}
+
+export function isAbortError(err: unknown): boolean {
+  return err instanceof Error && err.name === "AbortError";
+}
 
 export interface MoveInfo {
   move: Gtp;
@@ -386,6 +406,8 @@ interface Job {
   toPlay: Color;
   resolve: (a: Analysis) => void;
   reject: (e: Error) => void;
+  /** Cancelled while KataGo was searching it: its (partial) result is dropped when it arrives. */
+  aborted?: boolean;
 }
 
 export class KataGo implements Engine {
@@ -515,13 +537,53 @@ export class KataGo implements Engine {
         rejectJob(new Error("KataGo is not running; call start() first."));
         return;
       }
-      const job: Job = { id, query, priority: opts.priority ?? 0, toPlay: sideToMove(pos), resolve: resolveJob, reject: rejectJob };
+      const { signal } = opts;
+      if (signal?.aborted) {
+        rejectJob(abortError());
+        return;
+      }
+      const onAbort = () => this.abort(job);
+      const job: Job = {
+        id,
+        query,
+        priority: opts.priority ?? 0,
+        toPlay: sideToMove(pos),
+        resolve: (a) => {
+          signal?.removeEventListener("abort", onAbort);
+          resolveJob(a);
+        },
+        reject: (e) => {
+          signal?.removeEventListener("abort", onAbort);
+          rejectJob(e);
+        },
+      };
+      signal?.addEventListener("abort", onAbort, { once: true });
       // Keep the waiting list sorted by priority, FIFO within a priority.
       const at = this.waiting.findIndex((j) => j.priority < job.priority);
       if (at < 0) this.waiting.push(job);
       else this.waiting.splice(at, 0, job);
       this.pump();
     });
+  }
+
+  /**
+   * Cancel a query: a waiting one leaves the queue at once; one in flight is terminated (KataGo
+   * then sends what it has, which `finish` drops), and its slot frees when that arrives.
+   */
+  private abort(job: Job): void {
+    const waiting = this.waiting.indexOf(job);
+    if (waiting >= 0) {
+      this.waiting.splice(waiting, 1);
+      job.reject(abortError());
+      return;
+    }
+    if (!this.inFlight.has(job.id) || job.aborted) return;
+    job.aborted = true;
+    this.proc?.stdin.write(JSON.stringify({ id: `terminate-${job.id}`, action: "terminate", terminateId: job.id }) + "\n");
+    // KataGo answers a terminated query at once; should it never, its slot still frees (a late answer is ignored).
+    setTimeout(() => {
+      if (this.inFlight.get(job.id) === job) this.finish(job, abortError());
+    }, TERMINATE_GRACE_MS).unref();
   }
 
   async botMove(pos: Position, rank: string, opts: BotMoveOptions = {}): Promise<Gtp> {
@@ -583,7 +645,8 @@ export class KataGo implements Engine {
 
   private finish(job: Job, result: Analysis | Error): void {
     this.inFlight.delete(job.id);
-    if (result instanceof Error) job.reject(result);
+    if (job.aborted) job.reject(abortError());
+    else if (result instanceof Error) job.reject(result);
     else job.resolve(result);
     this.pump();
   }

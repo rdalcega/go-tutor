@@ -3,13 +3,13 @@
 import { beforeEach, describe, expect, it } from "vitest";
 import type { TutorEventInput } from "../../src/server/common.ts";
 import { GameController } from "../../src/server/game.ts";
-import { BOX_INTERVALS, DEEP_VISITS } from "../../src/server/problems.ts";
+import { BOX_INTERVALS, DEEP_VISITS, gameSource } from "../../src/server/problems.ts";
 import type { Store } from "../../src/server/store.ts";
 import { fromGtp } from "../../src/shared/coords.ts";
-import { FakeClock, FakeEngine, flush, tempStore } from "./fakes.ts";
+import { FakeClock, FakeEngine, flush, liveProblem, seedProblems, tempStore } from "./fakes.ts";
 
-// b-live-straight-three: Black lives with E1 (D1, F1 are the wrong eye points).
-const LIVE = "b-live-straight-three";
+// A generated problem: Black lives with E1 (D1, F1 are the wrong eye points).
+const LIVE = "gen1";
 const at = (gtp: string) => fromGtp(gtp, 9)!;
 
 let engine: FakeEngine;
@@ -22,6 +22,8 @@ function setup(): void {
   engine = new FakeEngine();
   clock = new FakeClock();
   store = tempStore();
+  // Two generated problems (the same position under another hash stands in for a second one).
+  seedProblems(store, [liveProblem(), liveProblem({ id: "gen2", category: "tactics", hash: "second" })]);
   events = [];
   ctl = new GameController({ engine, store, clock, botDelayMs: 0, tutorTimeoutMs: 30_000 });
   ctl.onEvent((e) => events.push(e));
@@ -45,15 +47,17 @@ describe("problem mode", () => {
   it("starts the next due problem in the focus category and shows it as a problem view", async () => {
     await ctl.handleAction({ type: "next_problem" });
     const v = ctl.view();
-    // No mistakes yet: the focus is life and death, and built-ins are all that exists.
+    // No mistakes yet: the focus is life and death, and generated problems are all that exists.
     expect(v.mode).toBe("problem");
     expect(v.gameId).toBeNull();
     expect(v.status).toBe("playing");
-    expect(v.problem).toMatchObject({ kind: "builtin", category: "life_and_death", attempts: 0, maxAttempts: 2, revealed: false, solved: false, box: 1 });
+    expect(v.problem).toMatchObject({ kind: "generated", category: "life_and_death", attempts: 0, maxAttempts: 2, revealed: false, solved: false, box: 1 });
+    expect(v.problem?.generated).toEqual({ batchId: "batch1", difficultyRank: "17k", weakerRank: "20k", strongerRank: "15k" });
     expect(v.settings?.humanColor).toBe(v.problem!.toPlay);
     expect(v.board.flat().filter(Boolean).length).toBeGreaterThan(10);
     const start = ofType("problem_start")[0]!;
-    expect(start).toMatchObject({ problemId: v.problem!.id, category: "life_and_death", toPlay: "B" });
+    expect(start).toMatchObject({ problemId: v.problem!.id, category: "life_and_death", toPlay: "B", kind: "generated", size: 9, generated: { difficultyRank: "17k" } });
+    expect(v.chat.at(-1)?.text).toContain("Practice problem on 9×9 (about 17k level)");
     expect(start.answers.length).toBeGreaterThan(0);
     expect(start.board).toContain("X");
     expect(v.chat.at(-1)?.text).toContain(v.problem!.prompt);
@@ -475,7 +479,7 @@ describe("problem mode", () => {
     engine.releaseAll();
     await flush(10);
     expect(store.loadProblems().filter((p) => p.kind === "game").map((p) => p.source?.moveNumber)).toEqual([5, 1, 3]);
-    expect(store.loadProblems().every((p) => p.source?.gameId === undefined || p.source.gameId === gameId)).toBe(true);
+    expect(store.loadProblems().every((p) => p.kind === "generated" || gameSource(p)?.gameId === gameId)).toBe(true);
     expect(loads).toBe(1);
   });
 
@@ -507,7 +511,7 @@ describe("problem mode", () => {
     await ctl.handleTutor({ type: "tag", gameId, moveNumber: 1, category: "opening" });
     expect(store.loadProblems().find((p) => p.id === "p1")).toMatchObject({ category: "opening", prompt: expect.stringContaining("opening") });
 
-    // The learner's own problem comes before built-ins in the focus category order.
+    // The learner's own problem comes before generated ones in the focus category order.
     await ctl.handleTutor({ type: "start_problem" });
     expect(ctl.view().problem?.id).toBe("p1");
     expect(ctl.view().problem?.source).toEqual({ gameId, moveNumber: 1 });

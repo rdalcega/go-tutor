@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { ProblemView } from "../../src/shared/types.ts";
 import { categoryLabel } from "../../src/shared/text.ts";
-import { attemptsLeftText, problemHeading, problemResult } from "../../web/src/geometry.ts";
+import { attemptsLeftText, generationFact, problemHeading, problemResult } from "../../web/src/geometry.ts";
 
 const base: ProblemView = {
   id: "p4",
@@ -21,8 +21,37 @@ describe("problem card helpers", () => {
   it("names the category and where the problem comes from", () => {
     expect(categoryLabel("capturing_race", { capitalize: true })).toBe("Capturing race");
     expect(problemHeading(base)).toBe("Life and death · from your game, move 14");
-    const { source: _source, ...builtin } = base;
-    expect(problemHeading({ ...builtin, kind: "builtin", category: "tactics" })).toBe("Tactics · classic problem");
+    const { source: _source, ...rest } = base;
+    const generated = { batchId: "batch1", difficultyRank: "17k", weakerRank: "20k", strongerRank: "15k" };
+    expect(problemHeading({ ...rest, kind: "generated", generated, category: "tactics" }, 13)).toBe("Tactics · 13×13 · about 17k");
+  });
+
+  it("shows problem generation in the progress card: the batch in progress, else the mastery count", () => {
+    expect(generationFact(undefined)).toBeNull();
+    expect(generationFact({ state: "idle", current: null, last: null, batches: 0 })).toBeNull();
+    const batch = {
+      id: "batch1",
+      number: 1,
+      weakerRank: "20k",
+      strongerRank: "15k",
+      trigger: "first" as const,
+      found: 7,
+      target: 20,
+      sizes: [
+        { size: 9 as const, found: 4, target: 7, games: 5, minutes: 9 },
+        { size: 13 as const, found: 2, target: 7, games: 2, minutes: 8 },
+        { size: 19 as const, found: 1, target: 6, games: 1, minutes: 7 },
+      ],
+      band: "20k–16k",
+      createdAt: 0,
+    };
+    const generating = generationFact({ state: "waiting", current: batch, last: null, batches: 0 })!;
+    expect(generating.short).toBe("Generating 7/20");
+    expect(generating.long).toContain("4/7 on 9×9, 2/7 on 13×13, 1/6 on 19×19");
+    expect(generating.long).toContain("pauses while you play");
+    const done = generationFact({ state: "idle", current: null, last: { ...batch, found: 20, problems: 20, mastered: 9, needed: 15 }, batches: 1 })!;
+    expect(done.short).toBe("9/15 mastered");
+    expect(done.long).toContain("Master 15 of them");
   });
 
   it("counts the attempts left until the problem is over", () => {

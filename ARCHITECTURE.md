@@ -27,17 +27,17 @@ The contract for every boundary is `src/shared/types.ts`.
 | `src/shared/threshold.ts` | The mistake threshold by board size: `THRESHOLD_MULTIPLIERS` (9×9 ×1, 13×13 ×1.5, 19×19 ×2), `thresholdMultiplier(size)`, `thresholdFor(base, size)` (the profile's 9×9 threshold on a board), `sizeText`. Used by the controller, the profile's adaptation, the CLI and the UI so they agree. |
 | `src/shared/rank.ts` | `rankToRating("20k") → 10`, `ratingToRank(10) → "20k"` on the scale 30k=0 … 1k=29, 1d=30 … 9d=38. |
 | `src/engine/` | Pure Go rules: `GoGame` class (play/pass/undo, captures, suicide illegal, positional superko; `before(n)` copies the game before move n from its history, `fromBoard` sets up a position), `gameBefore(settings, moves, n)` (replays a saved move list), `movesFromLine`/`gameFromLine` (a GTP move line, colors alternating from the first mover, e.g. a taken-back move's position), `boardFromDiagram`, area scoring with komi, dead-stone input from KataGo ownership, `toAscii(board)`, SGF read/write. No I/O. |
-| `src/server/katago.ts` | Long-lived `katago analysis` child process speaking the JSON analysis protocol; query queue with ids; `analyze(position, opts)`, `botMove(position, rank)`, `ownership`. |
+| `src/server/katago.ts` | Long-lived `katago analysis` child process speaking the JSON analysis protocol; query queue with ids and priorities (`BACKGROUND_PRIORITY` −10, `GENERATION_PRIORITY` −20); `analyze(position, opts)` (an `AbortSignal` in `opts.signal` cancels a query: a waiting one leaves the queue, one KataGo is searching gets KataGo's `terminate` action; either rejects with an `AbortError`), `botMove(position, rank)`, `ownership`. |
 | `src/server/game.ts` | `GameController`: owns the current game, turns, bot replies, per-move evals, teaching-moment detection, pause + fallback timer, chat log, the profile and problem writes, producing `GameView` (with the actions it accepts) and `TutorEvent`s. Takes an engine interface so tests can use a fake. |
 | `src/server/practice.ts` | `PracticeSession`: the practice problem on the board (attempts, judging against KataGo, its overlay and view) while the game waits underneath; the controller delegates to it in problem mode and writes the problem's progress. |
 | `src/server/common.ts` | What the controller and the session share: `UserError`, the clock, and turning GTP into ghost stones and marks. |
 | `src/server/bridge.ts` | Tutor bridge: event sequence numbers, `data/events.jsonl` append log, SSE fan-out to `tutor watch` connections, `tutorAttached` tracking, applying `TutorCommand`s to the controller. |
-| `src/server/store.ts` | Persistence under `data/` (path overridable with `GO_TUTOR_DATA`): `games/<id>.sgf` + `games/<id>.json` (settings, moves with evals, result, summary), `games/index.json` (creation time and finished flag per game, so finding the last game reads one file; read and checked against the files once at startup, then kept in memory), `profile.json`, `problems.json`, and `backup(paths)` (copies data files into a new `backup-<time>/` folder before the migration rewrites them). The controller writes a game at the end of the tick that changed it (one action's burst of changes is one write), and at once for a new game, at game end and on shutdown (SIGINT, SIGTERM, SIGHUP, beforeExit). |
+| `src/server/store.ts` | Persistence under `data/` (path overridable with `GO_TUTOR_DATA`): `games/<id>.sgf` + `games/<id>.json` (settings, moves with evals, result, summary), `games/index.json` (creation time and finished flag per game, so finding the last game reads one file; read and checked against the files once at startup, then kept in memory), `profile.json`, `problems.json`, `generation.json` (generated batches and the one in progress), and `backup(paths)` (copies data files into a new `backup-<time>/` folder before the migration rewrites them). The controller writes a game at the end of the tick that changed it (one action's burst of changes is one write), and at once for a new game, at game end and on shutdown (SIGINT, SIGTERM, SIGHUP, beforeExit). |
 | `src/server/profile.ts` | Learner memory, pure functions over `Profile`: a finished game's tallies and stats (`applyGame`), the rating from its rank estimate (`applyEstimate`, `combinedEstimate`), heuristic mistake categories (`classifyMistake`, `classifyPlayed` for a move on its replayed position), the summary pieces the controller and the migration share (`mistakeEntry`, `firstAttemptMistakes`, `totalPointLoss`, `noAssistance`), `mistakeKey` (which mistake: game, move, first-attempt index), tutor tags (`applyTag`), the adaptive mistake threshold, and `recommendFocus`. See "Learner profile". |
 | `src/server/estimate.ts` | The rank estimate from move quality: which human moves count (`rankSamples`), their human-SL probabilities at 13 rank profiles (`movePolicies`), the maximum-likelihood rank (`fitRank`, `peakRating`), `estimateRank`. See "Rank estimate". |
 | `src/server/migrate.ts` | The one-time re-estimate for data from before rating model 2: `reconstructGame` (first attempts and help from `events.jsonl`, pure) and `migrateRatingModel`. See "Rating model migration". |
-| `src/server/problems.ts` | Practice problems, pure functions over `StoredProblem`: problems from a finished game's mistakes, the built-in merge, position hashes, Leitner scheduling (`src/shared/schedule.ts`), which problem comes next, the `GET /api/problems` body. See "Practice problems". |
-| `src/server/builtin-problems.ts` | The built-in starter set: a dozen classic 9×9 problems as readable board diagrams with their answers (verified against real KataGo in `test/server/katago.integration.test.ts`). |
+| `src/server/problems.ts` | Practice problems, pure functions over `StoredProblem`: problems from a finished game's mistakes, their sources (`gameSource`, `generatedSource`), position hashes, Leitner scheduling (`src/shared/schedule.ts`), which problem comes next, the `GET /api/problems` body. See "Practice problems". |
+| `src/server/generate.ts` | Generated problems from KataGo's human-SL self-play: batch quotas and ranks, the candidate filters (`examineCandidate`), difficulty, the batch trigger, the startup removal of the old built-in problems (`removeLegacyBuiltins`), and `ProblemGenerator`, which the controller runs in the background. See "Generated problems". |
 | `src/server/index.ts` | `node:http` server on port 4747 (`PORT` env): JSON API, SSE, serves `dist/` in production. |
 | `src/cli/tutor.ts` | The tutor's command line. See "Tutor CLI". |
 | `web/` | Vite + plain TypeScript UI: canvas board, controls, chat panel, eval strip. No framework. |
@@ -188,9 +188,12 @@ tutor attached, the server adds a system reply saying the tutor isn't connected.
   `GET /api/game/:id` (or `last`) returns a saved game
   (`games/<id>.json`: settings, moves with evals and PVs, result, summary with categories and rating
   change, chat, tags, heuristics). `GET /api/profile` returns `ProfileResponse`: `{ profile, focus }`.
-  `GET /api/problems` returns `ProblemsResponse` (both use the controller's profile in memory): every problem (`ProblemListItem`: category, source,
-  box, due, results, accepted answers) in the order `next_problem` picks them, counts (total, due, from
-  games, built-in, per box, due per category) and the focus.
+  `GET /api/problems` returns `ProblemsResponse` (both use the controller's profile in memory): every problem (`ProblemListItem`: category, board
+  size, source or generated origin, box, due, results, accepted answers) in the order `next_problem`
+  picks them, counts (total, due, from games, generated, per box, due per category), the focus and
+  the generation status. `GET /api/generation` returns `GenerationStatus` (also in every
+  `GameView.generation`): the batch in progress (per size found/target, games and KataGo minutes),
+  the newest finished batch with its mastery count, and whether KataGo is working on it now.
 
 ## Learner profile
 
@@ -263,7 +266,8 @@ small board, and one odd opening move swung a 5k bot's game from 5k to 1d in the
 With fewer than 5 samples there is no estimate. For each sample and each of 13 human-SL profiles
 (20k, 18k, 15k, 12k, 10k, 8k, 5k, 3k, 1k, 1d, 3d, 5d, 9d) one query with
 `overrideSettings.humanSLProfile`, `includePolicy`, `maxVisits: 1` and `BACKGROUND_PRIORITY` (−10,
-below the game's queries; problem generation's deeper analyses and the migration use it too), at
+below the game's queries; the deeper analyses for problems from a finished game and the migration
+use it too; generated problems' self-play is lower still, `GENERATION_PRIORITY`), at
 most twice KataGo's concurrency in flight (about 4 ms each; a 9×9 game is a few seconds). The first
 failed query fails the estimate and stops the other workers. The log-likelihood per profile is the sum of `log(max(0.001, humanPolicy[move]))`;
 the estimate is the best profile moved toward its better neighbor by a parabola through the three
@@ -313,8 +317,12 @@ profile or problems; `ratingModel` unchanged), and the controller logs it and tr
 
 ## Practice problems
 
-`data/problems.json` (`{ version: 1, problems: StoredProblem[] }`, read through `Store.loadProblems`,
-which merges in the built-in set) holds every problem with its spaced-repetition state.
+`data/problems.json` (`{ version: 1, problems: StoredProblem[] }`) holds every problem with its
+spaced-repetition state: the learner's own (kind `game`, ids `p1`, `p2`, …) and generated ones
+(kind `generated`, ids `gen1`, `gen2`, …; see "Generated problems"). A problem's `source` says which:
+`{ gameId, moveNumber, played, takenBack? }` for the learner's game, `{ kind: "generated", batchId,
+weakerRank, strongerRank, difficultyRank, difficultyRating, moveNumber, played, swapped }` for a
+generated one (`gameSource` / `generatedSource` tell them apart).
 
 - **From mistakes**: when a game finishes, each mistake in its summary (point loss ≥ the threshold the
   game was played with, scaled to its board) becomes a problem: the position before the move as setup stones (no move
@@ -328,11 +336,10 @@ which merges in the built-in set) holds every problem with its spaced-repetition
   position gets no problem. No problem when KataGo's best is a pass. One problem per position (`positionHash` of board and side to move) and per source
   move (`mistakeKey`: game, move number, and for a taken-back first attempt its index, `source.takenBack`;
   such a problem is set up from the first attempt's own position). Ids are `p1`, `p2`, …
-- **Built-ins** (`b-…`): 12 classic 9×9 positions (life and death, snapbacks, a ladder, a net, a
-  connection, capturing races) with the rest of the board settled so the local answer decides the
-  game. Their definitions come from the source file (parsed once at startup); only progress and answers found
-  later are stored. The integration test checks each against real KataGo: KataGo's best is an answer,
-  every answer is within 1 point, passing costs ≥ 3 points and the best wrong move ≥ 2.
+- **No built-ins**: the 12 hand-made starter problems (`b-…`, kind `builtin`) were replaced by
+  generated ones. At startup `removeLegacyBuiltins` (from `index.ts`, before anything else reads the
+  data) backs up `problems.json` to `backup-<time>/` and removes them, keeping the learner's problems
+  and their schedules; with none left it does nothing, so it runs once.
 - **Spaced repetition** (Leitner, boxes 1–5): new problems are in box 1 and due at once. Solved first
   try: up a box; solved on the second try: same box; failed (out of attempts, or left with Next
   problem, Back to playing or a new game after a wrong attempt): box 1. Left before any attempt: no
@@ -340,9 +347,10 @@ which merges in the built-in set) holds every problem with its spaced-repetition
   problem on the board is over, `ProblemView.nextDue` holds its new due time, and the problem card
   says when it comes back ("You'll see this one again in about 10 minutes", "…tomorrow", "…in 3 days").
 - **Next problem** (`pickNextProblem`): a due problem, preferring the recommended focus category (the
-  learner's own before built-ins), then the learner's own problems, then built-ins; lower boxes and
-  older due times first; never the problem just shown while there is another. When nothing is due,
-  the one due soonest (an early review).
+  learner's own before generated ones), then the learner's own problems, then generated ones; lower
+  boxes and older due times first; never the problem just shown while there is another. When nothing
+  is due, the one due soonest (an early review). With no problems at all, Practice says why: the
+  first batch is being generated (with its progress), or there are none yet.
 - **Problem mode**: `next_problem` (browser) or `start_problem` (tutor) puts a problem on the board:
   `GameView.mode` is `"problem"`, `gameId` null, `board` the problem position, `settings.humanColor`
   the side to play, `status` `"playing"` until the problem is over and `"finished"` after, and
@@ -362,6 +370,83 @@ which merges in the built-in set) holds every problem with its spaced-repetition
   evaluated during practice opens its teaching moment, and a tutor timeout's fallback is shown, only
   when the learner goes back to the game. A tutor who attaches again while that fallback waits gets a
   fresh 30 s to take the moment instead.
+- Problems of every board size work the same way: the view's `settings.size` is the problem's, and
+  `problem_start` carries `size` (and `generated`: batch, difficulty rank, self-play ranks).
+
+## Generated problems
+
+`src/server/generate.ts`. KataGo plays itself with its human-SL net; the weaker side's big, clear,
+local mistakes become one-move problems: the board just before the mistake, the move it should have
+played. Judged like every problem (above): accepted answers are KataGo's moves within 1 point of its
+best that it searched with 50+ visits; two attempts; KataGo's continuation on a solve, the
+refutation after the second miss.
+
+- **Batches** of 20: 7/7/6 on 9×9, 13×13 and 19×19, the 6 rotating 19×19, 13×13, 9×9 from batch to
+  batch (`batchQuotas`). Komi 7 on every size. The first batch is 20k vs 15k. The next one starts
+  when at least 15 of the newest batch's problems (still stored) are in Leitner box 3 or higher
+  (`nextBatchTrigger`; checked at startup and after every problem result), with the weaker side at
+  the learner's rank (`round(Profile.rating)`, clamped to 20k–9d) and the other side 5 ranks
+  stronger (clamped). `tutor generate --now` (`{ type: "generate" }`) starts the next batch at once
+  unless one is in progress. Problems join practice as they are found, not at the end of the batch.
+- **Self-play**: one game at a time, on the size with the largest share of its quota still to find;
+  the weaker side alternates Black and White from game to game on each size. One query per position
+  (`SIZE_SETTINGS[size].screenVisits` visits, 200, with ownership and the human-SL policy of the
+  side to move at its rank) gives both the eval of the move that led there and the next move,
+  sampled by the bots' own `chooseBotMove`. A game ends at two passes or `maxMoves` (120 on 9×9,
+  150 on 13×13 and 19×19; candidates come only from those moves).
+- **Candidate filters** (`examineCandidate`), for each move of the weaker side from move 5 on:
+  1. Big: the screening loss (root lead before minus after, as for the learner's moves) is at
+     least `minLoss` (4 on 9×9, 6 on 13×13, 8 on 19×19).
+  2. No ko: no empty point is illegal only by ko (`hasKoBan`), since the problem drops the history.
+  3. New: its position hash (Black to play) isn't a stored problem's or a reserve candidate's.
+  4. Black to play: a White mistake has every stone's color swapped. That changes who the komi
+     helps, so everything below is measured on the problem position itself (Black to play, no
+     history): a `CONFIRM_VISITS` (1600) analysis of it, and an 800-visit one after the mistake.
+  5. Confirmed: the mistake still loses `minLoss`; KataGo's best isn't a pass.
+  6. Clear: 1–3 accepted answers (`MAX_ANSWERS`), and the best well-searched move that isn't an
+     answer (a pass counts) loses at least `minWrongGap` (3 on 9×9, 4 on 13×13, 5 on 19×19).
+  7. Local: KataGo's best is within 2 lines (both directions) of one of the two moves before the
+     mistake, or on or next to a stone of a group, or an empty point, whose screening ownership
+     flips because of the mistake (`flippedPoints`).
+  8. Not a repeat: no answer is an answer of a problem already taken (accepted or reserved) from
+     the same self-play game. A 20k side often misses the same vital point several moves running,
+     which made near-identical problems.
+  Category and prompt come from the learner's mistake heuristic (`classifyPlayed` on the problem
+  position, with the deeper analyses' ownership).
+- **Difficulty**: the answers' combined human-SL probability in the problem position at each of the
+  rank estimate's 13 profiles (one 1-visit query each); the difficulty is where it first reaches
+  50%, interpolated between profiles on the rank scale (20k when the weakest profile already finds
+  it, 9d when none does). Stored as `difficultyRating` and `difficultyRank`. A batch prefers
+  problems from the learner's rank to 4 ranks stronger (`difficultyBand`, from the rating when the
+  batch starts): one inside it is accepted at once; one outside waits in its size's reserve, and
+  once more than 2 wait there the one closest to the band is accepted. So when a size's mistakes are
+  mostly harder (common: what a 20k player misses, the 20k policy rarely plays), the batch still
+  fills with the closest ones, at the cost of at most 2 unused problems per size.
+- **Running in the server**: the controller owns a `ProblemGenerator` (`startGeneration()` from
+  `index.ts` at startup; it starts the first batch when there is none). It runs while KataGo is
+  ready and the learner isn't using it: nothing they wait on in flight (move eval, bot move,
+  scoring, hint, problem check) and 10 s (`LEARNER_ACTIVE_MS`) since their last action or a tutor
+  command that needs KataGo (`new_game`, `start_problem`, `rethink`, `resume`; a `say` or `tag`
+  doesn't). Each of those also cancels the generator's query in flight (`AbortSignal`, KataGo's
+  `terminate`; a terminated query's slot frees after 10 s even if KataGo never answers it), so the
+  learner's work never waits behind a 1600-visit search; the cancelled step runs again later, and a
+  step stores nothing until all its queries are in. Its queries also use `GENERATION_PRIORITY`, below everything else. A failed
+  step (KataGo restarting) is retried after 5 s, doubling to 5 min.
+- **Progress** persists in `data/generation.json` (`GenerationFile`: the batches with their quotas,
+  ranks, band, problem ids, created/finished times and per-size stats: found, games, moves, KataGo
+  ms, screened, candidates, rejects by reason; and the batch in progress: the self-play game's moves
+  so far and the reserve), written after every self-play move, so a restart resumes the game. A
+  batch that starts emits `generation` (`started`) and a chat line; one that finishes emits
+  `generation` (`finished`) and says how many problems are ready.
+- **Measured** on an M1 (KataGo b18 nets; one generator query at a time, since two at once gave no
+  more throughput): a 200-visit query takes about 0.75 s on 9×9 and 13×13 and 1.5 s on 19×19, a
+  1600-visit one 3.5–7 s, a 1-visit policy query 30–60 ms. The first batch (20k vs 15k) took 39.5
+  minutes of KataGo time: 9×9 6.1 min (4 games, 22 candidates examined), 13×13 19.7 min (6 games,
+  70), 19×19 13.7 min (4 games of 150 moves, 46). Most rejects were "unclear" (the best wrong move
+  1–2.5 points behind) and "too many answers" (a settled area where many moves are equal). 13×13
+  games ran into the 150-move cap; past move 90 few candidates qualify, and the moves after 150 are
+  the last dame of a 169-point board, so the cap stays. `tutor generate --status` shows each
+  batch's minutes per size.
 
 ## Tutor CLI (`npm run -s tutor -- <command>`)
 
@@ -388,10 +473,15 @@ unless `--json`).
   handicap), the tutor level and what it means for the tutor, the threshold on each board size ("4 pts on
   9×9 (6 on 13×13, 8 on 19×19)") and its last change, mistake counts by category with the last 3 games and a
   rising/falling trend, recent mistakes, the recommended focus and its reason, and practice problems
-  (counts from games and built-in, due now by category, per box, and the next few due). Used at
-  session start.
-- `problems` — every practice problem in the order `problem` picks them, with source, box, due time,
-  results and the accepted answers.
+  (counts from games and generated, problem generation: the batch in progress or the last batch's
+  mastery count, due now by category, per box, and the next few due). Used at session start.
+- `problems` — every practice problem in the order `problem` picks them, with source (or "generated
+  13x13, difficulty 14k, batch2"), box, due time, results and the accepted answers.
+- `generate [--status]` — problem generation: the batch in progress (per size found/target), the
+  last batch and its mastery count, and KataGo minutes per size. `generate --now` starts the next
+  batch first (refused while one is in progress).
+- `watch` prints `BATCH <id> started (<trigger>): 20 problems from <weaker> vs <stronger> self-play,
+  difficulty band …` and `BATCH <id> finished: 20 new problems (7 on 9x9, …)`.
 - `watch` prints chat sent during a problem as `USER "<text>" (problem <id>)`.
 - `watch` prints the level on `GAME_START … level=<level>`, a `point_out` moment as `MOMENT … — level
   point_out: explain mistakes, don't take moves back … — reply with: claim <id>, then say/show/mark/resume`,
@@ -420,7 +510,9 @@ so green is below 1.5 on 13×13 and 2 on 19×19), the teaching-moment
 banner (Continue / Try again buttons, countdown while waiting for the tutor), a Progress card (rank,
 the last game's estimate ("18k · 34 moves", the full sentence in its tooltip, "estimating…" while it
 runs), next bot with any handicap, games, "Pauses at" (the mistake threshold on the current board,
-every size in its tooltip), top 2 mistake categories, rating sparkline; fetched from
+every size in its tooltip), top 2 mistake categories, "Problems" (from the view's `generation`, so
+it moves as problems are found: "Generating 7/20" while a batch is made, else the last batch's
+"9/15 mastered"; the details in its tooltip), rating sparkline; fetched from
 `GET /api/profile` on load and whenever the view's `profileVersion` changes), and the chat panel,
 whose form has the Hint button between the input and Send (the typed text, if any, goes with the
 hint as the question; H still asks for one). Take back follows `allowed` (`take_back`). The result
@@ -440,8 +532,10 @@ input always visible), so folding cards gives it room. The controls card has a s
 (radio buttons) for the tutor level, "Silent", "Point out", "Coach", with the selected level's
 description below it (and each one's in its tooltip). The moment banner says "Your tutor is done —
 take your time, then press Continue." while the moment is `awaitingLearner`.
-Practice (or the tutor's `problem`) switches to problem mode: a problem card replaces the eval strip
-with the category and source, the prompt, attempts left, the verdict (correct, or the point loss of
+Practice (or the tutor's `problem`) switches to problem mode (with no problems yet, a toast says the
+first ones are being generated, with the count; the button's tooltip shows it too): a problem card
+replaces the eval strip with the category and source ("from your game, move 14", or for a generated
+problem its board and difficulty, "13×13 · about 14k"), the prompt, attempts left, the verdict (correct, or the point loss of
 the attempt and, once out of attempts, the answer; once the problem is over, when it comes back), and
 Next problem / Back to playing buttons. The
 board takes clicks and shows the hover stone as in games; Pass, Take back, Hint and Resign are disabled.

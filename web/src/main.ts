@@ -15,6 +15,7 @@ import {
   lossLevel,
   nextBotText,
   positionBefore,
+  generationFact,
   problemHeading,
   problemResult,
   ratingChangeFor,
@@ -88,6 +89,8 @@ const el = {
   prGames: $("pr-games"),
   prCats: $("pr-cats"),
   prThreshold: $("pr-threshold"),
+  prProblemsRow: $("pr-problems-row"),
+  prProblems: $("pr-problems"),
   prSpark: $<SVGSVGElement>("pr-spark"),
   resultRating: $("result-rating"),
   resultDialog: $<HTMLDialogElement>("result-dialog"),
@@ -291,6 +294,10 @@ function renderControls(v: GameView | null): void {
   el.hint.disabled = !can(v, "ask_tutor");
   el.resign.disabled = !can(v, "resign");
   el.practice.disabled = !can(v, "next_problem") || v.mode === "problem";
+  const generating = v?.generation?.current;
+  el.practice.title = generating
+    ? `Practice problems: from your mistakes, and generated at your level (generating ${generating.found}/${generating.target})`
+    : "Practice problems: from your mistakes, and generated at your level";
   el.chatInput.disabled = !v;
 
   // Keep the new-game form in sync with the current game unless the user is editing it.
@@ -349,8 +356,8 @@ function renderMoment(v: GameView | null): void {
 function renderProblem(v: GameView | null): void {
   const p = v?.mode === "problem" ? v.problem : null;
   el.problem.hidden = !p;
-  if (!p) return;
-  el.problemTitle.textContent = problemHeading(p);
+  if (!p || !v) return;
+  el.problemTitle.textContent = problemHeading(p, v.board.length);
   el.problemAttempts.textContent = attemptsLeftText(p);
   el.problemText.textContent = p.prompt;
   const result = problemResult(p);
@@ -476,6 +483,11 @@ function renderProgress(): void {
   const fact = thresholdFact(game?.points ?? thresholdFor(p.mistakeThreshold, size), size, p.mistakeThreshold);
   el.prThreshold.textContent = fact.short;
   el.prThreshold.title = fact.long;
+  // Problem generation comes with every view, so the count moves as problems are found.
+  const generation = generationFact(view?.generation);
+  el.prProblemsRow.hidden = !generation;
+  el.prProblems.textContent = generation?.short ?? "–";
+  el.prProblemsRow.title = generation?.long ?? "";
   el.prCats.title = profile?.focus ? `Suggested focus: ${categoryLabel(profile.focus.category)}. ${profile.focus.reason}` : "";
   // Start from the rating before the first shown game, so one game already draws a line.
   const history = p.ratingHistory.slice(-20);

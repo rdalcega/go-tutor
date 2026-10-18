@@ -6,7 +6,7 @@ import { UserError, type TutorEventInput } from "../../src/server/common.ts";
 import { GameController, passIsFine } from "../../src/server/game.ts";
 import type { Store } from "../../src/server/store.ts";
 import type { GameSummary } from "../../src/shared/types.ts";
-import { FakeClock, FakeEngine, flush, tempStore } from "./fakes.ts";
+import { FakeClock, FakeEngine, flush, seedProblems, tempStore } from "./fakes.ts";
 
 // 9x9 points used below.
 const C3 = { x: 2, y: 6 };
@@ -24,6 +24,7 @@ function setup(opts: { tutor?: boolean } = {}): void {
   engine = new FakeEngine();
   clock = new FakeClock();
   store = tempStore();
+  seedProblems(store); // a practice problem, for the tests that open Practice
   // A learner already on rating model 2 (the server migrates a new data dir at the first engine-ready).
   store.saveProfile({ ...store.loadProfile(), ratingModel: 2 });
   events = [];

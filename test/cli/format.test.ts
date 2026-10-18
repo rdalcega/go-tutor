@@ -5,11 +5,13 @@ import {
   commandOutput,
   dueText,
   formatEvent,
+  formatGeneration,
   formatProblemList,
   formatProblems,
   formatProfile,
   formatReview,
   formatState,
+  generationLines,
   num,
   problemLines,
   resultText,
@@ -22,6 +24,7 @@ import type {
   Board,
   GameSettings,
   GameView,
+  GenerationStatus,
   MoveEval,
   MoveRecord,
   ProblemListItem,
@@ -188,8 +191,36 @@ describe("formatEvent", () => {
       'PROBLEM_START p4 life_and_death B to play (from g12 move 14, box 2) answers D5,E5 — "Black to play. Live." — run: state; let them try, don\'t give the answer',
     );
     if (start.type !== "problem_start") throw new Error("expected problem_start");
-    const { source: _source, ...builtin } = start;
-    expect(formatEvent({ ...builtin, kind: "builtin", problemId: "b-net" }, ctx)).toContain("PROBLEM_START b-net life_and_death B to play (built-in, box 2)");
+    const { source: _source, ...rest } = start;
+    const generated = { batchId: "batch2", difficultyRank: "14k", weakerRank: "17k", strongerRank: "12k" };
+    expect(formatEvent({ ...rest, kind: "generated", problemId: "gen4", size: 13, generated }, ctx)).toContain(
+      "PROBLEM_START gen4 life_and_death B to play (generated 13x13, difficulty 14k, batch2, box 2)",
+    );
+    // An old starter problem in the log.
+    expect(formatEvent({ ...rest, problemId: "b-net" }, ctx)).toContain("PROBLEM_START b-net life_and_death B to play (built-in, box 2)");
+
+    const batch = {
+      id: "batch2",
+      number: 2,
+      weakerRank: "17k",
+      strongerRank: "12k",
+      trigger: "mastery" as const,
+      found: 20,
+      target: 20,
+      sizes: [
+        { size: 9 as const, found: 7, target: 7, games: 6, minutes: 8 },
+        { size: 13 as const, found: 6, target: 6, games: 3, minutes: 12 },
+        { size: 19 as const, found: 7, target: 7, games: 3, minutes: 21 },
+      ],
+      band: "17k–13k",
+      createdAt: 0,
+    };
+    expect(formatEvent({ ...base, type: "generation", status: "started", batch: { ...batch, found: 0 } }, ctx)).toBe(
+      "BATCH batch2 started (mastery): 20 problems from 17k vs 12k self-play, difficulty band 17k–13k; they join practice as they're found",
+    );
+    expect(formatEvent({ ...base, type: "generation", status: "finished", batch }, ctx)).toBe(
+      "BATCH batch2 finished: 20 new problems (7 on 9x9, 6 on 13x13, 7 on 19x19), difficulty band 17k–13k — tell the learner when it fits (not mid-game on Silent)",
+    );
 
     const attempt = {
       ...base,
@@ -440,6 +471,7 @@ describe("summary and review", () => {
   const item = (over: Partial<ProblemListItem>): ProblemListItem => ({
     id: "p1",
     kind: "game",
+    size: 9,
     category: "life_and_death",
     toPlay: "B",
     prompt: "Black to play.",
@@ -457,36 +489,78 @@ describe("summary and review", () => {
       total: problems.length,
       due: problems.filter((p) => p.isDue).length,
       fromGames: problems.filter((p) => p.kind === "game").length,
-      builtin: problems.filter((p) => p.kind === "builtin").length,
+      generated: problems.filter((p) => p.kind === "generated").length,
       byBox: [problems.length, 0, 0, 0, 0],
       dueByCategory: { life_and_death: 1, tactics: 1 },
     },
     focus: { category: "life_and_death", reason: "", suggestion: "problems" },
   });
 
+  const generated = { batchId: "batch1", difficultyRank: "17k", weakerRank: "20k", strongerRank: "15k" };
+
   it("summarizes practice problems: counts, boxes and the next due", () => {
     const body = problemsBody([
       item({ source: { gameId: "g3", moveNumber: 9 }, difficulty: 6.2 }),
-      item({ id: "b-net", kind: "builtin", category: "tactics", seen: 2, solves: 1, lastResult: "failed" }),
-      item({ id: "p2", due: NOW + 3 * 3_600_000, isDue: false }),
+      item({ id: "gen3", kind: "generated", size: 13, generated, category: "tactics", seen: 2, solves: 1, lastResult: "failed" }),
+      item({ id: "p2", source: { gameId: "g3", moveNumber: 15 }, due: NOW + 3 * 3_600_000, isDue: false }),
     ]);
     expect(formatProblems(body, NOW)).toBe(
       [
-        "practice problems: 3 (2 from the learner's games, 1 built-in), 2 due now (life_and_death 1, tactics 1); boxes 1:3 2:0 3:0 4:0 5:0",
+        "practice problems: 3 (2 from the learner's games, 1 generated), 2 due now (life_and_death 1, tactics 1); boxes 1:3 2:0 3:0 4:0 5:0",
         'next due (the first is what "problem" starts):',
         "  p1 life_and_death from g3 move 9 (lost 6.2) box 1 due now",
-        "  b-net tactics built-in box 1 due now solved 1/2 last failed",
+        "  gen3 tactics generated 13x13, difficulty 17k, batch1 box 1 due now solved 1/2 last failed",
       ].join("\n"),
     );
     expect(formatProblems(problemsBody([item({ due: NOW + 60_000, isDue: false })]), NOW)).toContain('nothing is due; "problem" still starts the one due soonest');
+    expect(formatProblems(problemsBody([]), NOW)).toContain("nothing is due\n".trim());
+  });
+
+  it("adds problem generation to the summary: the batch in progress, or how close the next one is", () => {
+    const batch = {
+      id: "batch2",
+      number: 2,
+      weakerRank: "17k",
+      strongerRank: "12k",
+      trigger: "mastery" as const,
+      found: 7,
+      target: 20,
+      sizes: [
+        { size: 9 as const, found: 3, target: 7, games: 3, minutes: 4.5 },
+        { size: 13 as const, found: 2, target: 6, games: 1, minutes: 6 },
+        { size: 19 as const, found: 2, target: 7, games: 1, minutes: 9 },
+      ],
+      band: "17k–13k",
+      createdAt: 0,
+    };
+    const last = { ...batch, id: "batch1", number: 1, weakerRank: "20k", strongerRank: "15k", trigger: "first" as const, found: 20, band: "20k–16k", finishedAt: 0 };
+    const running: GenerationStatus = { state: "generating", current: batch, last: { ...last, problems: 20, mastered: 16, needed: 15 }, batches: 1 };
+    const body = { ...problemsBody([]), generation: running };
+    expect(formatProblems(body, NOW).split("\n").slice(1, 3)).toEqual([
+      "problem generation: batch2 (17k vs 12k): 7/20 (9x9 3/7, 13x13 2/6, 19x19 2/7), generating now; difficulty band 17k–13k; new problems join practice as they're found",
+      "last generated batch: batch1 (20k vs 15k), 20 problems, difficulty band 20k–16k",
+    ]);
+    const idle: GenerationStatus = { state: "idle", current: null, last: { ...last, problems: 20, mastered: 9, needed: 15 }, batches: 1 };
+    expect(generationLines(idle)).toEqual(["last generated batch: batch1 (20k vs 15k), 20 problems, difficulty band 20k–16k; the next batch starts at 15 mastered (box 3+): 9/15"]);
+    expect(generationLines({ state: "idle", current: null, last: null, batches: 0 })).toEqual(["problem generation: no batch yet (the first starts once KataGo is ready)"]);
+    expect(formatGeneration(running).split("\n")).toEqual([
+      "problem generation: batch2 (17k vs 12k): 7/20 (9x9 3/7, 13x13 2/6, 19x19 2/7), generating now; difficulty band 17k–13k; new problems join practice as they're found",
+      "last generated batch: batch1 (20k vs 15k), 20 problems, difficulty band 20k–16k",
+      "  time so far: 9x9 4.5 min (3 games), 13x13 6 min (1 game), 19x19 9 min (1 game); 19.5 min in all",
+      `  batch1 took: 9x9 4.5 min (3 games), 13x13 6 min (1 game), 19x19 9 min (1 game); 19.5 min in all, finished ${new Date(0).toLocaleString()}`,
+      "finished batches: 1",
+    ]);
   });
 
   it("lists every problem with its answers and due time", () => {
-    const text = formatProblemList(problemsBody([item({}), item({ id: "p2", answers: ["E5", "F5"], due: NOW + 2 * 86_400_000, isDue: false })]), NOW);
+    const text = formatProblemList(
+      problemsBody([item({ source: { gameId: "g3", moveNumber: 9 } }), item({ id: "gen2", kind: "generated", generated, answers: ["E5", "F5"], due: NOW + 2 * 86_400_000, isDue: false })]),
+      NOW,
+    );
     expect(text.split("\n")).toEqual([
-      "problems: 2, 1 due; focus life_and_death (next_problem prefers it, then the learner's own, then built-ins)",
-      "  p1 life_and_death built-in box 1 due now answers D5",
-      "  p2 life_and_death built-in box 1 due in 2d answers E5,F5",
+      "problems: 2, 1 due; focus life_and_death (next_problem prefers it, then the learner's own, then generated)",
+      "  p1 life_and_death from g3 move 9 box 1 due now answers D5",
+      "  gen2 life_and_death generated 9x9, difficulty 17k, batch1 box 1 due in 2d answers E5,F5",
       "start one with: problem <id> (or problem for the next due)",
     ]);
     expect([dueText(NOW + 30_000, NOW), dueText(NOW + 5 * 3_600_000, NOW), dueText(NOW - 1, NOW)]).toEqual(["in 1m", "in 5h", "now"]);

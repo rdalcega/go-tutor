@@ -6,8 +6,12 @@ import type {
   ActionResponse,
   ChatMessage,
   ClientAction,
+  Color,
   GameSettings,
   GameView,
+  GeneratedProblemInfo,
+  GenerationStatus,
+  MistakeCategory,
   MoveEval,
   MoveRecord,
   Point,
@@ -20,7 +24,84 @@ import { fromGtp, moveGtp, toGtp, tryFromGtp } from "../../src/shared/coords.ts"
 import { BOX_INTERVALS, nextBox, resultOf } from "../../src/shared/schedule.ts";
 import { colorName, round1, tutorLevelChangedText } from "../../src/shared/text.ts";
 import { thresholdFor } from "../../src/shared/threshold.ts";
-import { BUILTIN_PROBLEMS, type BuiltinProblem } from "../../src/server/builtin-problems.ts";
+
+/** A batch of generated problems halfway done, for the progress card. */
+const MOCK_GENERATION: GenerationStatus = {
+  state: "waiting",
+  current: {
+    id: "batch1",
+    number: 1,
+    weakerRank: "20k",
+    strongerRank: "15k",
+    trigger: "first",
+    found: 7,
+    target: 20,
+    sizes: [
+      { size: 9, found: 4, target: 7, games: 5, minutes: 9 },
+      { size: 13, found: 2, target: 7, games: 2, minutes: 8 },
+      { size: 19, found: 1, target: 6, games: 1, minutes: 7 },
+    ],
+    band: "20k–16k",
+    createdAt: Date.now() - 30 * 60_000,
+  },
+  last: null,
+  batches: 0,
+};
+
+/** A practice problem for the mock: a board diagram (top row first; X black, O white) and its answers. */
+interface MockProblem {
+  id: string;
+  category: MistakeCategory;
+  toPlay: Color;
+  prompt: string;
+  board: readonly string[];
+  answers: readonly string[];
+  generated?: GeneratedProblemInfo;
+}
+
+const MOCK_PROBLEMS: readonly MockProblem[] = [
+  {
+    id: "p1",
+    category: "life_and_death",
+    toPlay: "B",
+    prompt: "Black to play. One of the groups here is fighting for its life. Find the move that settles it in your favor.",
+    board: [
+      ". . . . . . . . .",
+      ". . . . . . . . .",
+      ". . . . . . . . .",
+      "X X X X X X X X X",
+      "O O O O O O O O O",
+      ". . . . . . . . .",
+      "O O O O O O O O O",
+      ". O X X X X X O .",
+      ". O X . . . X O .",
+    ],
+    answers: ["E1"],
+  },
+  {
+    id: "gen1",
+    category: "tactics",
+    toPlay: "B",
+    prompt: "Black to play. Stones can be captured or saved here. Find the sharpest move.",
+    board: [
+      ". . . . . . . . . . . . .",
+      ". . . . . . . . . . . . .",
+      ". . . O . . . . . X . . .",
+      ". . X O . . . . . . . . .",
+      ". . X O . . . . . . . . .",
+      ". . . . . . . . . . . . .",
+      ". . . . . . . . . . . . .",
+      ". . . . . . . . . . . . .",
+      ". . . . . . . . . . O . .",
+      ". . X . . . . . . O X . .",
+      ". . . O X . . . . O X . .",
+      ". . . . . . . . . . . . .",
+      ". . . . . . . . . . . . .",
+    ],
+    answers: ["L4"],
+    generated: { batchId: "batch1", difficultyRank: "17k", weakerRank: "20k", strongerRank: "15k" },
+  },
+];
 
 function fakeEval(size: number, pointLoss: number, bestMove: string, lead: number, line?: string[]): MoveEval {
   const winBefore = 0.5 + Math.tanh(lead / 10) / 2;
@@ -68,7 +149,7 @@ class MockServer implements Transport {
   private msgId = 0;
   /** In problem mode: the game view underneath, and the problem on the board. */
   private gameView: { view: GameView; game: GoGame | null } | null = null;
-  private problemDef: BuiltinProblem | null = null;
+  private problemDef: MockProblem | null = null;
   private problemIndex = 0;
 
   constructor() {
@@ -234,6 +315,7 @@ class MockServer implements Transport {
       profileVersion: this.view?.profileVersion ?? 0,
       allowed: [],
       mistakeThreshold: thresholdFor(4, settings.size),
+      generation: MOCK_GENERATION,
     };
   }
 
@@ -360,17 +442,18 @@ class MockServer implements Transport {
     }
   }
 
-  /** Problem mode with the built-in problems in turn; the game view waits underneath. */
+  /** Problem mode with the mock problems in turn; the game view waits underneath. */
   private startProblem(): void {
-    const def = BUILTIN_PROBLEMS[this.problemIndex++ % BUILTIN_PROBLEMS.length]!;
+    const def = MOCK_PROBLEMS[this.problemIndex++ % MOCK_PROBLEMS.length]!;
     this.gameView ??= { view: this.view, game: this.game };
     this.game = null;
     this.problemDef = def;
+    const board = boardFromDiagram(def.board);
     this.view = {
-      ...this.freshView({ size: 9, komi: 7, humanColor: def.toPlay, botRank: "20k", handicap: 0 }),
+      ...this.freshView({ size: board.length as GameSettings["size"], komi: 7, humanColor: def.toPlay, botRank: "20k", handicap: 0 }),
       gameId: null,
       mode: "problem",
-      board: boardFromDiagram(def.board),
+      board,
       toPlay: def.toPlay,
       chat: this.gameView.view.chat,
       problem: {
@@ -378,7 +461,8 @@ class MockServer implements Transport {
         prompt: def.prompt,
         attempts: 0,
         solved: false,
-        kind: "builtin",
+        kind: def.generated ? "generated" : "game",
+        ...(def.generated ? { generated: def.generated } : { source: { gameId: "g1", moveNumber: 14 } }),
         category: def.category,
         toPlay: def.toPlay,
         maxAttempts: 2,
@@ -396,7 +480,8 @@ class MockServer implements Transport {
     if (!p || !def) return "No problem on the board.";
     if (p.revealed) return "This problem is over. Press Next problem, or Back to playing.";
     if (!GoGame.fromBoard(v.board, def.toPlay).isLegal(point)) return "That point is already taken.";
-    const gtp = toGtp(point, 9);
+    const size = v.board.length;
+    const gtp = toGtp(point, size);
     p.attempts++;
     const correct = def.answers.includes(gtp);
     p.lastAttempt = { move: gtp, correct, pointLoss: correct ? 0 : round1(3 + Math.random() * 5) };
@@ -409,7 +494,7 @@ class MockServer implements Transport {
       p.box = nextBox(p.box, resultOf(correct, p.attempts));
       p.nextDue = Date.now() + BOX_INTERVALS[p.box]!;
       v.status = "finished";
-      const shown = fromGtp(correct ? gtp : answer, 9)!;
+      const shown = fromGtp(correct ? gtp : answer, size)!;
       v.overlay = {
         variation: { label: correct ? `${gtp} and how play goes on` : `KataGo's answer: ${answer}`, moves: [{ color: def.toPlay, point: shown }] },
         ...(!correct && { marks: [{ point, kind: "x" as const }] }),

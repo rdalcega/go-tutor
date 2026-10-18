@@ -210,6 +210,8 @@ export interface GameView {
   mistakeThreshold: number;
   /** A finished game's summary (its mistakes worst first, as the server counted them); absent otherwise. */
   summary?: GameSummary;
+  /** Problem generation: the batch in progress and the newest finished one. */
+  generation?: GenerationStatus;
 }
 
 /** POST /api/action and POST /api/tutor. */
@@ -224,10 +226,11 @@ export interface ProblemView {
   prompt: string;
   /** Source game and move, when built from the user's own mistake. */
   source?: { gameId: string; moveNumber: number };
+  /** Where a generated problem comes from (kind "generated"). */
+  generated?: GeneratedProblemInfo;
   attempts: number;
   solved: boolean;
-  /** "game" = built from the learner's own mistake; "builtin" = one of the classic starter problems. */
-  kind: "game" | "builtin";
+  kind: ProblemKind;
   category: MistakeCategory;
   /** The learner's color in this problem (the side to move). */
   toPlay: Color;
@@ -292,6 +295,8 @@ export type TutorCommand =
   | { type: "claim"; momentId: string }
   | { type: "new_game"; settings?: Partial<GameSettings> }
   | { type: "start_problem"; problemId?: string }
+  /** Start the next batch of generated problems now, even if the mastery trigger hasn't fired. */
+  | { type: "generate" }
   /**
    * `takenBack`: a taken-back first attempt at that move number, not the move that stayed on the
    * board: a number is the try's number there (review's "first try #2"), `true` the only one.
@@ -334,19 +339,24 @@ export type TutorEvent =
   | { seq: number; ts: number; type: "game_end"; gameId: string; result: GameResult; summary: GameSummary }
   /** The finished game's rank estimate is in and the rating updated. */
   | { seq: number; ts: number; type: "rating"; gameId: string; rating: RatingChange }
+  /** A batch of generated problems started or finished. */
+  | { seq: number; ts: number; type: "generation"; status: "started" | "finished"; batch: GenerationBatchStatus }
   /** A practice problem is on the board. `answers` are the accepted moves (for the tutor; the learner doesn't see them). */
   | {
       seq: number;
       ts: number;
       type: "problem_start";
       problemId: string;
-      kind: "game" | "builtin";
+      kind: ProblemKind;
       category: MistakeCategory;
       toPlay: Color;
       prompt: string;
       answers: Gtp[];
       box: number;
       source?: { gameId: string; moveNumber: number };
+      /** Board size (absent in events logged before generated problems, which were all 9×9). */
+      size?: number;
+      generated?: GeneratedProblemInfo;
       /** ASCII rendering of the problem position. */
       board: string;
     }
@@ -510,7 +520,8 @@ export interface ProfileResponse {
 /** One practice problem as GET /api/problems lists it. */
 export interface ProblemListItem {
   id: string;
-  kind: "game" | "builtin";
+  kind: ProblemKind;
+  size: number;
   category: MistakeCategory;
   toPlay: Color;
   prompt: string;
@@ -528,6 +539,8 @@ export interface ProblemListItem {
   /** The learner's game and move it came from (kind "game"), and the points that move lost. */
   source?: { gameId: string; moveNumber: number };
   difficulty?: number;
+  /** Where a generated problem comes from (kind "generated"). */
+  generated?: GeneratedProblemInfo;
 }
 
 /** GET /api/problems. */
@@ -538,7 +551,7 @@ export interface ProblemsResponse {
     total: number;
     due: number;
     fromGames: number;
-    builtin: number;
+    generated: number;
     /** Problems per box; index 0 is box 1. */
     byBox: number[];
     /** Due problems per category. */
@@ -546,6 +559,67 @@ export interface ProblemsResponse {
   };
   /** The profile's recommended focus, which next_problem prefers. */
   focus: FocusRecommendation;
+  /** Problem generation: the batch in progress and the newest finished one. */
+  generation?: GenerationStatus;
+}
+
+/**
+ * "game" = built from the learner's own mistake; "generated" = from a mistake in a game KataGo
+ * played against itself with its human-style net (src/server/generate.ts).
+ */
+export type ProblemKind = "game" | "generated";
+
+/** What the learner, the tutor and the UI see of a generated problem's origin. */
+export interface GeneratedProblemInfo {
+  batchId: string;
+  /** The rank at which KataGo's human-style policy finds an answer half the time, e.g. "14k". */
+  difficultyRank: string;
+  /** The human-SL ranks of the self-play game: the side that made the mistake, and its opponent. */
+  weakerRank: string;
+  strongerRank: string;
+}
+
+/** One board size's share of a batch of generated problems. */
+export interface GenerationSizeStatus {
+  size: 9 | 13 | 19;
+  found: number;
+  target: number;
+  /** Self-play games finished on this size so far, and KataGo time spent on this size, in minutes. */
+  games: number;
+  minutes: number;
+}
+
+/** A batch of generated problems (GET /api/generation, GameView.generation). */
+export interface GenerationBatchStatus {
+  id: string;
+  number: number;
+  weakerRank: string;
+  strongerRank: string;
+  /** "first" = the starter batch; "mastery" = the previous batch was mastered; "manual" = `tutor generate --now`. */
+  trigger: "first" | "mastery" | "manual";
+  found: number;
+  target: number;
+  sizes: GenerationSizeStatus[];
+  /** The difficulty band preferred, e.g. "20k–16k". */
+  band: string;
+  createdAt: number;
+  finishedAt?: number;
+}
+
+export interface GenerationStatus {
+  /**
+   * "generating" = KataGo is working on a batch; "waiting" = a batch is in progress but waits while
+   * the learner plays or KataGo isn't ready; "idle" = no batch in progress.
+   */
+  state: "generating" | "waiting" | "idle";
+  current: GenerationBatchStatus | null;
+  /**
+   * The newest finished batch: its problems, how many are mastered (Leitner box 3 or higher), and
+   * how many mastered ones start the next batch.
+   */
+  last: (GenerationBatchStatus & { problems: number; mastered: number; needed: number }) | null;
+  /** Finished batches so far. */
+  batches: number;
 }
 
 /**

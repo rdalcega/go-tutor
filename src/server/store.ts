@@ -6,7 +6,8 @@ import { appendFileSync, closeSync, copyFileSync, existsSync, fstatSync, mkdirSy
 import { dirname, join, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { MISTAKE_CATEGORIES, TUTOR_LEVELS, type MistakeCategory, type Profile, type SavedGame, type TutorEvent, type TutorLevel } from "../shared/types.ts";
-import { withBuiltins, type StoredProblem } from "./problems.ts";
+import { emptyGeneration, type GenerationFile } from "./generate.ts";
+import type { StoredProblem } from "./problems.ts";
 
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 
@@ -188,6 +189,10 @@ export class Store {
     return join(this.dir, "problems.json");
   }
 
+  private get generationPath(): string {
+    return join(this.dir, "generation.json");
+  }
+
   // --- profile -------------------------------------------------------------
 
   /** The profile, with defaults for anything missing. A corrupt file is set aside, not lost. */
@@ -217,24 +222,40 @@ export class Store {
   // --- practice problems ---------------------------------------------------
 
   /**
-   * Every practice problem: the learner's (problems.json) and the built-in set, whose progress is
-   * stored there too. A corrupt file is set aside, not lost.
+   * Every practice problem (problems.json): from the learner's games and generated. A corrupt file
+   * is set aside, not lost.
    */
   loadProblems(): StoredProblem[] {
-    let stored: StoredProblem[] = [];
-    if (existsSync(this.problemsPath)) {
-      try {
-        const saved = JSON.parse(readFileSync(this.problemsPath, "utf8")) as { problems?: StoredProblem[] };
-        stored = Array.isArray(saved.problems) ? saved.problems : [];
-      } catch {
-        renameSync(this.problemsPath, `${this.problemsPath}.corrupt-${Date.now()}`);
-      }
+    if (!existsSync(this.problemsPath)) return [];
+    try {
+      const saved = JSON.parse(readFileSync(this.problemsPath, "utf8")) as { problems?: StoredProblem[] };
+      return Array.isArray(saved.problems) ? saved.problems : [];
+    } catch {
+      renameSync(this.problemsPath, `${this.problemsPath}.corrupt-${Date.now()}`);
+      return [];
     }
-    return withBuiltins(stored);
   }
 
   saveProblems(problems: readonly StoredProblem[]): void {
     writeAtomic(this.problemsPath, JSON.stringify({ version: 1, problems }, null, 1) + "\n");
+  }
+
+  // --- problem generation --------------------------------------------------
+
+  /** generation.json: the generated batches and the one in progress. A corrupt file is set aside, not lost. */
+  loadGeneration(): GenerationFile {
+    if (!existsSync(this.generationPath)) return emptyGeneration();
+    try {
+      const saved = JSON.parse(readFileSync(this.generationPath, "utf8")) as Partial<GenerationFile>;
+      return { ...emptyGeneration(), ...saved, batches: Array.isArray(saved.batches) ? saved.batches : [] };
+    } catch {
+      renameSync(this.generationPath, `${this.generationPath}.corrupt-${Date.now()}`);
+      return emptyGeneration();
+    }
+  }
+
+  saveGeneration(state: GenerationFile): void {
+    writeAtomic(this.generationPath, JSON.stringify(state) + "\n");
   }
 
   // --- games ---------------------------------------------------------------

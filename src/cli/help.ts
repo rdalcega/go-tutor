@@ -3,7 +3,7 @@
 import { MISTAKE_CATEGORIES } from "../shared/types.ts";
 
 export const USAGE = `usage: npm run -s tutor -- <command> [args] [--json]
-commands: watch, state, say, rethink, show, mark, clear, resume, claim, new-game, problem, problems, tag, summary, review, help
+commands: watch, state, say, rethink, show, mark, clear, resume, claim, new-game, problem, problems, generate, tag, summary, review, help
 run "npm run -s tutor -- help" for details and examples`;
 
 export const HELP = `Go Tutor CLI: you (Claude) are the teacher. The learner plays Go in a browser against KataGo;
@@ -31,6 +31,20 @@ SESSION FLOW
   7. on PROBLEM_START / PROBLEM: the learner is on a practice problem. Let them try; after a wrong
                  first attempt ask what they see (say); after the answer is shown, explain it with show.
   8. on LEVEL:   the learner changed how much you step in (see TUTOR LEVELS); follow it from now on.
+  9. on BATCH:   a batch of generated practice problems started or finished (see GENERATED PROBLEMS);
+                 mention a finished one when it fits, not in the middle of a game on Silent.
+
+GENERATED PROBLEMS
+  Besides the problems from the learner's own mistakes, the server generates problems in the
+  background: KataGo plays itself with its human-style net (the weaker side at the learner's rank,
+  the other 5 ranks stronger), and the weaker side's big, clear, local mistakes become one-move
+  problems, always Black to play (colors swapped when the mistake was White's), on 9x9, 13x13 and
+  19x19. Each has a difficulty: the rank at which KataGo's human-style policy finds an answer half
+  the time ("difficulty 14k"; often stronger than the learner, since these are moves a weaker player
+  misses). They come in batches of 20 (7/7/6 by size) and join practice as they're found; the first
+  batch is 20k vs 15k, and the next starts when the learner has mastered 15 of the newest batch
+  (Leitner box 3+: solved on the first try twice). Generation pauses while the learner plays.
+  generate shows progress; generate --now starts the next batch early.
 
 TUTOR LEVELS (the learner picks one in the UI; summary, state and GAME_START show it)
   coach      full coaching: teaching moments, say/show/mark, and rethink to take the move back.
@@ -71,8 +85,11 @@ COMMANDS
         GAME_END g12 W+3.5 — 3 mistakes (1 taken back), worst move 14 (6.2), total loss 15 over 61 moves, help: 1 hint, rank estimate running (a RATING line follows) — run: review g12
         RATING g12 rank estimate 18k from 25 unassisted moves (1 hint); rating 10 -> 11.9 (+1.9, rank 18k); next bot 18k
         PROBLEM_START p4 life_and_death B to play (from g12 move 14, box 1) answers D5 — "Black to play. ..." — run: state; ...
+        PROBLEM_START gen7 tactics B to play (generated 13x13, difficulty 14k, batch1, box 1) answers K4 — ...
         PROBLEM p4 attempt 1 C7 wrong, lost 5.2 (life_and_death; another attempt left) — ask what they see, ...
         PROBLEM p4 attempt 2 D5 correct (life_and_death) — best D5, pv D5 E4 C6 — say why it works
+        BATCH batch2 started (mastery): 20 problems from 17k vs 12k self-play, difficulty band 17k–13k; ...
+        BATCH batch2 finished: 20 new problems (7 on 9x9, 6 on 13x13, 7 on 19x19), difficulty band 17k–13k — ...
       Example: npm run -s tutor -- watch
 
   state
@@ -135,7 +152,7 @@ COMMANDS
   problem [id]
       Put a practice problem on the learner's board (problem mode; any game waits underneath). With
       no id, the next due one: the recommended focus category first, then problems from the learner's
-      own mistakes, then the built-in classics. The learner gets 2 attempts; KataGo judges each move
+      own mistakes, then generated ones. The learner gets 2 attempts; KataGo judges each move
       (within 1 point of its best counts as correct) and shows its line when the problem is over.
       In problem mode, show and mark draw on the problem position (show starts with the learner's
       color); the learner presses Next problem or Back to playing, or you run new-game.
@@ -143,9 +160,17 @@ COMMANDS
 
   problems
       Every practice problem in the order "problem" picks them: id, category, source game and move
-      (or built-in), Leitner box (1-5; first-try solves move up, failures go back to 1), when it is
-      due, results so far, and the accepted answers.
+      (or "generated 13x13, difficulty 14k, batch1"), Leitner box (1-5; first-try solves move up,
+      failures go back to 1), when it is due, results so far, and the accepted answers.
       Example: npm run -s tutor -- problems
+
+  generate [--status | --now]
+      Problem generation: the batch in progress (found/target per board size, whether it is running
+      or paused while the learner plays), the last finished batch and how many of its problems are
+      mastered (15 start the next batch), and KataGo minutes per size. --now starts the next batch
+      first, even if the trigger hasn't fired (refused while one is running): at the learner's rank,
+      except the very first batch, which is always 20k vs 15k.
+      Example: npm run -s tutor -- generate --status
 
   tag <gameId> <move#> <category> [note] [--taken-back [n]]
       Record why a mistake happened; feeds the learner profile. Categories:
@@ -162,7 +187,8 @@ COMMANDS
       learner is below 20k), the tutor level, the mistake threshold on each board size and its last
       change, mistake counts by category with the last 3 games,
       recent mistakes (taken-back first tries marked), the recommended focus with its reason, and
-      practice problems (how many, how many are due, by category, and the next few due).
+      practice problems (how many, from games and generated, problem generation's progress, how many
+      are due, by category, and the next few due).
       Example: npm run -s tutor -- summary
 
   review [gameId|last]

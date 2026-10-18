@@ -53,7 +53,7 @@
             <div class="row">
               <button id="pass" title="Pass (P)">Pass</button>
               <button id="take-back" title="Take back your last move (and the bot's reply)">Take back</button>
-              <button id="practice" title="Practice problems from your mistakes">Practice</button>
+              <button id="practice" title="Practice problems: from your mistakes, and generated at your level">Practice</button>
               <button id="resign" class="danger">Resign</button>
             </div>
             <fieldset class="levels" id="levels">
@@ -137,6 +137,7 @@
               <div><dt>Games</dt><dd id="pr-games">–</dd></div>
               <div><dt>Pauses at</dt><dd id="pr-threshold" title="A move that loses this many points is a teaching moment">–</dd></div>
               <div><dt>Work on</dt><dd id="pr-cats">–</dd></div>
+              <div id="pr-problems-row" hidden><dt>Problems</dt><dd id="pr-problems">–</dd></div>
             </dl>
             <svg class="spark rating-spark" id="pr-spark" viewBox="0 0 300 32" preserveAspectRatio="none" aria-label="Rating over recent games"></svg>
           </div>

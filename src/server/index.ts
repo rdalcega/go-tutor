@@ -8,6 +8,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { TutorBridge, parseClientAction, parseTutorCommand } from "./bridge.ts";
 import { UserError } from "./common.ts";
 import { GameController, type GameEngine } from "./game.ts";
+import { removeLegacyBuiltins } from "./generate.ts";
 import { KataGo } from "./katago.ts";
 import { problemsResponse } from "./problems.ts";
 import { recommendFocus } from "./profile.ts";
@@ -147,9 +148,11 @@ export function createApp({ controller, bridge, store, distDir = join(REPO_ROOT,
       return sendJson(res, 200, body);
     }
     if (path === "/api/problems" && method === "GET") {
-      const body: ProblemsResponse = problemsResponse(store.loadProblems(), Date.now(), recommendFocus(controller.currentProfile));
+      const generation = controller.generationStatus();
+      const body: ProblemsResponse = problemsResponse(store.loadProblems(), Date.now(), recommendFocus(controller.currentProfile), generation);
       return sendJson(res, 200, body);
     }
+    if (path === "/api/generation" && method === "GET") return sendJson(res, 200, controller.generationStatus());
     const gameMatch = /^\/api\/game\/([^/]+)$/.exec(path);
     if (gameMatch && method === "GET") {
       const id = decodeURIComponent(gameMatch[1]!);
@@ -221,6 +224,9 @@ async function main(): Promise<void> {
   const tutorTimeoutMs = Number.isFinite(timeout) && timeout >= 0 ? timeout : 30_000;
   const debug = !!process.env.GO_TUTOR_DEBUG;
   const store = new Store();
+  // Generated problems replaced the built-in starter set: drop it from problems.json (backed up first).
+  const migrated = removeLegacyBuiltins(store, Date.now());
+  if (migrated.removed) console.log(`removed ${migrated.removed} built-in practice problems from problems.json (backup in ${migrated.backupDir})`);
   const mayRestart = crashLimiter();
   let controller: GameController;
   const engine = new KataGo({
@@ -238,9 +244,17 @@ async function main(): Promise<void> {
     },
   });
   const gameEngine: GameEngine = engine;
-  controller = new GameController({ engine: gameEngine, store, tutorTimeoutMs, log: (m) => console.log(m) });
+  controller = new GameController({
+    engine: gameEngine,
+    store,
+    tutorTimeoutMs,
+    log: (m) => console.log(m),
+    ...(debug && { debug: (m: string) => console.log(`[generate] ${m}`) }),
+  });
   const bridge = new TutorBridge(controller, store);
   controller.restoreLastGame();
+  // In the background whenever KataGo is free: resumes a batch in progress, or starts the first one.
+  controller.startGeneration();
 
   const server = createApp({ controller, bridge, store });
   await new Promise<void>((resolveListen, rejectListen) => {
@@ -261,6 +275,8 @@ async function main(): Promise<void> {
     bridge.close();
     server.close();
     server.closeAllConnections();
+    // generation.json is written after every step, so a stopped batch resumes from its last move.
+    void controller.stopGeneration();
     engine.stop().finally(() => process.exit(0));
   };
   process.on("SIGINT", shutdown);

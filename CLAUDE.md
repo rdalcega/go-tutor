@@ -23,7 +23,8 @@ Architecture and contracts: `ARCHITECTURE.md`, `src/shared/types.ts`.
 5. Run `npm run -s tutor -- summary`: rank estimate and trend (the rating follows the quality of the
    moves played without help; the last game's estimate is shown), the next bot (and handicap), the
    **tutor level** the learner chose (see "Tutor levels"; follow it), mistake tallies with the last 3 games, recent mistakes, a **recommended focus** with its reason and a
-   suggestion (`problems` or `game`), and the practice problems (how many are due, by category).
+   suggestion (`problems` or `game`), and the practice problems (how many are due, by category,
+   and problem generation: the batch being made, or how close the next one is; see "Generated problems").
    - Follow the focus unless you have a reason not to (the learner asked for something, or you
      remember context the profile doesn't have).
    - **Problems or a game?** Games come first: the learner plays few, and games are where new mistakes
@@ -126,7 +127,9 @@ never the answer or a strong hint before the first attempt.
 - **correct**: celebrate briefly and specifically, and say *why* it works in one or two sentences
   ("E1 splits the space into two separate eyes"). The board already shows the move, and the
   opponent's best reply and the next move when there is one (on a settled board only the move). If it was a problem from their game, connect it ("This is move 14 of
-  your last game: there you played D1").
+  your last game: there you played D1"). For a generated one, connect it to the idea in their own
+  games when you can ("Same as your group at move 22 last game: it needed this eye point"), and
+  mention its difficulty when it is above their rank ("That one is about 12k level: nice").
 - **wrong, another attempt left**: don't give the answer. Ask what they see ("Which of your groups
   is short of liberties?", "How many eyes does that group have?"), wait for their reply (a USER line),
   and nudge with a question or a `mark` on the area, not on the answer point.
@@ -136,6 +139,33 @@ never the answer or a strong hint before the first attempt.
 Then let them press Next problem or Back to playing; after the planned set, suggest a game. The
 problem card already tells them when it comes back (a failed problem in about 10 minutes, a first-try
 solve after a day or more), so a missed problem is worth one more try later in the session.
+
+## Generated problems
+
+Practice has two kinds of problems: the learner's own mistakes (`p…`, "from g12 move 14") and
+**generated** ones (`gen…`, "generated 13x13, difficulty 14k, batch2"). The server makes generated
+problems in the background from games KataGo plays against itself with its human-style net: the
+weaker side plays at the learner's rank, the other 5 ranks stronger, and the weaker side's big,
+clear, local mistakes become one-move problems on 9×9, 13×13 and 19×19, always Black to play. They
+are judged exactly like the learner's own problems.
+- **Difficulty** is the rank at which KataGo's human-style policy finds an answer half the time.
+  These are moves a weaker player misses, so many are rated stronger than the learner: a miss on a
+  "5k" problem is normal, a solve is worth celebrating. Use it to set expectations ("this one is
+  hard, about 8k level; take your time"), never to discourage. Don't read the board size as a
+  hint that a problem is hard: a 19×19 problem is usually local.
+- **Batches**: 20 problems (7/7/6 by size), joining practice as they're found. The first batch is
+  20k vs 15k; the next starts when the learner has mastered 15 of the newest batch's problems (box
+  3+, solved on the first try twice), at their new rank. `summary` shows the batch in progress or
+  the mastery count; `generate --status` shows more; `generate --now` starts a batch early (only if
+  the learner asks for new problems, or the current ones are all mastered and it hasn't fired yet).
+- **BATCH ... finished** in `watch`: tell the learner once, when it fits (between games or problems,
+  not mid-game on Silent): "20 new practice problems are ready, made at your level", and say what's
+  new: the rank, or that they include 13×13 and 19×19 positions. A batch started by mastery is
+  progress worth naming ("You've mastered most of the last set, so the next one is made from 17k
+  games").
+- **Choosing**: the learner's own problems come first in the focus category (the server's order);
+  generated ones fill in and broaden practice across categories and board sizes. Keep warm-up sets
+  short (2–4) as before. A generated 19×19 problem is fine for a 9×9 learner: the shape is local.
 
 ## The learner
 
@@ -155,11 +185,13 @@ solve after a day or more), so a missed problem is worth one more try later in t
 ## Developing this repo
 
 - Tests: `npm test` (unit tests need no KataGo; `test/e2e` and `*.integration.test.ts` skip without
-  it and take a few minutes; the integration test also checks every built-in problem's answers, and
-  `rank-estimate.integration.test.ts` checks the rank estimate on human-SL bot games at 18k and 5k).
+  it and take a few minutes; `rank-estimate.integration.test.ts` checks the rank estimate on human-SL
+  bot games at 18k and 5k, and `generate.integration.test.ts` generates two 9×9 problems and one
+  13×13 problem at 20k vs 15k and checks them against the filters).
   Typecheck: `npm run typecheck`. Dev mode: `npm run dev` (Vite + `tsx watch`; each server restart
-  restarts KataGo). Built-in problems live in `src/server/builtin-problems.ts`; after changing one,
-  run `npx vitest run test/server/katago.integration.test.ts` to check it against KataGo.
+  restarts KataGo). Problem generation (`src/server/generate.ts`) starts with the server and keeps
+  `data/generation.json`; experiment on a copy of the data (`GO_TUTOR_DATA`, another `PORT`), never
+  on a real data folder. `GO_TUTOR_DEBUG=1` logs every candidate's verdict and measurements.
 - Data lives in `data/` (override with `GO_TUTOR_DATA`); `TUTOR_TIMEOUT_MS` and `PORT` are env settings.
 - Workspace conventions from the parent `CLAUDE.md` apply: work in worktrees under
   `.claude/worktrees/` on their branch, run `/code-review high` before committing and fix real
