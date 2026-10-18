@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { Client } from "../../src/cli/client.ts";
 import { toAscii } from "../../src/engine/ascii.ts";
 import type { Board } from "../../src/shared/types.ts";
-import { watch } from "../../src/cli/watch.ts";
+import { PLAYOUT_CONTEXT, watch } from "../../src/cli/watch.ts";
 
 function sseResponse(chunks: string[]): Response {
   const enc = new TextEncoder();
@@ -239,6 +239,13 @@ describe("watch", () => {
       const failed = await run([[problemStart(3, "p4"), attempt(4, "p4")]], { failState: true });
       expect(failed.out[0]!.split("\n").map((l) => l.split(" ")[0])).toEqual(["PROBLEM_START", "PROBLEM"]);
       expect(failed.out[0]).toMatch(/run: state; let them try/);
+
+      // A problem being played out: its board is not the tutor's, whichever way the start arrives.
+      const playing = { ...problemView, problem: { ...problemView.problem, revealed: true, playout: { line: ["D5", "C4"], cursor: 2, thinking: false, over: false } } };
+      const chat = { seq: 5, ts: 0, type: "user_message", text: "why there?", gameId: null, problemId: "p4", playout: true };
+      const played = await run([[problemStart(3, "p4"), chat]], { view: playing });
+      const out2 = played.out[0]!.split("\n");
+      expect(out2).toEqual([expect.stringMatching(/^PROBLEM_START p4 /), 'USER "why there?" (problem p4, playing it out: answer with one short say)', PLAYOUT_CONTEXT]);
     });
 
     it("prints the brief state under a waiting moment in the same write", async () => {

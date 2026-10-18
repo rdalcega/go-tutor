@@ -77,9 +77,32 @@ describe("allowedActions", () => {
   it("lets the learner play a problem until it is revealed, while KataGo isn't checking", () => {
     const problem = (revealed: boolean, checking: boolean) => game({ mode: "problem", problem: { revealed, checking } });
     expect(allowedActions(problem(false, false))).toEqual([...ALWAYS, "leave_problem", "play"]);
-    expect(allowedActions(problem(true, false))).toEqual([...ALWAYS, "leave_problem"]);
+    // Once answered, the problem can be played out.
+    expect(allowedActions(problem(true, false))).toEqual([...ALWAYS, "leave_problem", "playout_start"]);
     expect(allowedActions(problem(false, true))).toEqual([...ALWAYS, "leave_problem"]);
     expect(allowedActions({ ...problem(false, false), engineReady: false })).toEqual([...ALWAYS, "leave_problem"]);
+  });
+
+  it("steps through a play-out, and lets the learner play only on their turn while KataGo isn't thinking", () => {
+    const po = { cursor: 0, length: 0, thinking: false, learnerToPlay: true, over: false };
+    const playout = (p: Partial<typeof po> = {}, s: Partial<ActionState> = {}) =>
+      allowedActions(game({ mode: "problem", problem: { revealed: true, checking: false, playout: { ...po, ...p } }, ...s }));
+    const base = [...ALWAYS, "leave_problem", "playout_exit"];
+    // At the problem position: Forward has KataGo move for the learner; no Back, no Play it out again.
+    expect(playout()).toEqual([...base, "playout_forward", "play", "pass"]);
+    expect(playout({ cursor: 2, length: 3 })).toEqual([...base, "playout_back", "playout_forward", "play", "pass"]);
+    // KataGo's turn: Forward asks it, the learner can't play.
+    expect(playout({ cursor: 1, length: 1, learnerToPlay: false })).toEqual([...base, "playout_back", "playout_forward"]);
+    // Thinking: Back cancels its answer; nothing else moves.
+    expect(playout({ cursor: 1, length: 1, thinking: true, learnerToPlay: false })).toEqual([...base, "playout_back"]);
+    // Over: only stored moves and Back.
+    expect(playout({ cursor: 2, length: 2, over: true })).toEqual([...base, "playout_back"]);
+    expect(playout({ cursor: 1, length: 2, over: true })).toEqual([...base, "playout_back", "playout_forward"]);
+    // KataGo not ready: stored moves still step; nothing new is asked for.
+    expect(playout({ cursor: 1, length: 2 }, { engineReady: false })).toEqual([...base, "playout_back", "playout_forward"]);
+    expect(playout({ cursor: 2, length: 2 }, { engineReady: false })).toEqual([...base, "playout_back"]);
+    // The game's state underneath doesn't count.
+    expect(playout({}, { humanColor: "W", toPlay: "W", status: "paused" })).toContain("play");
   });
 
   it("offers hiding the drawing whenever one is on the board, in every mode", () => {

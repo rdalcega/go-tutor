@@ -216,7 +216,7 @@ function formatKnownEvent(e: TutorEvent, ctx: EventContext): string {
     }
     case "user_message":
       // On a practice problem the message is about the problem; the game id would point at the wrong board.
-      if (e.problemId) return `USER ${quote(e.text)} (problem ${e.problemId})`;
+      if (e.problemId) return `USER ${quote(e.text)} (problem ${e.problemId}${e.playout ? ", playing it out: answer with one short say" : ""})`;
       return `USER ${quote(e.text)}${e.momentId ? ` (moment ${e.momentId})` : ""}${e.gameId ? ` game=${e.gameId}` : ""}${e.tutorLevel ? ` level=${e.tutorLevel}` : ""}${ctx.attached === true ? " — state below" : ctx.attached === false ? " — run state for the board" : ""}`;
     case "hint_request":
       return `HINT game=${e.gameId} ${e.toPlay} to play${e.tutorLevel ? ` level=${e.tutorLevel}` : ""} — user asks: ${quote(e.text ?? "hint please")} — ${ctx.attached ? "state below; answer with" : "run: state, then"} say/show/mark`;
@@ -311,6 +311,12 @@ export function problemLines(p: ProblemView, size?: number): string[] {
   const a = p.lastAttempt;
   if (a) lines.push(`last attempt ${a.move} ${a.correct ? "correct" : "wrong"}${a.pointLoss !== null ? `, lost ${num(a.pointLoss)}` : ""}`);
   if (p.answer) lines.push(`answer ${p.answer.move} (pv ${pv(p.answer.pv)})`);
+  if (p.playout) {
+    const po = p.playout;
+    lines.push(
+      `playing it out against KataGo: move ${po.cursor} of ${po.line.length}${po.line.length ? ` (${pv(po.line)})` : ""}${po.over ? ", both passed" : ""} — unjudged; don't comment, only answer their chat`,
+    );
+  }
   if (p.recentMoves?.length && size !== undefined) {
     lines.push(`last moves (labeled on the board): ${[...p.recentMoves].reverse().map((m) => `-${m.ago} ${m.color} ${toGtp(m.point, size)}`).join(", ")}`);
   }
@@ -369,6 +375,7 @@ export function statusLine(v: GameView, now = Date.now()): string {
     const p = v.problem;
     parts.push(`attempts=${p.attempts}/${p.maxAttempts}`);
     if (p.revealed) parts.push(p.solved ? "solved" : `answer shown (${p.answer?.move ?? "?"})`);
+    if (p.playout) parts.push(`playout=${p.playout.cursor}/${p.playout.line.length}`);
   } else {
     parts.push(`moves=${v.moves.length}`);
   }

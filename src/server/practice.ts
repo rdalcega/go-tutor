@@ -1,9 +1,11 @@
 // Problem mode: one practice problem on the board, judged against KataGo, while any game waits
 // underneath in the GameController (game.ts), which starts and ends sessions, keeps the chat and
-// writes the problem's progress and the profile.
+// writes the problem's progress and the profile. Once a problem is answered the learner can play it
+// out against full-strength KataGo (Playout): unjudged, unrecorded, and kept out of the tutor's stream.
 
 import { toAscii, type GoGame } from "../engine/index.ts";
-import { samePoint, toGtp } from "../shared/coords.ts";
+import type { PlayoutState } from "../shared/allowed.ts";
+import { samePoint, toGtp, tryFromGtp } from "../shared/coords.ts";
 import { plural, round1 } from "../shared/text.ts";
 import { sizeText } from "../shared/threshold.ts";
 import type { ClientAction, Color, GameSettings, GameView, Gtp, Overlay, Point, ProblemAttempt, ProblemReview, RecentMove, TutorCommand } from "../shared/types.ts";
@@ -13,6 +15,42 @@ import { ANSWER_MARGIN, MAX_ATTEMPTS, gameSource, generatedInfo, problemGame, pr
 
 /** Moves of the follow-up drawn after a correct answer: the answer, the opponent's best reply, the next move. */
 const ANSWER_LINE_LENGTH = 3;
+
+/** What the tutor is told when it tries to draw on (or comment on) a problem being played out. */
+export const PLAYOUT_REFUSAL =
+  "The learner is playing the answered problem out against full-strength KataGo: nothing is judged and you don't comment on it. Answer their chat with one say.";
+
+/**
+ * Playing an answered problem out against KataGo. One line, no branches: playing a move after
+ * stepping back drops the moves that were ahead.
+ */
+interface Playout {
+  /** The whole line from the problem position, the learner first, moves ahead of the cursor included. */
+  line: Gtp[];
+  /** Moves of `line` on the board (0: the problem position). */
+  cursor: number;
+  /** The rules engine at the cursor: the problem position plus line[0..cursor), so ko and passes count from the problem. */
+  game: GoGame;
+  /** Bumped by every step, play and exit: KataGo's answer for an older one is dropped. */
+  gen: number;
+  /** KataGo is choosing a move. */
+  thinking: boolean;
+  /** The learner chatted: the tutor may answer with one say (the only comment it makes here). */
+  questionOpen: boolean;
+}
+
+/**
+ * KataGo's move in a play-out: its best candidate that is legal here (its rules can disagree with
+ * ours on a repeated position), or a pass when it prefers one or none is legal.
+ */
+export function playoutMove(analysis: Pick<Analysis, "moveInfos">, game: GoGame): Gtp {
+  for (const info of analysis.moveInfos) {
+    if (info.move === "pass") return "pass";
+    const point = tryFromGtp(info.move, game.size);
+    if (point && game.isLegal(point)) return info.move;
+  }
+  return "pass";
+}
 
 /** What a session needs from the controller. */
 export interface PracticeDeps {
@@ -54,6 +92,12 @@ export class PracticeSession {
   private readonly analyses = new Map<string, Promise<Analysis>>();
   /** The last moves before the position that the board labels (the position never changes). */
   private readonly recentMoves: RecentMove[] | undefined;
+  /** The answer's line as drawn when the problem was revealed: a play-out starts with it ahead. */
+  private answerLine: Gtp[] = [];
+  /** The learner is playing the answered problem out. */
+  private playout: Playout | null = null;
+  /** The drawing the reveal left on the board, put back when the play-out ends. */
+  private answerOverlay: Overlay | null = null;
 
   /** Throws a UserError when the problem can't be set up. `review`: the problem's place in a review of one game's mistakes. */
   constructor(
@@ -77,6 +121,11 @@ export class PracticeSession {
 
   get solved(): boolean {
     return this.lastAttempt?.correct === true;
+  }
+
+  /** The learner is playing the answered problem out against KataGo: nothing about it is the tutor's. */
+  get playingOut(): boolean {
+    return this.playout !== null;
   }
 
   /** Put the problem on the board: tell the learner and the tutor, and let KataGo read the position. */
@@ -116,6 +165,7 @@ export class PracticeSession {
    */
   close(): StoredProblem | undefined {
     this.closed = true;
+    this.playout = null;
     // Unrevealed means unsolved, so any judged attempt was wrong.
     if (this.revealed || !this.lastAttempt) return undefined;
     return this.deps.recordResult(this.problem, false, this.attempts);
@@ -128,7 +178,23 @@ export class PracticeSession {
   }
 
   /** The browser's game actions while a problem is on the board: only a stone counts as an answer. */
-  handleAction(action: Extract<ClientAction, { type: "play" | "pass" | "resign" | "continue" | "retry" | "take_back" | "ask_tutor" }>): void {
+  handleAction(
+    action: Extract<
+      ClientAction,
+      { type: "play" | "pass" | "resign" | "continue" | "retry" | "take_back" | "ask_tutor" | "playout_start" | "playout_back" | "playout_forward" | "playout_exit" }
+    >,
+  ): void {
+    switch (action.type) {
+      case "playout_start":
+        return this.startPlayout();
+      case "playout_back":
+        return this.stepBack();
+      case "playout_forward":
+        return this.stepForward();
+      case "playout_exit":
+        return this.exitPlayout();
+    }
+    if (this.playout) return this.playoutAction(this.playout, action);
     switch (action.type) {
       case "play":
         return this.play(action.point);
@@ -150,6 +216,11 @@ export class PracticeSession {
   handleTutor(cmd: Extract<TutorCommand, { type: "say" | "rethink" | "resume" }>): void {
     switch (cmd.type) {
       case "say":
+        if (this.playout) {
+          // Playing out, the tutor only answers the learner's chat, once per message.
+          if (!this.playout.questionOpen) throw new UserError(PLAYOUT_REFUSAL);
+          this.playout.questionOpen = false;
+        }
         return this.deps.say(cmd.text, cmd.momentId);
       case "rethink":
         throw new UserError("The learner is on a practice problem; rethink is for games. Use say, show or mark.");
@@ -163,29 +234,48 @@ export class PracticeSession {
     return { moves: alternatingStones(moves, start ?? this.problem.toPlay, this.problem.size), ...(label && { label }) };
   }
 
+  /** The learner chatted with a tutor attached: during a play-out, the tutor may answer it once. */
+  questionAsked(): void {
+    if (this.playout) this.playout.questionOpen = true;
+  }
+
   /** What the shared allowed-actions rules read of the problem. */
-  get actionState(): { revealed: boolean; checking: boolean } {
-    return { revealed: this.revealed, checking: this.checking };
+  get actionState(): { revealed: boolean; checking: boolean; playout: PlayoutState | null } {
+    const po = this.playout;
+    return {
+      revealed: this.revealed,
+      checking: this.checking,
+      playout: po && {
+        cursor: po.cursor,
+        length: po.line.length,
+        thinking: po.thinking,
+        learnerToPlay: po.game.toPlay === this.problem.toPlay,
+        over: po.game.isOver,
+      },
+    };
   }
 
   view(common: Pick<GameView, "chat" | "tutorAttached" | "tutorLevel" | "judgeMode" | "engineBusy" | "profileVersion" | "allowed" | "mistakeThreshold" | "generation">, botRank: string): GameView {
     const { problem } = this;
     const source = gameSource(problem);
     const generated = generatedInfo(problem);
+    // Playing out, the board is the play-out's position; its moves carry no evaluation.
+    const po = this.playout;
+    const game = po?.game ?? this.game;
     return {
       gameId: null,
       mode: "problem",
       settings: { size: problem.size as GameSettings["size"], komi: problem.komi, humanColor: problem.toPlay, botRank, handicap: 0 },
       status: this.revealed ? "finished" : "playing",
-      board: this.game.board,
-      toPlay: problem.toPlay,
-      moves: [],
-      captures: { B: 0, W: 0 },
+      board: game.board,
+      toPlay: game.toPlay,
+      moves: po ? po.game.moves : [],
+      captures: game.captures,
       result: null,
       moment: null,
       overlay: this.overlay,
       ...common,
-      engineBusy: common.engineBusy || this.checking,
+      engineBusy: common.engineBusy || this.checking || (po?.thinking ?? false),
       problem: {
         id: problem.id,
         prompt: problem.prompt,
@@ -204,8 +294,156 @@ export class PracticeSession {
         ...(this.nextDue !== undefined && { nextDue: this.nextDue }),
         ...(this.recentMoves && { recentMoves: this.recentMoves }),
         ...(this.review && { review: { ...this.review } }),
+        ...(po && { playout: { line: [...po.line], cursor: po.cursor, thinking: po.thinking, over: po.game.isOver } }),
       },
     };
+  }
+
+  // --- playing the answered problem out ------------------------------------------------
+
+  /**
+   * Play the answered problem out: from the problem position, with the answer's line ahead (Forward
+   * steps through it). The answer's drawing goes until the end, so ghost stones don't sit on real ones.
+   */
+  private startPlayout(): void {
+    if (this.playout) return;
+    if (!this.revealed) throw new UserError("Answer the problem first; then you can play it out.");
+    if (this.checking) throw new UserError("KataGo is still checking your move.");
+    const game = problemGame(this.problem);
+    // The drawn line was legal from the problem position (lineStones checked it), so it replays.
+    this.playout = { line: [...this.answerLine], cursor: 0, game, gen: 0, thinking: false, questionOpen: false };
+    this.answerOverlay = this.overlay;
+    this.overlay = null;
+    this.deps.system(
+      "Playing it out: KataGo answers at full strength, and nothing here is judged. Play any move, or step through the moves with ◀ and ▶ (▶ at the end of the line lets KataGo move for you).",
+    );
+  }
+
+  /** Back to the answered problem, with its drawing. */
+  private exitPlayout(): void {
+    const po = this.playout;
+    if (!po) return;
+    po.gen++; // an answer KataGo is still choosing is dropped
+    this.playout = null;
+    this.overlay = this.answerOverlay;
+    this.answerOverlay = null;
+    this.deps.changed();
+  }
+
+  /** One move back. Also while KataGo thinks: its answer, for the position left, is dropped. */
+  private stepBack(): void {
+    const po = this.requirePlayout();
+    if (po.cursor === 0) throw new UserError("This is the problem position: there is nothing to step back to.");
+    po.game.undo(1);
+    po.cursor--;
+    po.gen++;
+    po.thinking = false;
+    this.deps.changed();
+  }
+
+  /** One move forward: the next move of the line, or at its end KataGo's move for the side to play. */
+  private stepForward(): void {
+    const po = this.requirePlayout();
+    if (po.thinking) throw new UserError("KataGo is thinking.");
+    if (po.cursor < po.line.length) {
+      this.advance(po, po.line[po.cursor]!);
+      po.gen++;
+      return this.deps.changed();
+    }
+    if (po.game.isOver) throw new UserError("Both sides passed. Step back with ◀ to play on from an earlier move.");
+    const notReady = this.deps.engineNotReady();
+    if (notReady) throw new UserError(notReady);
+    void this.requestMove(po);
+  }
+
+  /** The learner's stone or pass in a play-out: it replaces the moves ahead, and KataGo answers it. */
+  private playoutAction(po: Playout, action: Parameters<PracticeSession["handleAction"]>[0]): void {
+    switch (action.type) {
+      case "play":
+      case "pass":
+        break;
+      case "continue":
+        return;
+      case "retry":
+      case "take_back":
+        throw new UserError("To take a move back here, step back with ◀.");
+      case "resign":
+        throw new UserError("You're playing a problem out. Press Back to playing to return to your game first.");
+      case "ask_tutor":
+        throw new UserError("Hints are for games. Ask your tutor in the chat.");
+      default:
+        return;
+    }
+    if (po.thinking) throw new UserError("KataGo is thinking.");
+    if (po.game.isOver) throw new UserError("Both sides passed. Step back with ◀ to play on from an earlier move.");
+    if (po.game.toPlay !== this.problem.toPlay) throw new UserError("It's KataGo's move: press ▶ to see it.");
+    const notReady = this.deps.engineNotReady();
+    if (notReady) throw new UserError(notReady);
+    const point = action.type === "play" ? action.point : null;
+    if (point) {
+      const reason = po.game.illegalReason(point);
+      if (reason) throw new UserError(ILLEGAL_TEXT[reason]);
+    }
+    // Only a legal move replaces the moves that were ahead.
+    po.line.length = po.cursor;
+    po.line.push(toGtp(point, this.problem.size));
+    this.advance(po, po.line[po.cursor]!);
+    po.gen++;
+    if (po.game.isOver) return this.deps.changed();
+    void this.requestMove(po);
+  }
+
+  private requirePlayout(): Playout {
+    if (!this.playout) throw new UserError("Press Play it out first.");
+    return this.playout;
+  }
+
+  /** Play `gtp` (a move of the line, legal at the cursor) and move the cursor past it. */
+  private advance(po: Playout, gtp: Gtp): void {
+    const point = tryFromGtp(gtp, this.problem.size);
+    const color = po.game.toPlay;
+    const played = po.game.play(point ? { color, point } : { color, pass: true });
+    if (!played.ok) throw new Error(`play-out move ${gtp} is illegal: ${played.reason}`);
+    po.cursor++;
+  }
+
+  /**
+   * KataGo's move for the side to play at the cursor, from the main net at full strength (never the
+   * human-style bot). Nothing is judged, recorded or sent to the tutor. Every way out checks that
+   * the play-out is still at this request (`gen`): a step, play or exit meanwhile drops the answer.
+   */
+  private async requestMove(po: Playout): Promise<void> {
+    const gen = ++po.gen;
+    po.thinking = true;
+    this.deps.changed();
+    const moves = po.line.slice(0, po.cursor);
+    let analysis: Analysis | null = null;
+    let failure: Error | null = null;
+    try {
+      analysis = await this.deps.busyWhile(this.playoutAnalysis(moves));
+    } catch (err) {
+      failure = err as Error;
+    }
+    if (this.closed || this.playout !== po || po.gen !== gen) return this.deps.changed();
+    po.thinking = false;
+    if (!analysis) {
+      this.deps.system(`KataGo couldn't answer (${failure?.message ?? "no answer"}). Press ▶ to try again.`);
+      return this.deps.changed();
+    }
+    const move = playoutMove(analysis, po.game);
+    po.line.length = po.cursor;
+    po.line.push(move);
+    this.advance(po, move);
+    po.gen++;
+    this.deps.changed();
+  }
+
+  /** The play-out position after `moves`: the attempts' analyses when they are cached, else a fresh one (not kept, a play-out can wander far). */
+  private playoutAnalysis(moves: Gtp[]): Promise<Analysis> {
+    return (
+      this.analyses.get(moves.join(" ")) ??
+      this.deps.engine.analyze(problemPosition(this.problem, moves), { maxVisits: this.deps.problemVisits })
+    );
   }
 
   private play(point: Point): void {
@@ -275,6 +513,7 @@ export class PracticeSession {
       // Even a line of one stone is drawn: the board is the fixed problem position, so without it
       // the learner's stone would vanish (KataGo's reply on a settled board is usually a pass).
       this.overlay = line.length ? { variation: { label: line.length > 1 ? `${move} and how play goes on` : move, moves: line } } : null;
+      this.answerLine = line.map((s) => toGtp(s.point, problem.size));
       const also = bestMove !== move ? ` KataGo's favorite is ${bestMove}, and yours is about as good.` : "";
       const shown = line.length > 1 ? " The board shows the opponent's best reply." : "";
       this.deps.system(`Correct${this.attempts === 1 ? ", first try" : ""}: ${move}.${also}${shown}`);
@@ -285,6 +524,7 @@ export class PracticeSession {
       this.answer = { move: bestMove, pv: bestPv };
       const line = lineStones(this.game.before(1), bestPv, PV_STONES);
       const covered = line.some((s) => samePoint(s.point, point));
+      this.answerLine = line.map((s) => toGtp(s.point, problem.size));
       this.overlay = {
         ...(line.length && { variation: { label: `KataGo's answer: ${bestMove}`, moves: line } }),
         ...(!covered && { marks: [{ point, kind: "x" as const }] }),

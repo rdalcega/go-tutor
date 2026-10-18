@@ -18,14 +18,27 @@ export interface ActionState {
   moment: Pick<TeachingMoment, "moveNumber" | "state"> | null;
   engineReady: boolean;
   tutorAttached: boolean;
-  /** In problem mode: the answer is shown, or KataGo is still checking the last attempt. */
-  problem: { revealed: boolean; checking: boolean } | null;
+  /** In problem mode: the answer is shown, or KataGo is still checking the last attempt; and the play-out, while the learner plays it out. */
+  problem: { revealed: boolean; checking: boolean; playout?: PlayoutState | null } | null;
   /** A drawing (variation or marks) is on the board, which the learner can hide. */
   overlay: boolean;
   /** A finished game's practice problems, which Review mistakes goes through. */
   reviewProblems?: number;
   /** In problem mode: the problem is part of a review of one game's mistakes. */
   inReview?: boolean;
+}
+
+/** What the rules read of a problem being played out (its own position, not the game's underneath). */
+export interface PlayoutState {
+  /** Moves on the board, and in the whole line (moves ahead of the cursor included). */
+  cursor: number;
+  length: number;
+  /** KataGo is choosing a move. */
+  thinking: boolean;
+  /** It is the learner's turn at the cursor. */
+  learnerToPlay: boolean;
+  /** Both sides passed at the cursor. */
+  over: boolean;
 }
 
 /** Actions the browser can send in any mode. */
@@ -87,6 +100,15 @@ export function hintBlocked(
 /** The browser actions accepted in this state. Always a fresh array. */
 export function allowedActions(s: ActionState): ActionType[] {
   if (s.mode === "problem") {
+    const po = s.problem?.playout;
+    if (po) {
+      const allowed: ActionType[] = [...always(s), "leave_problem", "playout_exit"];
+      if (po.cursor > 0) allowed.push("playout_back");
+      if (!po.thinking && (po.cursor < po.length || (!po.over && s.engineReady))) allowed.push("playout_forward");
+      if (po.learnerToPlay && !po.thinking && !po.over && s.engineReady) allowed.push("play", "pass");
+      return allowed;
+    }
+    if (s.problem?.revealed && !s.problem.checking) return [...always(s), "leave_problem", "playout_start"];
     const canPlay = s.problem !== null && !s.problem.revealed && !s.problem.checking && s.engineReady;
     // During a review Next waits for KataGo's verdict: it would drop the attempt's result.
     const base = s.inReview && s.problem?.checking ? always(s).filter((a) => a !== "next_problem") : always(s);
