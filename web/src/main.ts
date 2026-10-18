@@ -266,6 +266,10 @@ function renderBoard(v: GameView | null): void {
 const PASS_BANNER_MS = 4000;
 /** The pass each game or problem last showed its banner for (its move number), so going to a problem and back doesn't show it again. */
 const passBannerShown = new Map<string, number>();
+/** Games and problems remembered at most (the oldest go first): enough to come back to any recent one. */
+const PASS_BANNER_REMEMBERED = 20;
+/** The game or problem the banner on the board belongs to. */
+let passBannerContext: string | null = null;
 let passBannerTimer: ReturnType<typeof setTimeout> | undefined;
 
 /**
@@ -277,6 +281,12 @@ function renderPassBanner(v: GameView | null): void {
   const context = v?.mode === "game" ? `game|${v.gameId}` : v?.mode === "problem" ? `problem|${v.problem?.id}` : null;
   const pass = context && v?.settings ? lastPass(v.moves, v.settings.humanColor) : null;
   const text = botPassBanner(pass);
+  // Another game or problem's banner doesn't stay over this one.
+  if (passBannerContext !== context) {
+    clearTimeout(passBannerTimer);
+    el.passBanner.hidden = true;
+    passBannerContext = null;
+  }
   if (!text || !pass || !context) {
     clearTimeout(passBannerTimer);
     el.passBanner.hidden = true;
@@ -286,7 +296,10 @@ function renderPassBanner(v: GameView | null): void {
     return;
   }
   if (passBannerShown.get(context) === pass.number) return;
+  passBannerShown.delete(context);
   passBannerShown.set(context, pass.number);
+  if (passBannerShown.size > PASS_BANNER_REMEMBERED) passBannerShown.delete(passBannerShown.keys().next().value!);
+  passBannerContext = context;
   el.passBanner.textContent = text;
   el.passBanner.hidden = false;
   clearTimeout(passBannerTimer);

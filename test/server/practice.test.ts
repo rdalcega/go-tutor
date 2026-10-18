@@ -959,13 +959,12 @@ describe("playing a problem out", () => {
     await ctl.handleTutor({ type: "mark", points: ["E1"] });
     expect(ctl.view().overlay).toBeNull();
     expect(playout()?.replyOwed).toBe(true);
-    // A say about a game moment waiting underneath is the game's: it doesn't settle the problem's reply.
-    await ctl.handleTutor({ type: "say", text: "About your game: later.", momentId: "m1" });
-    expect(playout()?.replyOwed).toBe(true);
     // The learner pressed Play it out before the tutor answered the solve: that answer still goes, once.
-    await ctl.handleTutor({ type: "say", text: "Nice, E1 makes two eyes." });
+    // A moment id that isn't the game's open moment doesn't make a say the game's: it is that answer.
+    await ctl.handleTutor({ type: "say", text: "Nice, E1 makes two eyes.", momentId: "m1" });
     expect(playout()?.replyOwed).toBeUndefined();
     await expect(ctl.handleTutor({ type: "say", text: "Nice!" })).rejects.toThrow(/playing the answered problem out/);
+    await expect(ctl.handleTutor({ type: "say", text: "Nice!", momentId: "m1" })).rejects.toThrow(/playing the answered problem out/);
     await ctl.handleAction({ type: "chat", text: "why does White play there?" });
     expect(ofType("user_message").at(-1)).toMatchObject({ problemId: LIVE, playout: true });
     await ctl.handleTutor({ type: "say", text: "To take away the eye." });

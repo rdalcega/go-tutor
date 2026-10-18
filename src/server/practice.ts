@@ -20,6 +20,11 @@ const ANSWER_LINE_LENGTH = 3;
 export const PLAYOUT_REFUSAL =
   "The learner is playing the answered problem out against full-strength KataGo: nothing is judged and you don't comment on it. Only a chat message (or the result you hadn't answered when they started) gets one say.";
 
+/** A say about the game's open moment waiting under the problem (not just any moment id). */
+function aboutGame(cmd: TutorCommand, gameMomentId: string | undefined): boolean {
+  return cmd.type === "say" && !!cmd.momentId && cmd.momentId === gameMomentId;
+}
+
 /**
  * Playing an answered problem out against KataGo. One line, no branches: playing a move after
  * stepping back drops the moves that were ahead.
@@ -239,18 +244,19 @@ export class PracticeSession {
    * The rule that keeps the tutor out of a play-out, checked before any tutor command runs. A show
    * or mark isn't drawn (false: it is skipped, not refused, so the say chained after it still goes,
    * and the command's output says it wasn't drawn); a say about the problem goes only when a reply
-   * is owed (the result's, or the learner's chat). A say about a game moment waiting underneath is the game's.
+   * is owed (the result's, or the learner's chat). A say about the game moment waiting underneath
+   * (`gameMomentId`, the open one) is the game's; any other moment id counts as a say about the problem.
    */
-  admitTutor(cmd: TutorCommand): boolean {
+  admitTutor(cmd: TutorCommand, gameMomentId: string | undefined): boolean {
     if (!this.playout) return true;
     if (cmd.type === "show" || cmd.type === "mark") return false;
-    if (cmd.type === "say" && !cmd.momentId && !this.tutorOwed) throw new UserError(PLAYOUT_REFUSAL);
+    if (cmd.type === "say" && !aboutGame(cmd, gameMomentId) && !this.tutorOwed) throw new UserError(PLAYOUT_REFUSAL);
     return true;
   }
 
-  /** The tutor said or drew something: an answer about the problem (not a say about a game moment) settles what it owed. */
-  tutorAnswered(cmd: TutorCommand): void {
-    if (cmd.type === "show" || cmd.type === "mark" || (cmd.type === "say" && !cmd.momentId)) this.tutorOwed = false;
+  /** The tutor said or drew something: an answer about the problem (not a say about the game's moment) settles what it owed. */
+  tutorAnswered(cmd: TutorCommand, gameMomentId: string | undefined): void {
+    if (cmd.type === "show" || cmd.type === "mark" || (cmd.type === "say" && !aboutGame(cmd, gameMomentId))) this.tutorOwed = false;
   }
 
   /** The learner chatted about the problem: the tutor owes an answer (also one it reads later, from a replay). */
