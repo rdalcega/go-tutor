@@ -42,8 +42,9 @@ export const PV_STONES = 6;
 export function nextNumber(ids: Iterable<string>, prefix: string): number {
   let max = 0;
   for (const id of ids) {
-    const rest = id.startsWith(prefix) ? id.slice(prefix.length) : "";
-    if (/^\d+$/.test(rest)) max = Math.max(max, Number(rest));
+    if (!id.startsWith(prefix)) continue;
+    const n = id.slice(prefix.length);
+    if (/^\d+$/.test(n)) max = Math.max(max, Number(n));
   }
   return max + 1;
 }

@@ -56,9 +56,10 @@ const CLASSIFY_VISITS = 100;
 export interface Reconstruction {
   /** The saved moves, with `assist` set from the log. */
   moves: MoveRecord[];
+  /** The saved game's first attempts when it kept them, else the log's. */
   takenBack: TakenBackMove[];
   assistance: AssistCounts;
-  /** The log's moves replay to exactly the saved game (else the saved moves, with the saved first attempts or else any the log yielded, are used). */
+  /** The log's moves replay to exactly the saved game (else the saved moves keep their own help flags). */
   complete: boolean;
   /** Events of the game found in the log. */
   events: number;
@@ -141,27 +142,10 @@ export function reconstructGame(saved: SavedGame, events: readonly TutorEvent[])
     const { assist: _old, ...rest } = r;
     return assist?.length ? { ...rest, assist } : rest;
   });
-  // A game saved with its first attempts keeps them when the log can't rebuild it (the log is the
-  // only source for games saved before first attempts were kept).
-  const firsts = complete ? takenBack : saved.takenBack?.length ? saved.takenBack : consistent ? takenBack : [];
+  // A game saved with its first attempts keeps them (the live record, evals and tags included); one
+  // saved before first attempts were kept gets the log's.
+  const firsts = saved.takenBack?.length ? saved.takenBack : consistent ? takenBack : [];
   return { moves, takenBack: firsts, assistance: complete ? assistance : { ...assistance, ...saved.assistance }, complete, events: mine.length };
-}
-
-/**
- * The tutor's tags as the game file has them now, onto the rebuilt first attempts and the summary's
- * categories: a tag made while the migration's KataGo work ran must not be undone by its snapshot.
- */
-function applyCurrentTags(current: SavedGame, takenBack: readonly TakenBackMove[], summary: GameSummary): void {
-  takenBack.forEach((t, i) => {
-    const now = current.takenBack?.[i];
-    if (now?.tag && now.moveNumber === t.moveNumber) t.tag = now.tag;
-  });
-  for (const m of summary.mistakes) {
-    const tag = m.takenBack !== undefined ? takenBack[m.takenBack]?.tag : current.tags?.[m.moveNumber];
-    if (!tag) continue;
-    m.category = tag.category;
-    m.categorySource = "tutor";
-  }
 }
 /** What `migrateRatingModel` needs. */
 export interface MigrationDeps {
@@ -291,14 +275,6 @@ export async function migrateRatingModel(deps: MigrationDeps): Promise<Migration
     const rebuilt = reconstructGame(saved, events);
     // The game's own threshold on its board; older games used the profile's threshold on every size.
     const threshold = playedThreshold(saved, deps.threshold, original.recentGames);
-    // Keep what an earlier (interrupted) run or the live game already knew about the first attempts.
-    const known = saved.takenBack ?? [];
-    rebuilt.takenBack.forEach((t, i) => {
-      const old = known[i]?.moveNumber === t.moveNumber ? known[i] : undefined;
-      if (old?.tag) t.tag = old.tag;
-      if (old?.heuristic) t.heuristic = old.heuristic;
-      if (!t.record.eval && old?.record.eval) t.record.eval = old.record.eval;
-    });
     for (const t of rebuilt.takenBack) {
       if (t.heuristic || !t.record.eval || t.record.eval.pointLoss < threshold) continue;
       try {
@@ -392,12 +368,18 @@ export async function migrateRatingModel(deps: MigrationDeps): Promise<Migration
   // 3. Writes, with no await in between: back up, then the games, the profile and the problems.
   const backupDir = store.backup(["profile.json", "problems.json", ...games.map((g) => `games/${g.id}.json`)], deps.now());
   for (const entry of rebuiltGames) {
-    const { saved, rebuilt, summary } = entry;
+    const { saved, rebuilt, threshold } = entry;
+    // The file as it is now: a tag the tutor made while KataGo worked is in its summary (a board
+    // move) or on its first attempts, so the summary written is built from it, not the snapshot.
+    const current = store.loadGame(saved.id) ?? saved;
+    rebuilt.takenBack.forEach((t, i) => {
+      const now = current.takenBack?.[i];
+      if (now?.tag && now.moveNumber === t.moveNumber) t.tag = now.tag;
+    });
+    const summary = summaryWithFirstAttempts(current, current.summary ?? saved.summary!, rebuilt, threshold);
     const change = changes.get(saved.id);
     if (change) summary.rating = change;
-    // The file as it is now: a tag the tutor made while KataGo worked wins over the snapshot's categories.
-    const current = store.loadGame(saved.id) ?? saved;
-    applyCurrentTags(current, rebuilt.takenBack, summary);
+    entry.summary = summary;
     const updated: SavedGame = { ...current, moves: rebuilt.moves, takenBack: rebuilt.takenBack, assistance: rebuilt.assistance, summary };
     store.saveGame(updated, store.loadSgf(saved.id) ?? writeSgf(saved.settings, saved.moves, saved.result, {}));
   }

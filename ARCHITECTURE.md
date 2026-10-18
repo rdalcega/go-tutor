@@ -328,9 +328,9 @@ profile or problems; `ratingModel` unchanged), and the controller logs it and tr
   evals of moves later taken back, `undo` events (by human or tutor) pop them into first attempts
   (with the moves before them) and mark the next human move `retry`/`rethink`, and a `hint_request`
   marks the next move `hint` when the saved chat has a tutor message or KataGo's hint between the
-  request and that move. The rebuild counts only when its moves replay to exactly the saved game;
-  otherwise the saved moves are used with their own help flags and first attempts (a game saved
-  without first attempts keeps any the log yielded).
+  request and that move. The rebuild's help flags count only when its moves replay to exactly the
+  saved game; otherwise the saved moves keep their own. A game saved with its first attempts keeps
+  them (the live record, tags and all); one saved before first attempts were kept gets the log's.
 - categorizes each taken-back mistake (`classifyPlayed`, as the controller does, with ownership
   from 100-visit analyses), rank-estimates each rated game, works out the practice problems for the
   taken-back mistakes on a scratch copy, and replays the rating from 20k through `applyEstimate` in

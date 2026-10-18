@@ -948,18 +948,14 @@ export class GameController {
    * it). The tutor stream gets the moment again either way, so a fresh `watch` finds it.
    */
   private restoreMoment(record: MoveRecord, saved: TeachingMoment): void {
-    const { deadline: _deadline, awaitingLearner, ...rest } = saved;
+    const { deadline, ...rest } = saved;
     const fallback = saved.state === "fallback";
-    if (!fallback && !(saved.state === "tutor" && awaitingLearner)) {
-      this.openMoment(record, { ...rest, state: "waiting" });
-      if (saved.state === "tutor" || saved.deadline !== undefined) this.waitForTutor();
-      this.emitMoment(record);
-      return;
-    }
-    this.openMoment(record, { ...rest, ...(awaitingLearner && { awaitingLearner }) });
+    const answered = fallback || (saved.state === "tutor" && saved.awaitingLearner === true);
+    this.openMoment(record, answered ? rest : { ...rest, state: "waiting" });
+    if (!answered && (saved.state === "tutor" || deadline !== undefined)) this.waitForTutor();
     if (fallback && record.eval) this.overlay = this.fallbackFor(this.game!, record, record.eval).overlay;
     this.emitMoment(record);
-    if (fallback) this.emit({ type: "fallback", momentId: rest.id });
+    if (fallback) this.emit({ type: "fallback", momentId: saved.id });
   }
 
   /** The game pauses on `moment`, about `record` (the last move): it won't open again for that move. */
@@ -1573,10 +1569,10 @@ export class GameController {
       }, delay);
       return false;
     }
-    // The migration wrote the profile and the problems; the controller's and the generator's copies follow.
+    // The migration wrote the profile, and maybe the problems; the controller's and the generator's copies follow.
     this.profile = this.store.loadProfile();
     this.profileVersion++;
-    this.generator.problemsChanged(this.store.loadProblems());
+    if (report.problemsAdded.length) this.generator.problemsChanged(this.store.loadProblems());
     if (report.message) {
       this.log(report.summary);
       this.system(report.message);

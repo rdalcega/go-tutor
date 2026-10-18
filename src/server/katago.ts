@@ -229,8 +229,8 @@ export function chooseBotMove(
       total += p;
     }
   }
-  // Every board move is under 1%: the most likely one, or pass when none has any probability at all.
-  if (candidates.length === 0) return human[policyIndex(top, size)]! > 0 ? top : "pass";
+  // Every board move is under 1%: the most likely one.
+  if (candidates.length === 0) return top;
   let r = random() * total;
   for (const c of candidates) {
     r -= c.p;
@@ -287,12 +287,12 @@ export function moveEvalFrom(before: Analysis, after: Analysis, played?: Gtp): M
   };
 }
 
-/** The human policy's most likely move, pass included (entries of -1 are illegal). */
+/** The human policy's most likely move, pass included (entries of -1 are illegal); pass when no move has any probability. */
 export function topHumanMove(analysis: Pick<Analysis, "humanPolicy">, size: number): Gtp {
   const human = humanPolicyOf(analysis, size);
   let best = -1;
   for (let i = 0; i < human.length; i++) {
-    if (human[i]! >= 0 && (best < 0 || human[i]! > human[best]!)) best = i;
+    if (human[i]! > 0 && (best < 0 || human[i]! > human[best]!)) best = i;
   }
   return best < 0 ? "pass" : policyIndexToGtp(best, size);
 }

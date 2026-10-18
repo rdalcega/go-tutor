@@ -48,15 +48,16 @@ export function countsForEstimate(record: MoveRecord, size: number): boolean {
  * (each played in its own position), without passes, opening moves or any move played with help.
  */
 export function rankSamples(settings: GameSettings, moves: readonly MoveRecord[], takenBack: readonly TakenBackMove[] = []): RankSample[] {
+  const start = new GoGame(settings.size, settings.komi, settings.handicap);
   const samples: RankSample[] = [];
   moves.forEach((r, i) => {
     if (r.move.color !== settings.humanColor || !countsForEstimate(r, settings.size)) return;
-    samples.push({ position: positionFor(settings, moves.slice(0, i).map((m) => m.move)), move: moveGtp(r.move, settings.size) });
+    samples.push({ position: positionOf(start, moves.slice(0, i).map((m) => m.move)), move: moveGtp(r.move, settings.size) });
   });
   for (const t of takenBack) {
     if (!countsForEstimate(t.record, settings.size)) continue;
     try {
-      samples.push({ position: positionFor(settings, movesFromLine(settings, t.before)), move: moveGtp(t.record.move, settings.size) });
+      samples.push({ position: positionOf(start, movesFromLine(settings, t.before)), move: moveGtp(t.record.move, settings.size) });
     } catch {
       // A line that doesn't name points on this board: leave the move out.
     }
