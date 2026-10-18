@@ -356,7 +356,17 @@ export type TutorCommand =
 
 export type TutorEvent =
   | { seq: number; ts: number; type: "game_start"; gameId: string; settings: GameSettings; tutorLevel?: TutorLevel; judgeMode?: JudgeMode; atLevelRank?: string }
-  | { seq: number; ts: number; type: "move"; gameId: string; size: number; record: MoveRecord; by: "human" | "bot" }
+  | {
+      seq: number;
+      ts: number;
+      type: "move";
+      gameId: string;
+      size: number;
+      record: MoveRecord;
+      by: "human" | "bot";
+      /** The learner played before the tutor answered their hint request: the position the tutor may be answering about is gone. */
+      hintPending?: true;
+    }
   | {
       seq: number;
       ts: number;
@@ -379,11 +389,42 @@ export type TutorEvent =
   /** The learner changed how their moves are judged; it applies from their next move. */
   | { seq: number; ts: number; type: "judge_mode"; mode: JudgeMode; gameId: string | null; atLevelRank?: string }
   /** `problemId` is set when the learner wrote while a practice problem was on the board (the message is about it). */
-  | { seq: number; ts: number; type: "user_message"; text: string; momentId?: string; gameId: string | null; problemId?: string }
-  | { seq: number; ts: number; type: "hint_request"; text?: string; gameId: string; size: number; board: string; toPlay: Color }
+  | {
+      seq: number;
+      ts: number;
+      type: "user_message";
+      text: string;
+      momentId?: string;
+      gameId: string | null;
+      problemId?: string;
+      /** The learner's tutor level, on a message about a game (absent on a problem, and in events logged before it was sent). */
+      tutorLevel?: TutorLevel;
+    }
+  | {
+      seq: number;
+      ts: number;
+      type: "hint_request";
+      text?: string;
+      gameId: string;
+      size: number;
+      board: string;
+      toPlay: Color;
+      /** The learner's tutor level (absent in events logged before it was sent). */
+      tutorLevel?: TutorLevel;
+    }
   | { seq: number; ts: number; type: "fallback"; momentId: string }
   /** Moves were taken back (browser Try again, or the tutor's rethink). `moves` is how many remain. */
-  | { seq: number; ts: number; type: "undo"; gameId: string; moves: number; toPlay: Color; by: "human" | "tutor" }
+  | {
+      seq: number;
+      ts: number;
+      type: "undo";
+      gameId: string;
+      moves: number;
+      toPlay: Color;
+      by: "human" | "tutor";
+      /** The take-back undid the position of an open teaching moment, or of a hint request the tutor may be answering. */
+      during?: "moment" | "hint";
+    }
   /** `summary.rating` is `pending` while the rank estimate runs; a `rating` event follows. */
   | { seq: number; ts: number; type: "game_end"; gameId: string; result: GameResult; summary: GameSummary }
   /** The finished game's rank estimate is in and the rating updated. */

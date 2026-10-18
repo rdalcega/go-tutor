@@ -8,7 +8,7 @@ export class UsageError extends Error {}
 
 export type Invocation =
   | { kind: "help" }
-  | { kind: "watch"; since?: number; json: boolean }
+  | { kind: "watch"; since?: number; all: boolean; json: boolean }
   | { kind: "state"; json: boolean }
   | { kind: "summary"; json: boolean }
   | { kind: "problems"; json: boolean }
@@ -18,7 +18,7 @@ export type Invocation =
   | { kind: "command"; command: TutorCommand; json: boolean };
 
 /** Flags that never take a value. Every other `--flag` consumes the next token (or `=value`). */
-const BOOLEAN_FLAGS = new Set(["json", "help", "status", "now"]);
+const BOOLEAN_FLAGS = new Set(["json", "help", "status", "now", "all"]);
 /** Flags with an optional number: they consume the next token only when it is one (`--taken-back 2`). */
 const OPTIONAL_NUMBER_FLAGS = new Set(["taken-back"]);
 
@@ -155,7 +155,8 @@ export function parseInvocation(argv: string[]): Invocation {
       case "watch": {
         noPositionals(positional, name);
         const since = flags.string("since");
-        return { kind: "watch", json, ...(since !== undefined && { since: parseIntStrict(since, "--since") }) };
+        const all = flags.boolean("all");
+        return { kind: "watch", all, json, ...(since !== undefined && { since: parseIntStrict(since, "--since") }) };
       }
       case "state":
         noPositionals(positional, name);

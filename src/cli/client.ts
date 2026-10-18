@@ -34,8 +34,8 @@ export class Client {
   }
 
   /** GET a JSON resource. Returns null on 404 so callers can explain missing features. */
-  async getJson<T>(path: string): Promise<T | null> {
-    const res = await this.request(path, { headers: { accept: "application/json" } });
+  async getJson<T>(path: string, signal?: AbortSignal): Promise<T | null> {
+    const res = await this.request(path, { headers: { accept: "application/json" }, ...(signal && { signal }) });
     if (res.status === 404) return null;
     const body = await readBody(res);
     if (!res.ok) throw new ServerError(errorMessage(body, res), res.status);
@@ -45,8 +45,8 @@ export class Client {
     return body as T;
   }
 
-  async state(): Promise<GameView> {
-    const view = await this.getJson<GameView>("/api/state");
+  async state(signal?: AbortSignal): Promise<GameView> {
+    const view = await this.getJson<GameView>("/api/state", signal);
     if (!view) throw new ServerError(`GET /api/state returned 404 at ${this.base}; is TUTOR_SERVER pointing at the Go Tutor server?`, 404);
     return view;
   }

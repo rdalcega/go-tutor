@@ -350,7 +350,7 @@ describe("GameController", () => {
     await expect(ctl.handleAction({ type: "retry" })).rejects.toThrow(/already taken back/);
     expect(ctl.view().moves).toHaveLength(2);
     expect(ctl.view().moment).toMatchObject({ id: m.id, state: "tutor" });
-    expect(events.filter((e) => e.type === "undo")).toEqual([{ type: "undo", gameId: ctl.view().gameId, moves: 2, toPlay: "B", by: "tutor" }]);
+    expect(events.filter((e) => e.type === "undo")).toEqual([{ type: "undo", gameId: ctl.view().gameId, moves: 2, toPlay: "B", by: "tutor", during: "moment" }]);
   });
 
   it("refuses moves, hints and passes once the game has ended by resignation", async () => {
@@ -413,7 +413,7 @@ describe("GameController", () => {
     await ctl.handleTutor({ type: "tag", gameId, moveNumber: 1, category: "shape" });
     expect(store.loadProfile().mistakeCounts.shape).toBe(1);
     await ctl.handleAction({ type: "retry" });
-    expect(events.at(-1)).toEqual({ type: "undo", gameId, moves: 0, toPlay: "B", by: "human" });
+    expect(events.at(-1)).toEqual({ type: "undo", gameId, moves: 0, toPlay: "B", by: "human", during: "moment" });
     // The mistake still counts, now as the taken-back first attempt.
     expect(store.loadProfile().mistakeCounts.shape).toBe(1);
     expect(store.loadProfile().recentMistakes).toMatchObject([{ gameId, moveNumber: 1, category: "shape", takenBack: 0 }]);
@@ -717,8 +717,11 @@ describe("GameController", () => {
     await ctl.handleAction({ type: "ask_tutor" });
     expect(ctl.view().overlay).toBeNull();
     await ctl.handleAction({ type: "chat", text: "why did the bot play there?" });
-    expect(events.at(-1)).toMatchObject({ type: "user_message", text: "why did the bot play there?" });
+    expect(events.at(-1)).toMatchObject({ type: "user_message", text: "why did the bot play there?", tutorLevel: "coach" });
     expect(ctl.view().chat.at(-1)!.from).toBe("user");
+    // Playing before the tutor answered the hint: the move says so, since the tutor's answer would be about the old position.
+    ctl.play(E5);
+    expect(events.find((e) => e.type === "move")).toMatchObject({ by: "human", hintPending: true });
   });
 
   it("tells the user when no tutor is connected for chat", async () => {

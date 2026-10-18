@@ -132,7 +132,7 @@ export function createApp({ controller, bridge, store, distDir = join(REPO_ROOT,
       const raw = url.searchParams.get("since");
       const since = raw === null || raw === "" ? undefined : Number(raw);
       if (since !== undefined && !Number.isInteger(since)) return sendJson(res, 400, { ok: false, error: "since must be an integer seq." });
-      return bridge.openTutorStream(req, res, since, url.searchParams.get("epoch") ?? undefined);
+      return bridge.openTutorStream(req, res, since, url.searchParams.get("epoch") ?? undefined, url.searchParams.get("rejoin") === "1");
     }
     if (path === "/api/action" && method === "POST") {
       await controller.handleAction(parseClientAction(await readJson(req)));

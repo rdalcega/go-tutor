@@ -878,13 +878,14 @@ export class GameController {
     // Help the learner had in this position (a hint, a drawing, a take-back) marks the move as assisted.
     const help = this.help?.at === at ? this.help.kinds : null;
     if (help?.size) record.assist = ASSIST_KINDS.filter((k) => help.has(k));
+    const hintPending = this.help?.at === at && this.help.hintAsked === true;
     this.help = null;
 
     // Playing again after a rethink ends that moment; any leftover overlay is about the old position.
     if (this.moment) this.setMomentState("resolved");
     this.cancelMomentTimer();
     this.overlay = null;
-    this.emit({ type: "move", gameId: this.gameId!, size: game.size, record, by: "human" });
+    this.emit({ type: "move", gameId: this.gameId!, size: game.size, record, by: "human", ...(hintPending && { hintPending: true as const }) });
     this.save();
 
     if (game.isOver) {
@@ -1189,6 +1190,8 @@ export class GameController {
     if (typeof count === "string") throw new UserError(count);
     const { game, settings } = this.requireGame();
     const by = text === null ? "human" : "tutor";
+    // What the tutor may be answering about this position: an open moment, or a hint request.
+    const during = this.activeMoment() ? "moment" : this.help?.at === game.moves.length && this.help.hintAsked ? "hint" : undefined;
     this.invalidatePending();
     const removed = game.moves.slice(game.moves.length - count);
     const line = gtpLine(game.moves.slice(0, game.moves.length - count), game.size);
@@ -1201,7 +1204,7 @@ export class GameController {
     this.status = "playing";
     this.overlay = null;
     if (this.moment) this.setMomentState(by === "human" ? "resolved" : "tutor");
-    this.emit({ type: "undo", gameId: this.gameId!, moves: game.moves.length, toPlay: game.toPlay, by });
+    this.emit({ type: "undo", gameId: this.gameId!, moves: game.moves.length, toPlay: game.toPlay, by, ...(during && { during }) });
     if (text !== null) this.addChat("tutor", text, momentId);
     this.save();
     this.changed();
@@ -1312,6 +1315,7 @@ export class GameController {
       size: game.size,
       board: toAscii(game.board, this.lastPoint()),
       toPlay: game.toPlay,
+      tutorLevel: this.level,
       ...(question && { text: question }),
     });
     if (this.tutorAttached) {
@@ -1367,7 +1371,13 @@ export class GameController {
     const problemId = this.practice?.problem.id;
     const momentId = problemId ? undefined : this.activeMoment()?.id;
     this.addChat("user", trimmed, momentId);
-    this.emit({ type: "user_message", text: trimmed, gameId: this.gameId, ...(momentId && { momentId }), ...(problemId && { problemId }) });
+    this.emit({
+      type: "user_message",
+      text: trimmed,
+      gameId: this.gameId,
+      ...(momentId && { momentId }),
+      ...(problemId ? { problemId } : this.gameId && { tutorLevel: this.level }),
+    });
     if (this.tutorAttached) {
       // The tutor got it: on Silent it may answer with one say. A question on a problem isn't the
       // game's (Silent's rule and the saved game are the game's; problems are open to the tutor).

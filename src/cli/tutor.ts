@@ -1,21 +1,15 @@
 // Entry point: `npm run -s tutor -- <command> [args]`.
 
-import type { FocusRecommendation, GenerationStatus, ProblemsResponse, Profile, ProfileResponse, SavedGame } from "../shared/types.ts";
+import type { GenerationStatus, ProblemsResponse } from "../shared/types.ts";
 import { parseInvocation, UsageError, type Invocation } from "./args.ts";
 import { Client, ServerError, serverUrl } from "./client.ts";
-import { commandJson, commandOutput, formatGeneration, formatProblemList, formatProblems, formatProfile, formatReview, formatState, reviewThreshold } from "./format.ts";
+import { commandJson, commandOutput, formatGeneration, formatProblemList, formatProblems, formatProfile, formatState } from "./format.ts";
 import { HELP, USAGE } from "./help.ts";
+import { getGame, getProfile, reviewText } from "./queries.ts";
 import { watch } from "./watch.ts";
 
 const print = (text: string) => process.stdout.write(text + "\n");
 const printErr = (text: string) => process.stderr.write(text + "\n");
-
-/** GET /api/profile: `{ profile, focus }` (an older server sent the bare profile). */
-async function getProfile(client: Client): Promise<{ profile: Profile; focus: FocusRecommendation | null } | null> {
-  const body = await client.getJson<ProfileResponse | Profile>("/api/profile");
-  if (!body) return null;
-  return "profile" in body ? body : { profile: body, focus: null };
-}
 
 /** GET /api/problems, or null when the server has none (an older server) or it fails. */
 async function getProblems(client: Client): Promise<ProblemsResponse | null> {
@@ -49,19 +43,7 @@ async function generate(client: Client, now: boolean, json: boolean): Promise<vo
 }
 
 async function review(client: Client, gameId: string, json: boolean): Promise<void> {
-  const [game, profile] = await Promise.all([
-    client.getJson<SavedGame>(`/api/game/${encodeURIComponent(gameId)}`),
-    json ? null : getProfile(client).catch(() => null),
-  ]);
-  if (!game) {
-    throw new ServerError(gameId === "last" ? "no saved games yet (GET /api/game/last returned 404)" : `no saved game "${gameId}"`, 404);
-  }
-  if (json) {
-    print(JSON.stringify(game));
-    return;
-  }
-  // The threshold the game was played with, on its board, decides what counted as a mistake.
-  print(formatReview(game, reviewThreshold(game, profile?.profile)));
+  print(json ? JSON.stringify(await getGame(client, gameId)) : await reviewText(client, gameId));
 }
 
 async function run(inv: Invocation, client: Client): Promise<void> {
@@ -73,7 +55,7 @@ async function run(inv: Invocation, client: Client): Promise<void> {
       const controller = new AbortController();
       process.once("SIGINT", () => controller.abort());
       process.once("SIGTERM", () => controller.abort());
-      await watch({ client, since: inv.since, json: inv.json, out: print, err: printErr, signal: controller.signal });
+      await watch({ client, since: inv.since, all: inv.all, json: inv.json, out: print, err: printErr, signal: controller.signal });
       return;
     }
     case "state": {

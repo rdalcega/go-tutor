@@ -1,15 +1,30 @@
-// `tutor watch`: follow the tutor event stream, one stdout line per event.
-// Everything that is not an event goes to stderr, because each stdout line becomes a notification.
+// `tutor watch`: follow the tutor event stream, printing the events the tutor acts on.
+// Everything that is not an event goes to stderr, because each stdout write becomes a notification
+// (a Claude turn), so the text stream leaves out what needs no answer and carries what the answer
+// needs:
+// - moves, level and judge changes and batch starts are left out, and the learner's moves and
+//   take-backs unless one changes the position of a moment or hint the tutor may be answering
+//   (`all` prints everything);
+// - a waiting MOMENT, a HINT or a PROBLEM_START comes with the state, and a GAME_END with the
+//   review, so the tutor doesn't spend a turn running `state` or `review`;
+// - what arrives together goes out in one write: the server sends a GAME_END with its RATING when
+//   the rank estimate is quick, so both are one notification.
 
+import { toAscii } from "../engine/ascii.ts";
+import { movePoint } from "../shared/coords.ts";
 import type { TutorEvent } from "../shared/types.ts";
 import { Client, ServerError } from "./client.ts";
-import { formatEvent } from "./format.ts";
+import { formatEvent, formatState } from "./format.ts";
+import { reviewText } from "./queries.ts";
 import { SseParser } from "./sse.ts";
 
 export interface WatchOptions {
   client: Client;
   /** Resume after this sequence number. Omitted: the server decides where a fresh stream starts. */
   since?: number;
+  /** Print every event, the bare line only (no state or review). */
+  all?: boolean;
+  /** Every event as raw JSON, for programs. */
   json: boolean;
   out: (line: string) => void;
   err: (line: string) => void;
@@ -18,9 +33,34 @@ export interface WatchOptions {
   /** Initial and maximum reconnect delays. */
   minBackoffMs?: number;
   maxBackoffMs?: number;
+  /** How long the state or review fetched for an event may take before the bare line goes out. Default 3 s. */
+  contextTimeoutMs?: number;
+  now?: () => number;
 }
 
+/** Events older than this (a `--since` replay) get no state or review: the board has moved on, and the reviews would flood one notification. */
+const CONTEXT_MAX_AGE_MS = 10 * 60_000;
+
 const defaultSleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
+
+/** Events the tutor acts on. The rest stays out of the text stream unless `all` is set. */
+function actionable(event: TutorEvent): boolean {
+  switch (event.type) {
+    case "move":
+      // Only the learner's move that leaves a hint request unanswered: the tutor's answer would be about the old position.
+      return event.hintPending === true;
+    case "tutor_level":
+    case "judge_mode":
+      return false;
+    case "undo":
+      // The learner's take-back of a position the tutor may be answering about (the tutor's own rethink needs no word).
+      return event.by === "human" && event.during !== undefined;
+    case "generation":
+      return event.status === "finished";
+    default:
+      return true;
+  }
+}
 
 /** Runs until the signal aborts. Never resolves on its own: the stream is meant to be followed forever. */
 export async function watch(opts: WatchOptions): Promise<void> {
@@ -28,6 +68,10 @@ export async function watch(opts: WatchOptions): Promise<void> {
   const sleep = opts.sleep ?? defaultSleep;
   const minBackoff = opts.minBackoffMs ?? 500;
   const maxBackoff = opts.maxBackoffMs ?? 10_000;
+  const contextTimeoutMs = opts.contextTimeoutMs ?? 3_000;
+  const now = opts.now ?? Date.now;
+  // The text stream for the tutor; --all and --json print every event, bare.
+  const tutorStream = !opts.all && !opts.json;
   let last = opts.since;
   /** The server boot `last` belongs to; sent back so a restarted server can tell a stale cursor. */
   let epoch: string | undefined;
@@ -35,22 +79,62 @@ export async function watch(opts: WatchOptions): Promise<void> {
   /** Board sizes seen in the stream, for events logged before they carried `size`. */
   const sizes = new Map<string, number>();
 
-  const handle = (data: string, id: string | undefined): void => {
+  const line = (event: TutorEvent, attached?: boolean): string =>
+    opts.json ? JSON.stringify(event) : formatEvent(event, { sizeOf: (g) => sizes.get(g), ...(attached !== undefined && { attached }) });
+
+  /** The state (or review) to print under an event: null when it has none, false when it should but the server can't give it in time. */
+  const contextFor = async (event: TutorEvent): Promise<string | null | false> => {
+    if (!tutorStream || now() - event.ts > CONTEXT_MAX_AGE_MS) return null;
+    const wanted = event.type === "teaching_moment" ? event.moment.state === "waiting" : event.type === "hint_request" || event.type === "problem_start" || event.type === "game_end";
+    if (!wanted) return null;
+    const timeout = AbortSignal.timeout(contextTimeoutMs);
+    const fetchSignal = signal ? AbortSignal.any([signal, timeout]) : timeout;
+    try {
+      if (event.type === "game_end") return await reviewText(client, event.gameId, fetchSignal);
+      const view = await client.state(fetchSignal);
+      // The board must be the one the event is about: a replayed moment or hint can come after the game moved on.
+      const same =
+        event.type === "teaching_moment"
+          ? view.moment?.id === event.moment.id
+          : event.type === "hint_request"
+            ? view.mode === "game" && view.gameId === event.gameId && toAscii(view.board, movePoint(view.moves.at(-1)?.move)) === event.board
+            : event.type === "problem_start" && view.problem?.id === event.problemId;
+      if (same) return formatState(view);
+      // A moment waiting under a practice problem: `state` shows the problem, so give the game's board from the event.
+      if (event.type === "teaching_moment" && view.mode === "problem" && event.boardAfter) {
+        return `practice problem ${view.problem?.id ?? ""} on the board; the moment waits under it. Board after move ${event.record.number}:\n${event.boardAfter}`;
+      }
+      err(`watch: the board has moved on from this ${event.type}; not attaching the state`);
+    } catch (e) {
+      err(`watch: couldn't fetch the ${event.type === "game_end" ? "review" : "state"} for this event: ${(e as Error).message}`);
+    }
+    return false;
+  };
+
+  /** The event to print, or null when it is a duplicate, unreadable, or one the tutor doesn't act on. */
+  const accept = (data: string, id: string | undefined): TutorEvent | null => {
     let event: TutorEvent;
     try {
       event = JSON.parse(data) as TutorEvent;
     } catch {
       err(`watch: ignoring non-JSON event data: ${data.slice(0, 200)}`);
-      return;
+      return null;
     }
     const seq = typeof event.seq === "number" ? event.seq : Number(id);
     if (Number.isFinite(seq)) {
-      if (last !== undefined && seq <= last) return; // replayed after a reconnect
+      if (last !== undefined && seq <= last) return null; // replayed after a reconnect
       last = seq;
     }
     if (event.type === "game_start") sizes.set(event.gameId, event.settings.size);
     else if ("size" in event && typeof event.size === "number" && "gameId" in event && typeof event.gameId === "string") sizes.set(event.gameId, event.size);
-    out(opts.json ? JSON.stringify(event) : formatEvent(event, { sizeOf: (g) => sizes.get(g) }));
+    return tutorStream && !actionable(event) ? null : event;
+  };
+
+  /** One write for what arrived together: the event lines first (a GAME_END's RATING right under it), then the states and reviews, fetched at once. */
+  const render = async (events: TutorEvent[]): Promise<string> => {
+    const contexts = await Promise.all(events.map(contextFor));
+    const lines = events.map((e, i) => line(e, contexts[i] === null ? undefined : contexts[i] !== false));
+    return [...lines, ...contexts.filter((c): c is string => typeof c === "string")].join("\n");
   };
 
   /** The server's first frame: its epoch, and the seq its replay starts after (our new cursor). */
@@ -73,6 +157,8 @@ export async function watch(opts: WatchOptions): Promise<void> {
     const params = new URLSearchParams();
     if (last !== undefined) params.set("since", String(last));
     if (last !== undefined && epoch !== undefined) params.set("epoch", epoch);
+    // The tutor's stream: right after its last watch closed, the server replays what that one missed.
+    if (tutorStream) params.set("rejoin", "1");
     const query = params.toString();
     const path = `/api/tutor/events${query ? `?${query}` : ""}`;
     try {
@@ -87,10 +173,16 @@ export async function watch(opts: WatchOptions): Promise<void> {
           const { done, value } = await reader.read();
           if (done) break;
           backoff = minBackoff; // the connection is live; next drop retries quickly
+          // What arrived together goes out in one write: one notification.
+          const events: TutorEvent[] = [];
           for (const msg of parser.push(decoder.decode(value, { stream: true }))) {
             if (msg.event === "hello") hello(msg.data);
-            else handle(msg.data, msg.id);
+            else {
+              const event = accept(msg.data, msg.id);
+              if (event) events.push(event);
+            }
           }
+          if (events.length > 0) out(await render(events));
           // The server's cursor frame (id, no data) moves `last` even before any event arrives.
           const cursor = Number(parser.lastEventId);
           if (parser.lastEventId !== undefined && Number.isFinite(cursor) && (last === undefined || cursor > last)) last = cursor;

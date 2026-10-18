@@ -141,6 +141,11 @@ export interface EventContext {
    * they carried `size`; without either, a point is printed without coordinates.
    */
   sizeOf?: (gameId: string) => number | undefined;
+  /**
+   * True: `watch` prints the state (or, after GAME_END, the review) under this line, so it says so
+   * instead of "run: state". False: it couldn't, so the line says to run it. Absent: the bare line.
+   */
+  attached?: boolean;
 }
 
 /** The move in GTP, or a note that its coordinates are unknown (an old event without `size`). */
@@ -179,6 +184,7 @@ function formatKnownEvent(e: TutorEvent, ctx: EventContext): string {
       let line = `MOVE ${r.number} ${r.move.color} ${eventMoveGtp(r.move, e.size, e.gameId, ctx)} (${e.by})`;
       if (r.captures.length > 0) line += ` captures ${r.captures.length}`;
       if (r.eval) line += ` lost ${num(r.eval.pointLoss)} (best ${r.eval.bestMove})`;
+      if (e.hintPending) line += " — played before your hint answer: that position is gone (don't draw on it)";
       return line;
     }
     case "teaching_moment": {
@@ -199,14 +205,15 @@ function formatKnownEvent(e: TutorEvent, ctx: EventContext): string {
           : ` — reply with: claim ${m.id}, then say/show/rethink/resume`;
       if (m.state !== "waiting") return `${head}${reply} (replayed; now ${m.state})`;
       const wait = m.deadline !== undefined ? `; fallback in ${secondsUntil(m.deadline, ctx.now ?? Date.now())}s` : "";
-      return `${head}${reply}${wait}`;
+      const state = ctx.attached === true ? " — state below" : ctx.attached === false ? " — run state for the board" : "";
+      return `${head}${reply}${wait}${state}`;
     }
     case "user_message":
       // On a practice problem the message is about the problem; the game id would point at the wrong board.
       if (e.problemId) return `USER ${quote(e.text)} (problem ${e.problemId})`;
-      return `USER ${quote(e.text)}${e.momentId ? ` (moment ${e.momentId})` : ""}${e.gameId ? ` game=${e.gameId}` : ""}`;
+      return `USER ${quote(e.text)}${e.momentId ? ` (moment ${e.momentId})` : ""}${e.gameId ? ` game=${e.gameId}` : ""}${e.tutorLevel ? ` level=${e.tutorLevel}` : ""}`;
     case "hint_request":
-      return `HINT game=${e.gameId} ${e.toPlay} to play — user asks: ${quote(e.text ?? "hint please")} — run: state, then say/show/mark`;
+      return `HINT game=${e.gameId} ${e.toPlay} to play${e.tutorLevel ? ` level=${e.tutorLevel}` : ""} — user asks: ${quote(e.text ?? "hint please")} — ${ctx.attached ? "state below; answer with" : "run: state, then"} say/show/mark`;
     case "fallback":
       return `FALLBACK ${e.momentId} (tutor too slow; KataGo answer shown)`;
     case "undo":
@@ -215,14 +222,14 @@ function formatKnownEvent(e: TutorEvent, ctx: EventContext): string {
       const r = e.summary.rating;
       const rating = r?.pending ? ", rank estimate running (a RATING line follows)" : r?.rated ? `, rating ${num(r.before)} -> ${num(r.after)}` : "";
       const help = e.summary.assistance ? `, help: ${assistText(e.summary.assistance)}` : "";
-      return `GAME_END ${e.gameId} ${resultText(e.result)} — ${mistakesText(e.summary)}, total loss ${num(e.summary.totalPointLoss)} over ${e.summary.moves} moves${help}${rating} — run: review ${e.gameId}`;
+      return `GAME_END ${e.gameId} ${resultText(e.result)} — ${mistakesText(e.summary)}, total loss ${num(e.summary.totalPointLoss)} over ${e.summary.moves} moves${help}${rating} — ${ctx.attached ? "review below" : `run: review ${e.gameId}`}`;
     }
     case "rating":
       return `RATING ${e.gameId} ${ratingChangeText(e.rating)}`;
     case "problem_start":
       return (
         `PROBLEM_START ${e.problemId} ${e.category} ${e.toPlay} to play (${problemOrigin(e)}, box ${e.box}) answers ${e.answers.join(",")} — ` +
-        `${quote(e.prompt)} — run: state; let them try, don't give the answer`
+        `${quote(e.prompt)} — ${ctx.attached ? "state below" : "run: state"}; let them try, don't give the answer`
       );
     case "generation": {
       const b = e.batch;
