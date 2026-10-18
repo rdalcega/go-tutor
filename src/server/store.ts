@@ -206,15 +206,17 @@ export class Store {
 
   // --- profile -------------------------------------------------------------
 
-  /** The JSON in `path`, or undefined when there is no file. A corrupt file is set aside (`.corrupt-<time>`), not lost. */
+  /** The JSON object in `path`, or undefined when there is no file. A file that doesn't hold one is set aside (`.corrupt-<time>`), not lost. */
   private readJsonOrSetAside(path: string): unknown {
     if (!existsSync(path)) return undefined;
     try {
-      return JSON.parse(readFileSync(path, "utf8")) as unknown;
+      const value: unknown = JSON.parse(readFileSync(path, "utf8"));
+      if (value && typeof value === "object" && !Array.isArray(value)) return value;
     } catch {
-      renameSync(path, `${path}.corrupt-${Date.now()}`);
-      return undefined;
+      // Set aside below.
     }
+    renameSync(path, `${path}.corrupt-${Date.now()}`);
+    return undefined;
   }
 
   /** The profile, with defaults for anything missing. A corrupt file is set aside, not lost. */
@@ -421,6 +423,20 @@ export class Store {
     const current = eventsAfter(this.eventsPath, since);
     if (current.reached) return current.events;
     return [...eventsAfter(this.rotatedEventsPath, since).events, ...current.events];
+  }
+
+  /** The newest logged event `matches` accepts, read from the log's end (then the rotation's) back only as far as needed; null when there is none. */
+  findEvent(matches: (e: TutorEvent) => boolean): TutorEvent | null {
+    for (const path of [this.eventsPath, this.rotatedEventsPath]) {
+      let found: TutorEvent | null = null;
+      readLinesBackward(path, (line) => {
+        const event = parseEvent(line);
+        if (event && matches(event)) found = event;
+        return found !== null;
+      });
+      if (found) return found;
+    }
+    return null;
   }
 
   /** The seq of the last logged event, or 0. Reads the log from its end back to its last complete event. */

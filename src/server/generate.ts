@@ -601,7 +601,10 @@ export class ProblemGenerator {
   constructor(private readonly deps: GeneratorDeps) {
     this.file = deps.store.loadGeneration();
     const repaired = normalizeGeneration(this.file);
-    if (repaired) deps.log(`problem generation: ${repaired} (generation.json was inconsistent)`);
+    if (repaired) {
+      deps.log(`problem generation: ${repaired} (generation.json was inconsistent)`);
+      this.save();
+    }
     this.problemsChanged(deps.store.loadProblems());
   }
 

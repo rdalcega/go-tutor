@@ -118,13 +118,15 @@ a restart before the move still counts it as assisted.
 
 **Restart.** `restoreLastGame` picks up the newest unfinished game with its chat, tags, first
 attempts, help and open question. A moment the learner dismissed stays dismissed. An open one comes
-back as it was saved, with its id (the tutor stream gets its `teaching_moment` again): KataGo's
+back as it was saved, with its id (its `teaching_moment` is already in the event log, where a fresh
+`watch` finds it): KataGo's
 fallback is drawn again without repeating its chat message; a moment the tutor finished (resumed
 with a drawing up) keeps waiting for the learner's Continue, its drawing gone but its words in the
 chat; a moment the tutor was still on, or was waiting for (it had a deadline), waits
 `TUTOR_TIMEOUT_MS` for the tutor to reconnect, as after a dropped connection, before KataGo answers;
-one nobody was handling falls back at once. A mistake whose eval arrived but never opened a moment
-opens one now.
+one nobody was handling falls back at once; one whose move the tutor took back (`rethink`) stays
+open, with the tutor, for the learner's new move. A mistake whose eval arrived but never opened a
+moment opens one now.
 `SavedGame.assistance` / `GameSummary.assistance` count hint requests, the learner's take-backs and
 the tutor's rethinks. Assisted moves don't count for the rank estimate.
 
@@ -208,7 +210,7 @@ tutor attached, the server adds a system reply saying the tutor isn't connected.
   that never reached the log can be reused after a restart), and `since` is where the replay starts.
   Replayed teaching moments carry the moment's current state (the game's, also while a practice
   problem is on the board). A stream without `since` gets the open teaching moment and the problem on
-  the board, if any.
+  the board, if any (their events from memory, or from the log for a moment restored after a restart).
 - `/api/*` rejects requests with a foreign `Origin` (anything but this server and the Vite dev server
   on port 5173) with 403, and POSTs without `content-type: application/json` with 415. The server
   listens on 127.0.0.1 only.

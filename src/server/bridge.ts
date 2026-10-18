@@ -170,7 +170,8 @@ export class TutorBridge {
 
   /**
    * A fresh `watch` (no since) gets the open teaching moment and the practice problem on the board
-   * (a moment can wait under a problem), so a late tutor can still pick them up.
+   * (a moment can wait under a problem), so a late tutor can still pick them up. Their events come
+   * from memory, or from the log when this boot didn't publish them (a moment restored after a restart).
    */
   private currentMomentEvents(): TutorEvent[] {
     const view = this.controller.view();
@@ -179,9 +180,10 @@ export class TutorBridge {
     const open = moment && moment.state !== "resolved" ? moment.id : undefined;
     const problemId = view.mode === "problem" ? view.problem?.id : undefined;
     const newest = [...this.ring].reverse();
+    const latest = (matches: (e: TutorEvent) => boolean) => newest.find(matches) ?? this.store.findEvent(matches);
     const events = [
-      open && newest.find((e) => e.type === "teaching_moment" && e.moment.id === open),
-      problemId && newest.find((e) => e.type === "problem_start" && e.problemId === problemId),
+      open && latest((e) => e.type === "teaching_moment" && e.moment.id === open),
+      problemId && latest((e) => e.type === "problem_start" && e.problemId === problemId),
     ];
     return events.filter((e): e is TutorEvent => !!e).sort((a, b) => a.seq - b.seq);
   }

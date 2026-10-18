@@ -497,8 +497,11 @@ export class GameController {
     }
     // The saved records' eval, level, judge mode and help; the moves themselves were just replayed.
     game.moves.forEach((record, i) => {
-      const { move: _move, number: _number, captures: _captures, ...kept } = saved.moves[i]!;
-      Object.assign(record, kept);
+      const { eval: evaluation, tutorLevel, judge, assist } = saved.moves[i]!;
+      if (evaluation) record.eval = evaluation;
+      if (tutorLevel) record.tutorLevel = tutorLevel;
+      if (judge) record.judge = judge;
+      if (assist?.length) record.assist = assist;
     });
     this.resetGameState();
     this.game = game;
@@ -516,13 +519,16 @@ export class GameController {
     this.chat = saved.chat ?? [];
     this.nextChatId = Math.max(this.nextChatId, nextNumber(this.chat.map((m) => m.id), "c"));
     this.system(`Picked up where you left off: game ${saved.id}, move ${game.moves.length}.`);
-    // A mistake the learner dismissed stays dismissed; an open moment comes back as it was; one
-    // whose eval arrived but never opened opens now (unless it was played on Silent: resumeTurn
-    // reads the level each move was played at).
+    // A mistake the learner dismissed stays dismissed; an open moment comes back as it was (its
+    // move on the board, or taken back by the tutor's rethink); a mistake whose eval arrived but
+    // never opened a moment opens one now (unless it was played on Silent: resumeTurn reads the
+    // level each move was played at).
     const last = game.lastMove;
-    if (last && saved.moment && saved.moment.moveNumber === last.number) {
-      if (saved.moment.state === "resolved") this.momentShown.add(last);
-      else this.restoreMoment(last, saved.moment);
+    const m = saved.moment;
+    if (m && m.state !== "resolved" && m.moveNumber > game.moves.length) this.restoreRethink(m);
+    else if (last && m && m.moveNumber === last.number) {
+      if (m.state === "resolved") this.momentShown.add(last);
+      else this.restoreMoment(last, m);
     }
     this.resumeTurn();
     this.changed();
@@ -933,40 +939,6 @@ export class GameController {
       ...(this.tutorAttached && { deadline: this.clock.now() + this.tutorTimeoutMs }),
       level: record.tutorLevel ?? "coach",
     });
-    this.emitMoment(record);
-    this.save();
-    this.settleWaitingMoment();
-  }
-
-  /**
-   * After a restart, the open moment as it was saved rather than a fresh one. A moment already
-   * answered stays answered, waiting for the learner's Continue: KataGo's fallback is drawn again
-   * without repeating its chat message; the tutor's drawing is gone, but their words are in the
-   * chat. A moment the tutor was still on, or was about to get (it had a deadline), waits for the
-   * tutor to reconnect as after a dropped connection: `watch` shows it waiting again, and KataGo
-   * answers if the wait runs out. One nobody was handling falls back at once (resumeTurn settles
-   * it). The tutor stream gets the moment again either way, so a fresh `watch` finds it.
-   */
-  private restoreMoment(record: MoveRecord, saved: TeachingMoment): void {
-    const { deadline, ...rest } = saved;
-    const fallback = saved.state === "fallback";
-    const answered = fallback || (saved.state === "tutor" && saved.awaitingLearner === true);
-    this.openMoment(record, answered ? rest : { ...rest, state: "waiting" });
-    if (!answered && (saved.state === "tutor" || deadline !== undefined)) this.waitForTutor();
-    if (fallback && record.eval) this.overlay = this.fallbackFor(this.game!, record, record.eval).overlay;
-    this.emitMoment(record);
-    if (fallback) this.emit({ type: "fallback", momentId: saved.id });
-  }
-
-  /** The game pauses on `moment`, about `record` (the last move): it won't open again for that move. */
-  private openMoment(record: MoveRecord, moment: TeachingMoment): void {
-    this.momentShown.add(record);
-    this.moment = moment;
-    this.status = "paused";
-  }
-
-  /** The `teaching_moment` event for the current moment, with the boards before and after its move (the last one). */
-  private emitMoment(record: MoveRecord): void {
     const game = this.game!;
     const before = game.before(record.number);
     this.emit({
@@ -979,6 +951,43 @@ export class GameController {
       boardAfter: toAscii(game.board, this.lastPoint()),
       tutorLevel: this.moment!.level,
     });
+    this.save();
+    this.settleWaitingMoment();
+  }
+
+  /**
+   * After a restart, the open moment as it was saved rather than a fresh one (its event is already
+   * in the log: a fresh `watch` finds it there). A moment already answered stays answered, waiting
+   * for the learner's Continue: KataGo's fallback is drawn again without repeating its chat message;
+   * the tutor's drawing is gone, but their words are in the chat. A moment the tutor was still on,
+   * or was about to get (it had a deadline), waits for the tutor to reconnect as after a dropped
+   * connection: `watch` shows it waiting again, and KataGo answers if the wait runs out. One nobody
+   * was handling falls back at once (resumeTurn settles it).
+   */
+  private restoreMoment(record: MoveRecord, saved: TeachingMoment): void {
+    const { deadline, ...rest } = saved;
+    const fallback = saved.state === "fallback";
+    const answered = fallback || (saved.state === "tutor" && saved.awaitingLearner === true);
+    this.openMoment(record, answered ? rest : { ...rest, state: "waiting" });
+    if (!answered && (saved.state === "tutor" || deadline !== undefined)) this.waitForTutor();
+    if (fallback && record.eval) this.overlay = this.fallbackFor(this.game!, record, record.eval).overlay;
+  }
+
+  /**
+   * After a restart, a moment whose move the tutor took back (rethink) before the learner played
+   * again: it stays open, with the tutor, for their new move, as it was.
+   */
+  private restoreRethink(saved: TeachingMoment): void {
+    if (!this.takenBack.some((t) => t.moveNumber === saved.moveNumber)) return;
+    const { deadline: _deadline, awaitingLearner: _awaiting, ...rest } = saved;
+    this.moment = { ...rest, state: "tutor" };
+  }
+
+  /** The game pauses on `moment`, about `record` (the last move): it won't open again for that move. */
+  private openMoment(record: MoveRecord, moment: TeachingMoment): void {
+    this.momentShown.add(record);
+    this.moment = moment;
+    this.status = "paused";
   }
 
   /**
@@ -1184,7 +1193,8 @@ export class GameController {
     for (const record of removed) if (record.move.color === settings.humanColor) this.keepTakenBack(record, by, line);
     if (by === "human") this.assistance.takeBacks++;
     else this.assistance.rethinks++;
-    // The move that replaces it is the learner's second try.
+    // The move that replaces it is the learner's second try (and nothing else: any help noted was for a later position).
+    this.help = null;
     this.noteHelp(by === "human" ? "retry" : "rethink");
     this.status = "playing";
     this.overlay = null;
@@ -1293,7 +1303,6 @@ export class GameController {
     const question = text?.trim();
     if (question) this.addChat("user", question, this.activeMoment()?.id);
     this.assistance.hints++;
-    this.save();
     this.emit({
       type: "hint_request",
       gameId: this.gameId!,
@@ -1305,10 +1314,11 @@ export class GameController {
     if (this.tutorAttached) {
       this.questionOpen = true; // the tutor got it: on Silent it may answer with one say
       this.pendingHelp().hintAsked = true; // the tutor's answer makes the next move hinted
-      this.system("Asked your tutor for a hint.");
+      this.system("Asked your tutor for a hint."); // saves the game, with these
       this.changed();
       return;
     }
+    this.save();
     const gen = this.gen;
     const moveCount = game.moves.length;
     try {

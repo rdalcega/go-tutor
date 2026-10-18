@@ -803,7 +803,7 @@ describe("GameController", () => {
     await flush();
     expect(again.view().status).toBe("paused");
     expect(again.view().moment).toMatchObject({ id, state: "waiting", deadline: clock.now() + 30_000 });
-    expect(replayed.map((e) => e.type)).toEqual(["teaching_moment"]); // the stream gets the moment again, with its old id
+    expect(replayed).toEqual([]); // nothing is logged again: a fresh watch finds the moment's event in the log
     expect(again.view().chat.some((m) => /cost about/.test(m.text))).toBe(false);
     // The tutor is back in time and picks it up again.
     again.setTutorAttached(true);
@@ -837,6 +837,36 @@ describe("GameController", () => {
     expect(again.view().chat.some((m) => /cost about/.test(m.text))).toBe(false);
     await again.handleAction({ type: "continue" });
     expect(again.view().status).toBe("playing");
+  });
+
+  it("a restart after a rethink keeps the moment open for the learner's new move", async () => {
+    setup({ tutor: true });
+    await startGame();
+    engine.botMoves = ["G7"];
+    ctl.play(E5);
+    await flush();
+    engine.lossAfter(["E5", "G7", "C3"], 6);
+    ctl.play(C3);
+    await flush();
+    const id = ctl.view().moment!.id;
+    await ctl.handleTutor({ type: "rethink", text: "Look again: which group is weakest?" });
+    expect(ctl.view().moves).toHaveLength(2);
+    ctl.flush(); // as on shutdown
+    const again = new GameController({ engine, store, clock, botDelayMs: 0 });
+    const replayed: TutorEventInput[] = [];
+    again.onEvent((e) => replayed.push(e));
+    expect(again.restoreLastGame()).toBe(true);
+    again.setEngineState("ready");
+    await flush();
+    // The moment is still the tutor's, the learner is to play, and Try again stays off (the move is already taken back).
+    expect(again.view()).toMatchObject({ status: "playing", toPlay: "B", moment: { id, moveNumber: 3, state: "tutor" } });
+    expect(again.view().allowed).toContain("play");
+    expect(again.view().allowed).not.toContain("retry");
+    expect(replayed).toEqual([]);
+    again.play(D4);
+    await flush();
+    expect(again.view().moment?.state).toBe("resolved");
+    expect(again.view().moves[2]!.assist).toEqual(["rethink"]);
   });
 
   it("a restart during a moment the tutor had falls back once nobody comes back for it", async () => {

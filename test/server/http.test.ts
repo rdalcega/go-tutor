@@ -324,6 +324,26 @@ describe("HTTP server", () => {
     expect(moment?.type === "teaching_moment" && moment.moment.deadline).toBeUndefined();
   });
 
+  it("gives a fresh stream after a restart the restored moment, from the log", async () => {
+    const first = await start();
+    await first.post("/api/action", { type: "new_game" });
+    (first.controller as unknown as { engine: FakeEngine }).engine.lossAfter(["C7"], 8);
+    await first.post("/api/action", { type: "play", point: { x: 2, y: 2 } });
+    await flush();
+    const id = first.controller.view().moment!.id;
+    first.controller.flush();
+    // The server restarts on the same data: the moment comes back as it was, and isn't published again.
+    const second = await start(undefined, first.store);
+    expect(second.controller.restoreLastGame()).toBe(true);
+    expect(second.controller.view().moment).toMatchObject({ id, state: "fallback" });
+    const fresh = await stream(`${second.base}/api/tutor/events`);
+    await flush();
+    const events = fresh.frames.map((f) => JSON.parse(f) as TutorEvent);
+    expect(events.map((e) => e.type)).toEqual(["teaching_moment"]);
+    expect(events[0]).toMatchObject({ moment: { id, state: "fallback" } });
+    expect(first.store.readEvents().filter((e) => e.type === "teaching_moment")).toHaveLength(1);
+  });
+
   it("replays a teaching moment waiting under a practice problem as still open", async () => {
     const { base, post, controller } = await start();
     const first = await stream(`${base}/api/tutor/events`);
