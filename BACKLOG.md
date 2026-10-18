@@ -13,8 +13,8 @@ Features to add or change. Newest at the bottom; move an item to "Done" with its
   (no moments, no mistakes, no problems, no effect on the rank), and the tutor doesn't comment.
   The opponent is always KataGo at full strength, whatever the learner's level. The learner can
   step forward and back through the moves; stepping forward when it's their turn has KataGo play
-  on their behalf. They can also play any move they like and see how KataGo answers. Open: after
-  stepping back and playing a different move, are the moves ahead discarded or kept as a branch?
+  on their behalf. They can also play any move they like and see how KataGo answers. After stepping
+  back and playing a different move, the moves that were ahead are thrown away (no branches).
 
 ## Done
 
