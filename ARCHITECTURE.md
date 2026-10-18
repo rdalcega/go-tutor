@@ -122,9 +122,10 @@ dismissed. An open one comes back as it was saved, with its id (its `teaching_mo
 the event log, where a fresh `watch` finds it): the tutor's stays the tutor's, as after a dropped
 connection, and KataGo's fallback stays answered, both waiting for the learner's Continue; one that
 was waiting for the tutor (it had a deadline) waits `TUTOR_TIMEOUT_MS` again before KataGo answers;
-one nobody was handling falls back at once; one whose move the tutor took back (`rethink`) stays
-open, with the tutor, for the learner's new move. A mistake whose eval arrived but never opened a
-moment opens one now.
+one nobody was handling falls back at once, as does KataGo's answer from a game saved before
+drawings were (it is given again); one whose move the tutor took back (`rethink`) stays open, with
+the tutor, for the learner's new move. A mistake whose eval arrived but never opened a moment opens
+one now.
 `SavedGame.assistance` / `GameSummary.assistance` count hint requests, the learner's take-backs and
 the tutor's rethinks. Assisted moves don't count for the rank estimate.
 

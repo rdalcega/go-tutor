@@ -64,8 +64,8 @@ export class TutorBridge {
   private viewQueued = false;
   /** Browsers waiting for "drain" before they get the next view. */
   private readonly draining = new Set<ServerResponse>();
-  /** Events looked up in the log for fresh streams, by `<type>:<id>`, found or not: an id's event doesn't change, so the answer stands. */
-  private readonly fromLog = new Map<string, TutorEvent | null>();
+  /** Moments looked up in the log for fresh streams, by id, found or not: a moment's id is never reused, so the answer stands. */
+  private readonly momentsFromLog = new Map<string, TutorEvent | null>();
 
   constructor(
     private readonly controller: GameController,
@@ -172,8 +172,9 @@ export class TutorBridge {
 
   /**
    * A fresh `watch` (no since) gets the open teaching moment and the practice problem on the board
-   * (a moment can wait under a problem), so a late tutor can still pick them up. Their events come
-   * from memory, or from the log when this boot didn't publish them (a moment restored after a restart).
+   * (a moment can wait under a problem), so a late tutor can still pick them up. The moment's event
+   * comes from memory, or from the log when this boot didn't publish it (a moment restored after a
+   * restart); a problem on the board was started this boot, so its event is in memory.
    */
   private currentMomentEvents(): TutorEvent[] {
     const view = this.controller.view();
@@ -182,17 +183,14 @@ export class TutorBridge {
     const open = moment && moment.state !== "resolved" ? moment.id : undefined;
     const problemId = view.mode === "problem" ? view.problem?.id : undefined;
     const newest = [...this.ring].reverse();
-    const latest = (type: TutorEvent["type"], id: string, matches: (e: TutorEvent) => boolean): TutorEvent | null => {
-      const inRing = newest.find((e) => e.type === type && matches(e));
+    const momentEvent = (id: string): TutorEvent | null => {
+      const matches = (e: TutorEvent) => e.type === "teaching_moment" && e.moment.id === id;
+      const inRing = newest.find(matches);
       if (inRing) return inRing;
-      const key = `${type}:${id}`;
-      if (!this.fromLog.has(key)) this.fromLog.set(key, this.store.findEvent(type, matches));
-      return this.fromLog.get(key) ?? null;
+      if (!this.momentsFromLog.has(id)) this.momentsFromLog.set(id, this.store.findEvent("teaching_moment", matches));
+      return this.momentsFromLog.get(id) ?? null;
     };
-    const events = [
-      open && latest("teaching_moment", open, (e) => e.type === "teaching_moment" && e.moment.id === open),
-      problemId && latest("problem_start", problemId, (e) => e.type === "problem_start" && e.problemId === problemId),
-    ];
+    const events = [open && momentEvent(open), problemId && newest.find((e) => e.type === "problem_start" && e.problemId === problemId)];
     return events.filter((e): e is TutorEvent => !!e).sort((a, b) => a.seq - b.seq);
   }
 

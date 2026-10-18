@@ -525,7 +525,7 @@ export class GameController {
     const m = saved.moment;
     if (last && m?.moveNumber === last.number) {
       if (m.state === "resolved") this.momentShown.add(last);
-      else this.restoreMoment(last, m);
+      else this.restoreMoment(last, m, saved.overlay === undefined);
     } else if (m && m.state !== "resolved" && m.moveNumber > game.moves.length) {
       // The tutor's rethink took its move back and the learner hadn't played again: it stays open, with the tutor, as retry left it.
       this.moment = m;
@@ -590,9 +590,15 @@ export class GameController {
     await this.tutorCommand(cmd);
     // The tutor answered: on Silent, the learner's question has had its one reply.
     if (cmd.type === "say" || cmd.type === "show" || cmd.type === "mark") {
-      this.questionOpen = false;
+      this.noteQuestion(false);
       this.noteTutorHelp(cmd.type);
     }
+  }
+
+  /** The learner's latest question reached the tutor (or was answered, or dropped): saved with the game, so a restart keeps Silent's one-answer rule right. */
+  private noteQuestion(open: boolean): void {
+    this.questionOpen = open;
+    this.save();
   }
 
   /**
@@ -966,11 +972,13 @@ export class GameController {
    * connection, and KataGo's fallback stays answered; both wait for the learner's Continue. A moment
    * that was waiting for the tutor waits again (a fresh TUTOR_TIMEOUT_MS: `watch` reconnects with
    * its cursor, and the claim it was about to make still works); one nobody was handling falls back
-   * at once (resumeTurn settles it).
+   * at once (resumeTurn settles it), as does KataGo's answer from a game saved before drawings were
+   * (`drawingUnknown`): given again, so the learner has something to look at.
    */
-  private restoreMoment(record: MoveRecord, saved: TeachingMoment): void {
+  private restoreMoment(record: MoveRecord, saved: TeachingMoment, drawingUnknown: boolean): void {
     const { deadline, ...rest } = saved;
-    this.openMoment(record, rest);
+    const again = saved.state === "fallback" && drawingUnknown;
+    this.openMoment(record, again ? { ...rest, state: "waiting" } : rest);
     if (saved.state === "waiting" && deadline !== undefined) this.waitForTutor();
   }
 
@@ -1299,7 +1307,7 @@ export class GameController {
       ...(question && { text: question }),
     });
     if (this.tutorAttached) {
-      this.questionOpen = true; // the tutor got it: on Silent it may answer with one say
+      this.noteQuestion(true); // the tutor got it: on Silent it may answer with one say
       this.pendingHelp().hintAsked = true; // the tutor's answer makes the next move hinted
       this.system("Asked your tutor for a hint.");
       this.changed();
@@ -1353,7 +1361,7 @@ export class GameController {
     this.addChat("user", trimmed, momentId);
     this.emit({ type: "user_message", text: trimmed, gameId: this.gameId, ...(momentId && { momentId }), ...(problemId && { problemId }) });
     if (this.tutorAttached) {
-      this.questionOpen = true; // the tutor got it: on Silent it may answer with one say
+      this.noteQuestion(true); // the tutor got it: on Silent it may answer with one say
     } else {
       this.system("Your tutor isn't connected right now, so nobody can answer chat. KataGo's feedback still works.");
     }
@@ -1775,7 +1783,7 @@ export class GameController {
     const session = this.practice;
     this.practice = null;
     // Entering or leaving a problem: a question about the game isn't one about the problem, nor the other way round.
-    this.questionOpen = false;
+    this.noteQuestion(false);
     return session?.close();
   }
 
@@ -1867,7 +1875,7 @@ export class GameController {
       tags: this.tags,
       heuristics: this.heuristics,
       moment: this.moment,
-      ...(this.overlay && { overlay: this.overlay }),
+      overlay: this.overlay,
       takenBack: this.takenBack,
       assistance: this.assistance,
       ...(this.help && { help: { at: this.help.at, kinds: [...this.help.kinds], ...(this.help.hintAsked && { hintAsked: true as const }) } }),

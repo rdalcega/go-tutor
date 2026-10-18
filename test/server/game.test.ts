@@ -853,6 +853,25 @@ describe("GameController", () => {
     expect(again.view().overlay?.variation).toMatchObject({ fromMove: 1 });
   });
 
+  it("a game saved before drawings were kept gets KataGo's answer again after a restart", async () => {
+    await startGame();
+    engine.lossAfter(["C3"], 6);
+    ctl.play(C3);
+    await flush();
+    ctl.flush();
+    // The file as the previous server wrote it: the fallback moment, but no `overlay` at all.
+    const id = ctl.view().gameId!;
+    const { overlay: _overlay, ...older } = store.loadGame(id)!;
+    store.saveGame(older, store.loadSgf(id)!);
+    const again = new GameController({ engine, store, clock, botDelayMs: 0 });
+    again.restoreLastGame();
+    again.setEngineState("ready");
+    await flush();
+    expect(again.view()).toMatchObject({ status: "paused", moment: { state: "fallback" } });
+    expect(again.view().overlay?.variation).toMatchObject({ fromMove: 1 });
+    expect(again.view().chat.filter((m) => /cost about 6/.test(m.text))).toHaveLength(2); // the old line and the fresh one
+  });
+
   it("a drawing the learner hid stays hidden after a restart", async () => {
     await startGame();
     engine.lossAfter(["C3"], 6);
@@ -1482,6 +1501,19 @@ describe("GameController tutor levels", () => {
     await ctl.handleAction({ type: "chat", text: "Is it the eye?" });
     await ctl.handleAction({ type: "leave_problem" });
     await expect(ctl.handleTutor({ type: "say", text: "Yes, the eye." })).rejects.toThrow(/chose Silent/);
+  });
+
+  it("silent: a question Practice dropped stays dropped after a restart", async () => {
+    setup({ tutor: true });
+    await ctl.handleAction({ type: "set_tutor_level", level: "silent" });
+    await startGame();
+    await ctl.handleAction({ type: "chat", text: "Where now?" });
+    await ctl.handleAction({ type: "next_problem" }); // entering a problem drops the question about the game
+    ctl.flush();
+    const again = new GameController({ engine: new FakeEngine(), store, clock, botDelayMs: 0 });
+    expect(again.restoreLastGame()).toBe(true);
+    again.setTutorAttached(true);
+    await expect(again.handleTutor({ type: "say", text: "Here." })).rejects.toThrow(/chose Silent/);
   });
 
   it("silent: a question asked before a restart still gets its one answer after it", async () => {
