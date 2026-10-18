@@ -115,7 +115,8 @@ const MAX_MOMENTS_9X9 = 6;
  * average is first divided by its board's threshold multiplier, so it is on the 9×9 scale.
  */
 const LOW_AVG_LOSS = 1.5;
-const RECENT_MISTAKES_CAP = 50;
+/** Mistakes kept in `recentMistakes` (the migration keeps the same window). */
+export const RECENT_MISTAKES_CAP = 50;
 const RECENT_GAMES_CAP = 20;
 
 export interface FinishedGame {
@@ -473,9 +474,14 @@ export function endgameStart(size: number): number {
   return Math.round(size * size * 0.5);
 }
 
-/** Group average ownership must swing at least this much, changing sign, for a life-and-death change. */
+/** Ownership must swing at least this much, changing sign, for a group's (or point's) fate to have flipped. */
 const STATUS_SWING = 1;
 const STATUS_MIN = 0.3;
+
+/** Whether KataGo's ownership of a group (its average) or a point changed sides for real: both readings clear, and a swing of STATUS_SWING. */
+export function ownershipFlipped(before: number, after: number): boolean {
+  return Math.sign(after) !== Math.sign(before) && Math.abs(after) >= STATUS_MIN && Math.abs(before) >= STATUS_MIN && Math.abs(after - before) >= STATUS_SWING;
+}
 
 interface Chain {
   color: Color;
@@ -514,12 +520,7 @@ function chainOwnership(chain: Chain, ownership: number[], size: number): number
 function lifeStatusChanged(ctx: MistakeContext): boolean {
   const { ownershipBefore: before, ownershipAfter: after, size } = ctx;
   if (!before || !after || before.length !== size * size || after.length !== size * size) return false;
-  return chains(ctx.boardBefore).some((chain) => {
-    if (chain.stones.length < 2) return false;
-    const b = chainOwnership(chain, before, size);
-    const a = chainOwnership(chain, after, size);
-    return Math.sign(a) !== Math.sign(b) && Math.abs(a) >= STATUS_MIN && Math.abs(b) >= STATUS_MIN && Math.abs(a - b) >= STATUS_SWING;
-  });
+  return chains(ctx.boardBefore).some((chain) => chain.stones.length >= 2 && ownershipFlipped(chainOwnership(chain, before, size), chainOwnership(chain, after, size)));
 }
 
 /** Adjacent opposing groups both short of liberties (≤ 3), with the played or best move on one of their liberties. */

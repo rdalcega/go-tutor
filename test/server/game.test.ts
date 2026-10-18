@@ -779,6 +779,57 @@ describe("GameController", () => {
     expect(again.view().status).toBe("paused");
     expect(again.view().moment).toMatchObject({ moveNumber: 1, pointLoss: 14.8, state: "fallback" });
     expect(again.view().moves).toHaveLength(1);
+    // KataGo's line is drawn again; its message, already in the chat, isn't repeated.
+    expect(again.view().overlay?.variation).toMatchObject({ fromMove: 1 });
+    expect(again.view().chat.filter((m) => /cost about 14\.8/.test(m.text))).toHaveLength(1);
+  });
+
+  it("a restart during a moment the tutor had waits for the tutor to come back before falling back", async () => {
+    setup({ tutor: true });
+    await startGame();
+    engine.lossAfter(["C3"], 6);
+    ctl.play(C3);
+    await flush();
+    const id = ctl.view().moment!.id;
+    await ctl.handleTutor({ type: "claim", momentId: id });
+    await ctl.handleTutor({ type: "say", text: "Which of your groups is weakest?" });
+    ctl.flush(); // as on shutdown
+    // The server comes back up before `tutor watch` reconnects.
+    const again = new GameController({ engine, store, clock, botDelayMs: 0, tutorTimeoutMs: 30_000 });
+    const replayed: TutorEventInput[] = [];
+    again.onEvent((e) => replayed.push(e));
+    expect(again.restoreLastGame()).toBe(true);
+    again.setEngineState("ready");
+    await flush();
+    expect(again.view().status).toBe("paused");
+    expect(again.view().moment).toMatchObject({ id, state: "waiting", deadline: clock.now() + 30_000 });
+    expect(replayed.map((e) => e.type)).toEqual(["teaching_moment"]); // the stream gets the moment again, with its old id
+    expect(again.view().chat.some((m) => /cost about/.test(m.text))).toBe(false);
+    // The tutor is back in time and picks it up again.
+    again.setTutorAttached(true);
+    await again.handleTutor({ type: "claim", momentId: id });
+    clock.advance(60_000);
+    expect(again.view().moment?.state).toBe("tutor");
+    expect(again.view().chat.some((m) => /cost about/.test(m.text))).toBe(false);
+  });
+
+  it("a restart during a moment the tutor had falls back once nobody comes back for it", async () => {
+    setup({ tutor: true });
+    await startGame();
+    engine.lossAfter(["C3"], 6);
+    ctl.play(C3);
+    await flush();
+    await ctl.handleTutor({ type: "claim", momentId: ctl.view().moment!.id });
+    ctl.flush();
+    const again = new GameController({ engine, store, clock, botDelayMs: 0, tutorTimeoutMs: 30_000 });
+    again.restoreLastGame();
+    again.setEngineState("ready");
+    await flush();
+    expect(again.view().moment?.state).toBe("waiting");
+    clock.advance(30_000);
+    expect(again.view().moment?.state).toBe("fallback");
+    expect(again.view().chat.filter((m) => /cost about 6/.test(m.text))).toHaveLength(1);
+    expect(again.view().overlay?.variation).toMatchObject({ fromMove: 1 });
   });
 
   it("a restart after Continue doesn't reopen the dismissed moment", async () => {
@@ -1338,6 +1389,25 @@ describe("GameController tutor levels", () => {
     await ctl.handleAction({ type: "leave_problem" });
     await expect(ctl.handleTutor({ type: "say", text: "Yes, the eye." })).rejects.toThrow(/chose Silent/);
   });
+
+  it("silent: a question asked before a restart still gets its one answer after it", async () => {
+    setup({ tutor: true });
+    await ctl.handleAction({ type: "set_tutor_level", level: "silent" });
+    await startGame();
+    await ctl.handleAction({ type: "ask_tutor", text: "Where now?" });
+    ctl.flush();
+    const again = new GameController({ engine: new FakeEngine(), store, clock, botDelayMs: 0 });
+    expect(again.restoreLastGame()).toBe(true);
+    again.setEngineState("ready");
+    again.setTutorAttached(true);
+    await again.handleTutor({ type: "say", text: "Look at the corner." });
+    await expect(again.handleTutor({ type: "say", text: "And the side." })).rejects.toThrow(/chose Silent/);
+    again.play(D4);
+    await flush();
+    expect(again.view().moves[0]!.assist).toEqual(["hint"]);
+    again.flush();
+    expect(store.loadGame(again.view().gameId!)!.questionOpen).toBeUndefined();
+  });
 });
 
 describe("GameController take-backs and help", () => {
@@ -1401,6 +1471,16 @@ describe("GameController take-backs and help", () => {
     expect(saved.assistance).toEqual({ hints: 0, takeBacks: 1, rethinks: 1 });
   });
 
+  it("doesn't count a hint KataGo can't give yet", async () => {
+    ctl.setEngineState("starting");
+    await startGame();
+    await expect(ctl.handleAction({ type: "ask_tutor", text: "help" })).rejects.toThrow(/still starting/);
+    expect(types()).not.toContain("hint_request");
+    expect(ctl.view().chat.some((m) => m.from === "user")).toBe(false);
+    ctl.flush();
+    expect(store.loadGame(ctl.view().gameId!)!.assistance).toEqual({ hints: 0, takeBacks: 0, rethinks: 0 });
+  });
+
   it("marks a move played after KataGo's hint as hinted and shown, only in that position", async () => {
     await startGame();
     engine.botMoves = ["G7"];
@@ -1459,6 +1539,34 @@ describe("GameController take-backs and help", () => {
     expect(saved.takenBack).toHaveLength(1);
     expect(saved.summary!.assistance).toEqual({ hints: 0, takeBacks: 0, rethinks: 1 });
     expect(saved.summary!.mistakes).toMatchObject([{ moveNumber: 1, move: "C3", takenBack: 0 }]);
+  });
+
+  it("keeps the help for a move not yet played across a restart, an unanswered hint included", async () => {
+    setup({ tutor: true });
+    await startGame();
+    // A drawing on the learner's turn, then a restart before they play: the move is still "shown".
+    await ctl.handleTutor({ type: "mark", points: ["C3"] });
+    ctl.flush();
+    const restored = new GameController({ engine: new FakeEngine(), store, clock, botDelayMs: 0 });
+    expect(restored.restoreLastGame()).toBe(true);
+    restored.setEngineState("ready");
+    restored.setTutorAttached(true);
+    restored.play(D4);
+    await flush();
+    expect(restored.view().moves[0]!.assist).toEqual(["shown"]);
+    // A hint asked before a restart and answered after it still makes the next move hinted.
+    await restored.handleAction({ type: "ask_tutor" });
+    restored.flush();
+    const again = new GameController({ engine: new FakeEngine(), store, clock, botDelayMs: 0 });
+    expect(again.restoreLastGame()).toBe(true);
+    again.setEngineState("ready");
+    again.setTutorAttached(true);
+    await again.handleTutor({ type: "say", text: "Look at the corner." });
+    again.play(C3);
+    await flush();
+    expect(again.view().moves[2]!.assist).toEqual(["hint"]);
+    again.flush();
+    expect(store.loadGame(again.view().gameId!)!.help).toBeUndefined();
   });
 });
 

@@ -31,6 +31,7 @@ import {
   type JudgeMode,
   type MistakeCategory,
   type Move,
+  type MoveEval,
   type MoveRecord,
   type Overlay,
   type Point,
@@ -509,14 +510,22 @@ export class GameController {
     this.heuristics = saved.heuristics ?? {};
     this.takenBack = saved.takenBack ?? [];
     this.assistance = { ...noAssistance(), ...saved.assistance };
+    // Help for the move the learner hadn't played yet (a hint, a drawing, a take-back) still counts for it.
+    if (saved.help) this.help = { at: saved.help.at, kinds: new Set(saved.help.kinds) };
+    this.hintAskedAt = saved.hintAskedAt ?? null;
+    this.questionOpen = saved.questionOpen === true;
     this.chat = saved.chat ?? [];
     const maxChatId = Math.max(0, ...this.chat.map((m) => Number(/^c(\d+)$/.exec(m.id)?.[1] ?? 0)));
     this.nextChatId = Math.max(this.nextChatId, maxChatId + 1);
     this.system(`Picked up where you left off: game ${saved.id}, move ${game.moves.length}.`);
-    // A mistake the learner dismissed stays dismissed; one they hadn't dealt with opens again
-    // (unless it was played on Silent: resumeTurn reads the level each move was played at).
+    // A mistake the learner dismissed stays dismissed; an open moment comes back as it was; one
+    // whose eval arrived but never opened opens now (unless it was played on Silent: resumeTurn
+    // reads the level each move was played at).
     const last = game.lastMove;
-    if (last && saved.moment?.moveNumber === last.number && saved.moment.state === "resolved") this.momentShown.add(last);
+    if (last && saved.moment && saved.moment.moveNumber === last.number) {
+      if (saved.moment.state === "resolved") this.momentShown.add(last);
+      else this.restoreMoment(last, saved.moment);
+    }
     this.resumeTurn();
     this.changed();
     return true;
@@ -592,11 +601,12 @@ export class GameController {
     if (type !== "say") this.noteHelp("shown");
   }
 
-  /** The learner gets `kind` of help for the move they play next in this position. */
+  /** The learner gets `kind` of help for the move they play next in this position (saved with the game, so a restart keeps it). */
   private noteHelp(kind: AssistKind): void {
     const at = this.game?.moves.length ?? 0;
     if (this.help?.at !== at) this.help = { at, kinds: new Set() };
     this.help.kinds.add(kind);
+    this.save();
   }
 
   private async tutorCommand(cmd: TutorCommand): Promise<void> {
@@ -909,10 +919,8 @@ export class GameController {
   // --- teaching moments --------------------------------------------------------------
 
   private startMoment(record: MoveRecord): void {
-    const game = this.game!;
     if (this.result) return;
     this.momentShown.add(record);
-    const before = game.before(record.number);
     this.moment = {
       id: `${record.number}-${randomBytes(2).toString("hex")}`,
       moveNumber: record.number,
@@ -922,18 +930,49 @@ export class GameController {
       level: record.tutorLevel ?? "coach",
     };
     this.status = "paused";
+    this.emitMoment(record);
+    this.save();
+    this.settleWaitingMoment();
+  }
+
+  /**
+   * After a restart, the open moment as it was saved rather than a fresh one. KataGo's fallback is
+   * drawn again without repeating its chat message. A moment the tutor had, or was about to get (it
+   * had a deadline), waits for the tutor to reconnect as after a dropped connection: `watch` shows
+   * it waiting again, and KataGo answers if the wait runs out. One nobody was handling falls back at
+   * once (resumeTurn settles it). The tutor stream gets the moment again either way, so a fresh
+   * `watch` finds it.
+   */
+  private restoreMoment(record: MoveRecord, saved: TeachingMoment): void {
+    this.momentShown.add(record);
+    this.status = "paused";
+    const { deadline: _deadline, awaitingLearner: _awaiting, ...rest } = saved;
+    if (saved.state === "fallback") {
+      this.moment = rest;
+      if (record.eval) this.overlay = this.fallbackFor(this.game!, record, record.eval).overlay;
+      this.emitMoment(record);
+      this.emit({ type: "fallback", momentId: rest.id });
+      return;
+    }
+    this.moment = { ...rest, state: "waiting" };
+    if (saved.state === "tutor" || saved.deadline !== undefined) this.waitForTutor();
+    this.emitMoment(record);
+  }
+
+  /** The `teaching_moment` event for the current moment, with the boards before and after its move (the last one). */
+  private emitMoment(record: MoveRecord): void {
+    const game = this.game!;
+    const before = game.before(record.number);
     this.emit({
       type: "teaching_moment",
       gameId: this.gameId!,
       size: game.size,
-      moment: { ...this.moment },
+      moment: { ...this.moment! },
       record,
       boardBefore: toAscii(before.board, movePoint(before.lastMove?.move)),
       boardAfter: toAscii(game.board, this.lastPoint()),
-      tutorLevel: this.moment.level,
+      tutorLevel: this.moment!.level,
     });
-    this.save();
-    this.settleWaitingMoment();
   }
 
   /**
@@ -975,33 +1014,40 @@ export class GameController {
     this.cancelMomentTimer();
     this.setMomentState("fallback");
     const record = game.moves[moment.moveNumber - 1];
-    const evaluation = record?.eval;
-    if (record && evaluation) {
-      const played = moveGtp(record.move, game.size);
-      // Judged at level, the answer is the reference move (a stronger player's), else KataGo's best.
-      const atLevel = atLevelOf(record);
-      const answer = atLevel ? { move: atLevel.move, pv: atLevel.pv } : { move: evaluation.bestMove, pv: evaluation.bestPv };
-      // The line is an alternative to the move, so it is drawn on the board from before it, with
-      // the move actually played marked so the learner can find it.
-      const moves = lineStones(game.before(record.number), answer.pv, PV_STONES);
-      const playedPoint = movePoint(record.move);
-      const marks: NonNullable<Overlay["marks"]> = playedPoint && !moves.some((m) => samePoint(m.point, playedPoint)) ? [{ point: playedPoint, kind: "x" }] : [];
-      // The answer is highlighted as part of the drawing, so hiding the drawing hides it too.
-      const bestPoint = answer.move === "pass" ? undefined : tryFromGtp(answer.move, game.size);
-      const label = atLevel ? `A ${atLevel.rank}'s line instead of ${played}` : `KataGo's line instead of ${played}`;
-      this.overlay = moves.length
-        ? { variation: { label, moves, fromMove: record.number }, ...(marks.length && { marks }), ...(bestPoint && { best: bestPoint }) }
-        : null;
-      const playedText = played === "pass" ? "Passing" : `Your move at ${played}`;
-      const best = answer.move === "pass" ? "passing" : answer.move;
-      const where = playedPoint ? ` (your move is marked ✕)` : "";
-      const line = moves.length > 1 ? ` The board shows the position before your move${where}; the numbered stones show how play might go instead.` : "";
-      const verdict = atLevel
-        ? `${playedText} cost about ${round1(judgedLoss(record)!)} points compared with ${best}, the move a ${atLevel.rank} player would most likely play.`
-        : `${playedText} cost about ${round1(evaluation.pointLoss)} points. KataGo would have played ${best}.`;
-      this.system(`${verdict}${line} Press Continue to play on, or Try again to take your move back.`, moment.id);
+    if (record?.eval) {
+      const { overlay, text } = this.fallbackFor(game, record, record.eval);
+      this.overlay = overlay;
+      this.system(text, moment.id);
     }
     this.emit({ type: "fallback", momentId: moment.id });
+  }
+
+  /**
+   * KataGo's answer to a mistake, for the fallback: the better line, drawn on the board from before
+   * the move (an alternative to it) with the move actually played marked ✕ and the answer
+   * highlighted, so hiding the drawing hides both; and the words that go with it. Judged at level,
+   * the answer is the reference move (a stronger player's), else KataGo's best.
+   */
+  private fallbackFor(game: GoGame, record: MoveRecord, evaluation: MoveEval): { overlay: Overlay | null; text: string } {
+    const played = moveGtp(record.move, game.size);
+    const atLevel = atLevelOf(record);
+    const answer = atLevel ? { move: atLevel.move, pv: atLevel.pv } : { move: evaluation.bestMove, pv: evaluation.bestPv };
+    const moves = lineStones(game.before(record.number), answer.pv, PV_STONES);
+    const playedPoint = movePoint(record.move);
+    const marks: NonNullable<Overlay["marks"]> = playedPoint && !moves.some((m) => samePoint(m.point, playedPoint)) ? [{ point: playedPoint, kind: "x" }] : [];
+    const bestPoint = answer.move === "pass" ? undefined : tryFromGtp(answer.move, game.size);
+    const label = atLevel ? `A ${atLevel.rank}'s line instead of ${played}` : `KataGo's line instead of ${played}`;
+    const overlay = moves.length
+      ? { variation: { label, moves, fromMove: record.number }, ...(marks.length && { marks }), ...(bestPoint && { best: bestPoint }) }
+      : null;
+    const playedText = played === "pass" ? "Passing" : `Your move at ${played}`;
+    const best = answer.move === "pass" ? "passing" : answer.move;
+    const where = playedPoint ? ` (your move is marked ✕)` : "";
+    const line = moves.length > 1 ? ` The board shows the position before your move${where}; the numbered stones show how play might go instead.` : "";
+    const verdict = atLevel
+      ? `${playedText} cost about ${round1(judgedLoss(record)!)} points compared with ${best}, the move a ${atLevel.rank} player would most likely play.`
+      : `${playedText} cost about ${round1(evaluation.pointLoss)} points. KataGo would have played ${best}.`;
+    return { overlay, text: `${verdict}${line} Press Continue to play on, or Try again to take your move back.` };
   }
 
   /**
@@ -1247,6 +1293,8 @@ export class GameController {
     if (game.toPlay !== settings.humanColor) {
       throw new UserError(this.status === "paused" ? "Press Continue or Try again first, then ask for a hint." : "Wait for the bot to move, then ask for a hint.");
     }
+    // Without a tutor KataGo answers, so it must be ready before the hint counts as help.
+    if (!this.tutorAttached && this.engineState !== "ready") throw new UserError(this.engineNotReadyText());
     if (text?.trim()) this.addChat("user", text.trim(), this.activeMoment()?.id);
     this.assistance.hints++;
     this.save();
@@ -1265,7 +1313,6 @@ export class GameController {
       this.changed();
       return;
     }
-    if (this.engineState !== "ready") throw new UserError(this.engineNotReadyText());
     const gen = this.gen;
     const moveCount = game.moves.length;
     try {
@@ -1813,6 +1860,9 @@ export class GameController {
       moment: this.moment,
       takenBack: this.takenBack,
       assistance: this.assistance,
+      ...(this.help && { help: { at: this.help.at, kinds: [...this.help.kinds] } }),
+      ...(this.hintAskedAt !== null && { hintAskedAt: this.hintAskedAt }),
+      ...(this.questionOpen && { questionOpen: true as const }),
       ...(this.atLevelRank && { atLevelRank: this.atLevelRank }),
     };
     try {

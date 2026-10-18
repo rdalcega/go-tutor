@@ -31,6 +31,7 @@ import { BACKGROUND_PRIORITY } from "./katago.ts";
 import { addProblems, generateProblems, nextProblemId, type StoredProblem } from "./problems.ts";
 import {
   MIN_BOT_RATING,
+  RECENT_MISTAKES_CAP,
   applyEstimate,
   botFor,
   classifyPlayed,
@@ -48,7 +49,6 @@ import type { Store } from "./store.ts";
 export const MIN_MIGRATION_MOVES = 10;
 /** Visits for the ownership analyses that categorize a taken-back mistake. */
 const CLASSIFY_VISITS = 100;
-const RECENT_MISTAKES_CAP = 50;
 
 /** One saved game with what the event log adds to it. */
 export interface Reconstruction {

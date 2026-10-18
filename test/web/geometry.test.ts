@@ -11,7 +11,6 @@ import {
   pointToPixel,
   positionBefore,
   rowLabel,
-  secondsLeft,
   sparklinePoints,
   thresholdFact,
 } from "../../web/src/geometry.ts";
@@ -128,12 +127,6 @@ describe("teaching moments", () => {
 });
 
 describe("timing", () => {
-  it("counts down whole seconds", () => {
-    expect(secondsLeft(10_000, 0)).toBe(10);
-    expect(secondsLeft(10_000, 9_001)).toBe(1);
-    expect(secondsLeft(10_000, 12_000)).toBe(0);
-  });
-
   it("backs off exponentially with a cap", () => {
     expect(backoffDelay(0)).toBe(500);
     expect(backoffDelay(3)).toBe(4000);

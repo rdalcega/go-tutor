@@ -112,7 +112,17 @@ take-backs, its heuristic category and tag), and a tag the profile already count
 position was answered (KataGo's, or a tutor `say`/`show`/`mark` after a hint request on the
 learner's turn), `"retry"`/`"rethink"` when it replaces a taken-back move, `"shown"` when the tutor
 drew on that position on the learner's turn (or KataGo's hint circled a point), even if the learner
-hid the drawing. Help is kept per position (move count) and cleared by the next move or take-back.
+hid the drawing. Help is kept per position (move count) and cleared by the next move or take-back; it
+is saved with the game (`SavedGame.help`, and `hintAskedAt` for a hint the tutor hasn't answered), so
+a restart before the move still counts it as assisted.
+
+**Restart.** `restoreLastGame` picks up the newest unfinished game with its chat, tags, first
+attempts, help and open question. A moment the learner dismissed stays dismissed. An open one comes
+back as it was saved, with its id (the tutor stream gets its `teaching_moment` again): KataGo's
+fallback is drawn again without repeating its chat message; a moment the tutor had, or was waiting
+for (it had a deadline), waits `TUTOR_TIMEOUT_MS` for the tutor to reconnect, as after a dropped
+connection, before KataGo answers; one nobody was handling falls back at once. A mistake whose eval
+arrived but never opened a moment opens one now.
 `SavedGame.assistance` / `GameSummary.assistance` count hint requests, the learner's take-backs and
 the tutor's rethinks. Assisted moves don't count for the rank estimate.
 
@@ -152,7 +162,8 @@ level, not the current one), and a moment keeps its move's level as `TeachingMom
   and `rethink` are refused, and `say` is accepted only once per learner question: after a
   `user_message` or `hint_request` that reached an attached tutor and has no tutor `say`, `show` or
   `mark` after it yet (a hint KataGo answered doesn't count; a new game, the game's end, and entering
-  or leaving a problem drop an unanswered question). Hints work as usual. Practice
+  or leaving a problem drop an unanswered question; a restart keeps it, `SavedGame.questionOpen`).
+  Hints work as usual. Practice
   problems, a moment opened before the switch, and the post-game review are not restricted.
 
 **Judge modes** (`Profile.judgeMode`, in `GameView.judgeMode`; default `optimal`): how a human move is

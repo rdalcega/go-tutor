@@ -601,6 +601,22 @@ describe("ProblemGenerator", () => {
     expect(store.loadGeneration().progress?.batchId).toBe("batch1");
   });
 
+  it("resumes the newest batch when the progress names another one and it never finished", async () => {
+    const store = tempStore();
+    const first = harness(selfPlayEngine(), store);
+    first.mayRun.value = false;
+    first.generator.startNow(); // batch1, in progress
+    first.generator.stop();
+    const file = store.loadGeneration();
+    file.progress = { batchId: "batch7", game: null, reserve: [] }; // a damaged file: the progress belongs to no batch
+    store.saveGeneration(file);
+    const h = harness(selfPlayEngine(), store);
+    h.mayRun.value = true;
+    await runUntilStopped(h, () => store.loadGeneration().progress?.batchId === "batch1");
+    expect(store.loadGeneration().progress?.batchId).toBe("batch1"); // not stuck without a batch, nor a batch2 started over it
+    expect(h.generator.batches.map((b) => b.id)).toEqual(["batch1"]);
+  });
+
   it("starts a batch on demand when none is in progress", () => {
     const h = harness();
     h.mayRun.value = false;

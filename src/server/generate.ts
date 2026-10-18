@@ -45,7 +45,7 @@ import {
   type Candidate,
   type StoredProblem,
 } from "./problems.ts";
-import { MAX_BOT_RATING, MIN_BOT_RATING, classifyPlayed } from "./profile.ts";
+import { MAX_BOT_RATING, MIN_BOT_RATING, classifyPlayed, ownershipFlipped } from "./profile.ts";
 
 // ---------------------------------------------------------------------------
 // Settings
@@ -266,17 +266,10 @@ function chebyshev(a: Point, b: Point): number {
   return Math.max(Math.abs(a.x - b.x), Math.abs(a.y - b.y));
 }
 
-/** Ownership must swing this much, changing sign, for a group or point to have flipped. */
-const FLIP_SWING = 1;
-const FLIP_MIN = 0.3;
-
-function flipped(before: number, after: number): boolean {
-  return Math.sign(before) !== Math.sign(after) && Math.abs(before) >= FLIP_MIN && Math.abs(after) >= FLIP_MIN && Math.abs(before - after) >= FLIP_SWING;
-}
-
 /**
  * Points whose fate the mistake changed, from KataGo's ownership (Black's view) before and after it:
- * every stone of a group whose average ownership flips, and every empty point whose ownership flips.
+ * every stone of a group whose average ownership flips, and every empty point whose ownership flips
+ * (`ownershipFlipped`, the same rule that spots a life-and-death mistake in the learner's games).
  */
 export function flippedPoints(board: Board, before: readonly number[], after: readonly number[]): Point[] {
   const size = board.length;
@@ -287,14 +280,14 @@ export function flippedPoints(board: Board, before: readonly number[], after: re
     row.forEach((cell, x) => {
       const p = { x, y };
       if (cell === null) {
-        if (flipped(before[y * size + x]!, after[y * size + x]!)) out.push(p);
+        if (ownershipFlipped(before[y * size + x]!, after[y * size + x]!)) out.push(p);
         return;
       }
       if (seen.has(pointKey(p))) return;
       const group = groupAt(board, p).stones;
       for (const s of group) seen.add(pointKey(s));
       const average = (o: readonly number[]) => group.reduce((sum, s) => sum + o[s.y * size + s.x]!, 0) / group.length;
-      if (flipped(average(before), average(after))) out.push(...group);
+      if (ownershipFlipped(average(before), average(after))) out.push(...group);
     }),
   );
   return out;
@@ -864,11 +857,17 @@ export class ProblemGenerator {
     const progress = this.file.progress!;
     const batch = this.currentBatch();
     if (!batch) {
-      // Progress for a batch that isn't there (a damaged generation.json): drop it, so the trigger can start a new one.
-      this.deps.log(`problem generation: progress for unknown ${progress.batchId} dropped`);
-      this.file.progress = null;
+      // Progress for a batch that isn't the newest (a damaged generation.json): the newest batch is
+      // resumed if it never finished (the trigger would otherwise wait for it forever), else the
+      // progress is dropped so the trigger can start a new one.
+      const last = this.file.batches.at(-1);
+      const resume = last && !last.finishedAt ? last : null;
+      this.deps.log(`problem generation: progress for unknown ${progress.batchId} dropped${resume ? `; resuming ${resume.id}` : ""}`);
+      this.file.progress = resume ? { batchId: resume.id, game: null, reserve: [] } : null;
+      this.replay = null;
+      this.prev = null;
       this.save();
-      this.checkTrigger();
+      if (!resume) this.checkTrigger();
       return;
     }
     let game = progress.game;

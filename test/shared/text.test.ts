@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { TUTOR_LEVEL_TEXT, categoryLabel, colorName, comeBackText, formatScore, round1, tutorLevelChangedText } from "../../src/shared/text.ts";
+import { TUTOR_LEVEL_TEXT, categoryLabel, colorName, comeBackText, formatScore, round1, secondsUntil, tutorLevelChangedText } from "../../src/shared/text.ts";
 import { TUTOR_LEVELS } from "../../src/shared/types.ts";
 
 describe("shared wording", () => {
@@ -42,6 +42,13 @@ describe("shared wording", () => {
       expect(TUTOR_LEVEL_TEXT[l].learner).not.toBe("");
       expect(TUTOR_LEVEL_TEXT[l].tutor).not.toBe("");
     }
+  });
+
+  it("counts a deadline down in whole seconds, rounding up, for the UI and the CLI alike", () => {
+    expect(secondsUntil(10_000, 0)).toBe(10);
+    expect(secondsUntil(10_000, 9_001)).toBe(1);
+    expect(secondsUntil(10_000, 9_600)).toBe(1); // still waiting: never 0 before the deadline
+    expect(secondsUntil(10_000, 12_000)).toBe(0);
   });
 
   it("announces a new tutor level the same way for the server and the mock", () => {

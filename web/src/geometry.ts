@@ -144,11 +144,6 @@ export function positionBefore(
   }
 }
 
-/** Whole seconds remaining until `deadline` (ms epoch), never negative. */
-export function secondsLeft(deadline: number, now: number): number {
-  return Math.max(0, Math.ceil((deadline - now) / 1000));
-}
-
 /**
  * Sparkline coordinates for ratings in a w×h box: higher ratings are drawn higher. The vertical
  * range is at least `minRange` ranks so small wobbles stay small.

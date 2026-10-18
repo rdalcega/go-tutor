@@ -13,7 +13,7 @@ import {
 } from "../../src/shared/types.ts";
 import { atLevelOf, judgedLoss } from "../../src/shared/judge.ts";
 import { ratingToRank } from "../../src/shared/rank.ts";
-import { JUDGE_MODE_TEXT, TUTOR_LEVEL_TEXT, categoryLabel, colorName, formatScore, rankEstimateText } from "../../src/shared/text.ts";
+import { JUDGE_MODE_TEXT, TUTOR_LEVEL_TEXT, categoryLabel, colorName, formatScore, rankEstimateText, secondsUntil } from "../../src/shared/text.ts";
 import { type ConnectionState, type Transport, httpTransport } from "./api.ts";
 import { BoardView } from "./board.ts";
 import { readCollapsed, writeCollapsed } from "./collapse.ts";
@@ -32,7 +32,6 @@ import {
   problemResult,
   ratingChangeFor,
   ratingSparkPoints,
-  secondsLeft,
   sparklinePoints,
   thresholdFact,
   topCategories,
@@ -369,7 +368,7 @@ function renderMoment(v: GameView | null): void {
       : "Take a look at the position before KataGo shows its answer.";
     const tick = () => {
       el.momentCountdown.textContent =
-        m.deadline !== undefined ? `${secondsLeft(m.deadline, Date.now())}s` : "";
+        m.deadline !== undefined ? `${secondsUntil(m.deadline, Date.now())}s` : "";
     };
     tick();
     countdownTimer = setInterval(tick, 250);

@@ -7,7 +7,7 @@ import { moveGtp, movePoint, toGtp } from "../shared/coords.ts";
 import { atLevelOf } from "../shared/judge.ts";
 import { ratingToRank } from "../shared/rank.ts";
 import { playedThreshold, sizeText, thresholdNum, thresholdText } from "../shared/threshold.ts";
-import { JUDGE_MODE_TEXT, TUTOR_LEVEL_TEXT, assistText, estimateRankText, rankEstimateText, round1, takenBackTry, takenBackTryText } from "../shared/text.ts";
+import { JUDGE_MODE_TEXT, TUTOR_LEVEL_TEXT, assistText, estimateRankText, rankEstimateText, round1, secondsUntil, takenBackTry, takenBackTryText } from "../shared/text.ts";
 import type {
   ChatMessage,
   Color,
@@ -141,11 +141,6 @@ export interface EventContext {
    * they carried `size`; without either, a point is printed without coordinates.
    */
   sizeOf?: (gameId: string) => number | undefined;
-}
-
-/** Whole seconds from `now` until `deadline`, never negative. */
-function secondsUntil(deadline: number, now: number): number {
-  return Math.max(0, Math.round((deadline - now) / 1000));
 }
 
 /** The move in GTP, or a note that its coordinates are unknown (an old event without `size`). */

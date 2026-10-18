@@ -483,6 +483,12 @@ export interface SavedGame {
   takenBack?: TakenBackMove[];
   /** Help the learner had so far. */
   assistance?: AssistCounts;
+  /** Help the learner has for the move they play next, at move count `at`, so a restart still counts that move as assisted. */
+  help?: { at: number; kinds: AssistKind[] };
+  /** A hint request the attached tutor hasn't answered yet: the move count it was asked at. */
+  hintAskedAt?: number;
+  /** The learner's latest question or hint request reached the tutor and has no answer yet (on Silent, the tutor may answer it with one say). */
+  questionOpen?: true;
   /** The reference rank for "at_level" judging, fixed when the game started (absent before judge modes existed). */
   atLevelRank?: string;
 }

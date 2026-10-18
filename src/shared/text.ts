@@ -19,6 +19,11 @@ export function round1(n: number): number {
   return Math.round(n * 10) / 10;
 }
 
+/** Whole seconds from `now` until `deadline` (ms epoch), rounded up so a wait still running never reads 0; never negative. */
+export function secondsUntil(deadline: number, now: number): number {
+  return Math.max(0, Math.ceil((deadline - now) / 1000));
+}
+
 /** "Black (you) wins by 4.5 points", "White wins by resignation", "a draw", "game abandoned". */
 export function formatScore(result: GameResult, humanColor?: Color): string {
   const who = (c: Color) => colorName(c) + (humanColor ? (c === humanColor ? " (you)" : " (bot)") : "");
