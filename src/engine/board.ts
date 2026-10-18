@@ -1,4 +1,4 @@
-import type { Board, Cell, Color, Point } from "../shared/types.ts";
+import { isBoardSize, type Board, type Cell, type Color, type Point } from "../shared/types.ts";
 import { pointKey } from "../shared/coords.ts";
 
 export function opponent(color: Color): Color {
@@ -96,7 +96,7 @@ function edgeOffset(size: number): number {
 
 /** Star points (hoshi) for 9×9, 13×13 and 19×19; none for other sizes. */
 export function starPoints(size: number): Point[] {
-  if (size !== 9 && size !== 13 && size !== 19) return [];
+  if (!isBoardSize(size)) return [];
   const lo = edgeOffset(size);
   const hi = size - 1 - lo;
   const mid = (size - 1) / 2;
@@ -141,4 +141,9 @@ export function handicapPoints(size: number, stones: number): Point[] {
     9: [...corners, leftSide, rightSide, bottomSide, topSide, center],
   };
   return layouts[stones]!.map(([x, y]) => ({ x, y }));
+}
+
+/** The handicap stones themselves (Black's) for `stones` on a `size` board, as placed stones. */
+export function handicapStones(size: number, stones: number): { color: Color; point: Point }[] {
+  return handicapPoints(size, stones).map((point) => ({ color: "B" as const, point }));
 }

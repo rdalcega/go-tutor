@@ -8,14 +8,15 @@
 
 import { randomBytes } from "node:crypto";
 import { GoGame, deadStonesFromOwnership, emptyBoard, gameFromLine, opponent, scoreArea, toAscii, writeSgf } from "../engine/index.ts";
-import { allowedActions, retryBlocked, takeBackBlocked, type ActionState } from "../shared/allowed.ts";
-import { gtpMove, moveGtp, movePoint, samePoint, toGtp, tryFromGtp } from "../shared/coords.ts";
+import { allowedActions, hintBlocked, retryBlocked, takeBackBlocked, type ActionState } from "../shared/allowed.ts";
+import { gtpMove, moveGtp, movePoint, samePoint, tryFromGtp } from "../shared/coords.ts";
 import { atLevelOf, judgedLoss } from "../shared/judge.ts";
-import { atLevelRankFor, normalizeBotRank, toHumanSLProfile } from "../shared/rank.ts";
-import { colorName, formatScore, judgeModeChangedText, round1, takenBackTryText, tutorLevelChangedText } from "../shared/text.ts";
+import { atLevelRankFor, normalizeBotRank } from "../shared/rank.ts";
+import { colorName, formatScore, judgeModeChangedText, plural, round1, takenBackTryText, tutorLevelChangedText } from "../shared/text.ts";
 import { playedThreshold, thresholdFor } from "../shared/threshold.ts";
 import {
   ASSIST_KINDS,
+  isBoardSize,
   type AssistCounts,
   type AssistKind,
   type ChatMessage,
@@ -51,14 +52,14 @@ import {
   alternatingStones,
   lineStones,
   markPoints,
-  plural,
+  nextNumber,
   systemClock,
   type Clock,
   type TutorEventInput,
 } from "./common.ts";
-import { estimateRank, rankSamples } from "./estimate.ts";
+import { estimateRank, positionFor, rankSamples } from "./estimate.ts";
 import { ProblemGenerator } from "./generate.ts";
-import { atLevelEvalFrom, moveEvalFrom, needsReferenceAnalysis, topHumanMove, type Analysis, type Engine, type Position } from "./katago.ts";
+import { atLevelEvalFrom, humanPolicyOptions, moveEvalFrom, needsReferenceAnalysis, topHumanMove, type Analysis, type Engine, type Position } from "./katago.ts";
 import { migrateRatingModel } from "./migrate.ts";
 import { PracticeSession, type PracticeDeps } from "./practice.ts";
 import { gameSource, generateProblems, pickNextProblem, promptFor, resultOf, schedule, type StoredProblem } from "./problems.ts";
@@ -99,8 +100,6 @@ export interface ControllerOptions {
   log?: (msg: string) => void;
   /** Receives problem generation's per-candidate lines (generate.ts), for tuning its filters. */
   debug?: (msg: string) => void;
-  /** RNG for problem generation's self-play moves. Default Math.random. */
-  random?: () => number;
 }
 
 /**
@@ -120,6 +119,15 @@ const HANDICAP_KOMI = 0.5;
 const ANALYSIS_CACHE_SIZE = 16;
 /** The at-level reference move's query (one network evaluation): ahead of the live game's searches, behind the bot. */
 const REFERENCE_PRIORITY = 5;
+
+const NO_GAME_TEXT = "No game in progress. Start a new game first.";
+
+/** Help the learner has for the move they play next, at move count `at`; `hintAsked`: the attached tutor owes them a hint there. */
+interface PendingHelp {
+  at: number;
+  kinds: Set<AssistKind>;
+  hintAsked?: boolean;
+}
 
 /** Rating-migration attempts per server run that KataGo may fail before it waits for a restart. */
 export const MAX_MIGRATION_ATTEMPTS = 4;
@@ -199,10 +207,8 @@ export class GameController {
   private takenBack: TakenBackMove[] = [];
   /** Help the learner had in this game. */
   private assistance: AssistCounts = noAssistance();
-  /** Help for the learner's next move: what they had at move count `at` (cleared by a move or take-back). */
-  private help: { at: number; kinds: Set<AssistKind> } | null = null;
-  /** A hint request the attached tutor hasn't answered yet: the move count it was asked at. */
-  private hintAskedAt: number | null = null;
+  /** Help for the learner's next move (cleared by a move or take-back). */
+  private help: PendingHelp | null = null;
   /** Rank estimates and the rating-model migration, one at a time. */
   private ratingWork: Promise<void> = Promise.resolve();
   /** A run of the pending rank estimates is queued and hasn't started yet. */
@@ -275,7 +281,6 @@ export class GameController {
       clock: this.clock,
       log: this.log,
       ...(opts.debug && { debug: opts.debug }),
-      ...(opts.random && { random: opts.random }),
       rating: () => this.profile.rating,
       mayRun: () => this.engineFreeForGeneration(),
       updateProblems: (change) => this.updateProblems(change),
@@ -362,7 +367,7 @@ export class GameController {
       moves: game ? game.moves : [],
       captures: game ? game.captures : { B: 0, W: 0 },
       result: this.result,
-      moment: this.moment ? { ...this.moment } : null,
+      moment: this.gameMoment(),
       overlay: this.overlay,
       ...common,
       ...(this.atLevelRank && { atLevelRank: this.atLevelRank }),
@@ -389,12 +394,12 @@ export class GameController {
 
   /** How much the tutor steps in during games (the profile's setting). */
   private get level(): TutorLevel {
-    return this.profile.tutorLevel ?? "coach";
+    return this.profile.tutorLevel;
   }
 
   /** How the learner's moves are judged (the profile's setting). */
   private get judgeMode(): JudgeMode {
-    return this.profile.judgeMode ?? "optimal";
+    return this.profile.judgeMode;
   }
 
   /** The browser actions handleAction accepts right now: the same checks it makes (src/shared/allowed.ts). */
@@ -490,15 +495,10 @@ export class GameController {
       this.log(`could not restore game ${saved.id}: ${(err as Error).message}`);
       return false;
     }
+    // The saved records' eval, level, judge mode and help; the moves themselves were just replayed.
     game.moves.forEach((record, i) => {
-      const evaluation = saved.moves[i]?.eval;
-      if (evaluation) record.eval = evaluation;
-      const level = saved.moves[i]?.tutorLevel;
-      if (level) record.tutorLevel = level;
-      const judge = saved.moves[i]?.judge;
-      if (judge) record.judge = judge;
-      const assist = saved.moves[i]?.assist;
-      if (assist?.length) record.assist = assist;
+      const { move: _move, number: _number, captures: _captures, ...kept } = saved.moves[i]!;
+      Object.assign(record, kept);
     });
     this.resetGameState();
     this.game = game;
@@ -511,12 +511,10 @@ export class GameController {
     this.takenBack = saved.takenBack ?? [];
     this.assistance = { ...noAssistance(), ...saved.assistance };
     // Help for the move the learner hadn't played yet (a hint, a drawing, a take-back) still counts for it.
-    if (saved.help) this.help = { at: saved.help.at, kinds: new Set(saved.help.kinds) };
-    this.hintAskedAt = saved.hintAskedAt ?? null;
+    if (saved.help) this.help = { at: saved.help.at, kinds: new Set(saved.help.kinds), ...(saved.help.hintAsked && { hintAsked: true }) };
     this.questionOpen = saved.questionOpen === true;
     this.chat = saved.chat ?? [];
-    const maxChatId = Math.max(0, ...this.chat.map((m) => Number(/^c(\d+)$/.exec(m.id)?.[1] ?? 0)));
-    this.nextChatId = Math.max(this.nextChatId, maxChatId + 1);
+    this.nextChatId = Math.max(this.nextChatId, nextNumber(this.chat.map((m) => m.id), "c"));
     this.system(`Picked up where you left off: game ${saved.id}, move ${game.moves.length}.`);
     // A mistake the learner dismissed stays dismissed; an open moment comes back as it was; one
     // whose eval arrived but never opened opens now (unless it was played on Silent: resumeTurn
@@ -534,16 +532,10 @@ export class GameController {
   // --- browser actions -------------------------------------------------------
 
   async handleAction(action: ClientAction): Promise<void> {
-    this.noteActivity();
+    // Actions that never need KataGo don't hold problem generation off (as handleTutor's don't).
     switch (action.type) {
-      case "new_game":
-        return this.newGame(action.settings);
       case "chat":
         return this.userChat(action.text);
-      case "next_problem":
-        return this.startProblem();
-      case "leave_problem":
-        return this.leaveProblem();
       case "set_tutor_level":
         return this.setTutorLevel(action.level);
       case "set_judge_mode":
@@ -552,6 +544,15 @@ export class GameController {
         // The learner hides the drawing (the game's, or the problem's). A pause stays: Continue ends it.
         this.activeOverlay = null;
         return this.changed();
+    }
+    this.noteActivity();
+    switch (action.type) {
+      case "new_game":
+        return this.newGame(action.settings);
+      case "next_problem":
+        return this.startProblem();
+      case "leave_problem":
+        return this.leaveProblem();
     }
     // In problem mode the game waits underneath: the problem answers the game's actions.
     if (this.practice) return this.practice.handleAction(action);
@@ -567,7 +568,8 @@ export class GameController {
       case "retry":
         return this.retry(null);
       case "take_back":
-        return this.takeBack();
+        // The learner's Take back: Try again at any time on their turn or in a pause.
+        return this.retry(null, undefined, true);
       case "ask_tutor":
         return this.hint(action.text);
     }
@@ -594,8 +596,8 @@ export class GameController {
   private noteTutorHelp(type: "say" | "show" | "mark"): void {
     const { game, settings } = this;
     if (this.practice || !game || !settings || this.result || game.toPlay !== settings.humanColor) return;
-    if (this.hintAskedAt === game.moves.length) {
-      this.hintAskedAt = null;
+    if (this.help?.at === game.moves.length && this.help.hintAsked) {
+      this.help.hintAsked = false;
       this.noteHelp("hint");
     }
     if (type !== "say") this.noteHelp("shown");
@@ -603,10 +605,15 @@ export class GameController {
 
   /** The learner gets `kind` of help for the move they play next in this position (saved with the game, so a restart keeps it). */
   private noteHelp(kind: AssistKind): void {
+    this.pendingHelp().kinds.add(kind);
+    this.save();
+  }
+
+  /** The help record for the learner's next move (the current move count), started afresh when it is for an older position. */
+  private pendingHelp(): PendingHelp {
     const at = this.game?.moves.length ?? 0;
     if (this.help?.at !== at) this.help = { at, kinds: new Set() };
-    this.help.kinds.add(kind);
-    this.save();
+    return this.help;
   }
 
   private async tutorCommand(cmd: TutorCommand): Promise<void> {
@@ -762,7 +769,6 @@ export class GameController {
     this.takenBack = [];
     this.assistance = noAssistance();
     this.help = null;
-    this.hintAskedAt = null;
     this.status = "playing";
     this.botFailures = 0;
     this.questionOpen = false;
@@ -778,7 +784,7 @@ export class GameController {
   /** A new game's settings, and whether its handicap came from the profile (the learner is below the weakest bot). */
   private validateSettings(partial: Partial<GameSettings>): { settings: GameSettings; fromProfile: boolean } {
     const size = partial.size ?? DEFAULT_SETTINGS.size;
-    if (size !== 9 && size !== 13 && size !== 19) throw new UserError(`Board size must be 9, 13 or 19 (got ${String(size)}).`);
+    if (!isBoardSize(size)) throw new UserError(`Board size must be 9, 13 or 19 (got ${String(size)}).`);
     const komi = partial.komi ?? DEFAULT_SETTINGS.komi;
     if (typeof komi !== "number" || !Number.isInteger(komi * 2) || Math.abs(komi) > 150) {
       throw new UserError("Komi must be a whole or half number, e.g. 7 or 6.5.");
@@ -787,7 +793,7 @@ export class GameController {
     if (humanColor !== "B" && humanColor !== "W") throw new UserError('Color must be "B" or "W".');
     // Below the weakest bot the profile gives the learner (Black, 9×9) handicap stones, unless the
     // game asks for its own bot rank or handicap.
-    const profileHandicap = this.profile.handicap ?? 0;
+    const profileHandicap = this.profile.handicap;
     const fromProfile =
       profileHandicap >= 2 && partial.handicap === undefined && partial.botRank === undefined && size === 9 && humanColor === "B";
     const handicap = partial.handicap ?? (fromProfile ? profileHandicap : DEFAULT_SETTINGS.handicap);
@@ -835,7 +841,6 @@ export class GameController {
     const help = this.help?.at === at ? this.help.kinds : null;
     if (help?.size) record.assist = ASSIST_KINDS.filter((k) => help.has(k));
     this.help = null;
-    this.hintAskedAt = null;
 
     // Playing again after a rethink ends that moment; any leftover overlay is about the old position.
     if (this.moment) this.setMomentState("resolved");
@@ -920,16 +925,14 @@ export class GameController {
 
   private startMoment(record: MoveRecord): void {
     if (this.result) return;
-    this.momentShown.add(record);
-    this.moment = {
+    this.openMoment(record, {
       id: `${record.number}-${randomBytes(2).toString("hex")}`,
       moveNumber: record.number,
       pointLoss: round1(judgedLoss(record)!),
       state: "waiting",
       ...(this.tutorAttached && { deadline: this.clock.now() + this.tutorTimeoutMs }),
       level: record.tutorLevel ?? "coach",
-    };
-    this.status = "paused";
+    });
     this.emitMoment(record);
     this.save();
     this.settleWaitingMoment();
@@ -944,19 +947,23 @@ export class GameController {
    * `watch` finds it.
    */
   private restoreMoment(record: MoveRecord, saved: TeachingMoment): void {
-    this.momentShown.add(record);
-    this.status = "paused";
     const { deadline: _deadline, awaitingLearner: _awaiting, ...rest } = saved;
-    if (saved.state === "fallback") {
-      this.moment = rest;
+    const fallback = saved.state === "fallback";
+    this.openMoment(record, fallback ? rest : { ...rest, state: "waiting" });
+    if (fallback) {
       if (record.eval) this.overlay = this.fallbackFor(this.game!, record, record.eval).overlay;
-      this.emitMoment(record);
-      this.emit({ type: "fallback", momentId: rest.id });
-      return;
+    } else if (saved.state === "tutor" || saved.deadline !== undefined) {
+      this.waitForTutor();
     }
-    this.moment = { ...rest, state: "waiting" };
-    if (saved.state === "tutor" || saved.deadline !== undefined) this.waitForTutor();
     this.emitMoment(record);
+    if (fallback) this.emit({ type: "fallback", momentId: rest.id });
+  }
+
+  /** The game pauses on `moment`, about `record` (the last move): it won't open again for that move. */
+  private openMoment(record: MoveRecord, moment: TeachingMoment): void {
+    this.momentShown.add(record);
+    this.moment = moment;
+    this.status = "paused";
   }
 
   /** The `teaching_moment` event for the current moment, with the boards before and after its move (the last one). */
@@ -1144,7 +1151,7 @@ export class GameController {
     const state = this.actionState();
     switch (takeBack ? takeBackBlocked(state) : retryBlocked(state)) {
       case "no_game":
-        return "No game in progress. Start a new game first.";
+        return NO_GAME_TEXT;
       case "finished":
         return ILLEGAL_TEXT.game_over;
       case "taken_back":
@@ -1158,11 +1165,6 @@ export class GameController {
     let lastHuman = moves.length - 1;
     while (moves[lastHuman]!.move.color !== settings!.humanColor) lastHuman--;
     return moves.length - lastHuman;
-  }
-
-  /** The learner's Take back: Try again at any time on their turn or in a pause. */
-  private takeBack(): void {
-    this.retry(null, undefined, true);
   }
 
   /**
@@ -1184,11 +1186,10 @@ export class GameController {
     if (by === "human") this.assistance.takeBacks++;
     else this.assistance.rethinks++;
     // The move that replaces it is the learner's second try.
-    this.help = { at: game.moves.length, kinds: new Set([by === "human" ? "retry" : "rethink"]) };
-    this.hintAskedAt = null;
+    this.noteHelp(by === "human" ? "retry" : "rethink");
     this.status = "playing";
     this.overlay = null;
-    if (this.moment) this.setMomentState(text === null ? "resolved" : "tutor");
+    if (this.moment) this.setMomentState(by === "human" ? "resolved" : "tutor");
     this.emit({ type: "undo", gameId: this.gameId!, moves: game.moves.length, toPlay: game.toPlay, by });
     if (text !== null) this.addChat("tutor", text, momentId);
     this.save();
@@ -1287,15 +1288,11 @@ export class GameController {
   // --- hints and chat --------------------------------------------------------------
 
   private async hint(text?: string): Promise<void> {
+    const blocked = this.hintBlockedText();
+    if (blocked) throw new UserError(blocked);
     const { game, settings } = this.requireGame();
-    if (this.result) throw new UserError(ILLEGAL_TEXT.game_over);
-    // A hint is for the human's move; during a pause or the bot's turn the side to move is the bot.
-    if (game.toPlay !== settings.humanColor) {
-      throw new UserError(this.status === "paused" ? "Press Continue or Try again first, then ask for a hint." : "Wait for the bot to move, then ask for a hint.");
-    }
-    // Without a tutor KataGo answers, so it must be ready before the hint counts as help.
-    if (!this.tutorAttached && this.engineState !== "ready") throw new UserError(this.engineNotReadyText());
-    if (text?.trim()) this.addChat("user", text.trim(), this.activeMoment()?.id);
+    const question = text?.trim();
+    if (question) this.addChat("user", question, this.activeMoment()?.id);
     this.assistance.hints++;
     this.save();
     this.emit({
@@ -1304,11 +1301,11 @@ export class GameController {
       size: game.size,
       board: toAscii(game.board, this.lastPoint()),
       toPlay: game.toPlay,
-      ...(text?.trim() && { text: text.trim() }),
+      ...(question && { text: question }),
     });
     if (this.tutorAttached) {
       this.questionOpen = true; // the tutor got it: on Silent it may answer with one say
-      this.hintAskedAt = game.moves.length; // the tutor's answer makes the next move hinted
+      this.pendingHelp().hintAsked = true; // the tutor's answer makes the next move hinted
       this.system("Asked your tutor for a hint.");
       this.changed();
       return;
@@ -1330,6 +1327,25 @@ export class GameController {
       }
     } catch (err) {
       if (this.isCurrent(gen)) this.system(`KataGo couldn't give a hint (${(err as Error).message}).`);
+    }
+  }
+
+  /** Why a hint can't be asked for now (the rule the UI's buttons follow, src/shared/allowed.ts), as a message; null when it can. */
+  private hintBlockedText(): string | null {
+    switch (hintBlocked(this.actionState())) {
+      case "no_game":
+        return NO_GAME_TEXT;
+      case "finished":
+        return ILLEGAL_TEXT.game_over;
+      case "paused":
+        return "Press Continue or Try again first, then ask for a hint.";
+      case "bot_turn":
+        return "Wait for the bot to move, then ask for a hint.";
+      case "nobody":
+        // Without a tutor KataGo answers, so it must be ready before the hint counts as help.
+        return this.engineNotReadyText();
+      case null:
+        return null;
     }
   }
 
@@ -1500,7 +1516,7 @@ export class GameController {
     if (!saved?.summary) return;
     saved.summary.rating = change;
     try {
-      this.store.saveGame({ ...saved, updatedAt: this.clock.now() }, this.sgfFor(saved.settings, saved.moves, saved.result, saved.tags ?? {}));
+      this.saveStored(saved);
     } catch (err) {
       this.log(`saving the rating of game ${gameId} failed: ${(err as Error).message}`);
     }
@@ -1689,11 +1705,8 @@ export class GameController {
       entry.categorySource = "tutor";
     }
     this.retagProblem(gameId, moveNumber, category, index);
-    if (saved) {
-      this.store.saveGame({ ...saved, updatedAt: this.clock.now() }, this.sgfFor(saved.settings, saved.moves, saved.result, tags));
-    } else {
-      this.save();
-    }
+    if (saved) this.saveStored(saved);
+    else this.save();
     this.changed();
   }
 
@@ -1860,8 +1873,7 @@ export class GameController {
       moment: this.moment,
       takenBack: this.takenBack,
       assistance: this.assistance,
-      ...(this.help && { help: { at: this.help.at, kinds: [...this.help.kinds] } }),
-      ...(this.hintAskedAt !== null && { hintAskedAt: this.hintAskedAt }),
+      ...(this.help && { help: { at: this.help.at, kinds: [...this.help.kinds], ...(this.help.hintAsked && { hintAsked: true as const }) } }),
       ...(this.questionOpen && { questionOpen: true as const }),
       ...(this.atLevelRank && { atLevelRank: this.atLevelRank }),
     };
@@ -1870,6 +1882,11 @@ export class GameController {
     } catch (err) {
       this.log(`saving game ${this.gameId} failed: ${(err as Error).message}`);
     }
+  }
+
+  /** Writes a saved game (not the current one) back, with a fresh `updatedAt` and its SGF. */
+  private saveStored(saved: SavedGame): void {
+    this.store.saveGame({ ...saved, updatedAt: this.clock.now() }, this.sgfFor(saved.settings, saved.moves, saved.result, saved.tags ?? {}));
   }
 
   private sgfFor(settings: GameSettings, moves: MoveRecord[], result: GameResult | null, tags: SavedGame["tags"]): string {
@@ -1887,16 +1904,9 @@ export class GameController {
 
   // --- engine helpers ------------------------------------------------------------------
 
-  private position(moves: Move[]): Position {
-    const game = this.game!;
-    return {
-      size: game.size,
-      komi: game.komi,
-      rules: "chinese",
-      moves: moves.map((m) => [m.color, moveGtp(m, game.size)]),
-      initialStones: game.initialStones.map((s) => [s.color, toGtp(s.point, game.size)]),
-      initialPlayer: game.initialPlayer,
-    };
+  /** The current game's position after `moves`, for KataGo (handicap stones included). */
+  private position(moves: readonly Move[]): Position {
+    return positionFor(this.settings!, moves);
   }
 
   /**
@@ -1932,12 +1942,7 @@ export class GameController {
   private async referenceFor(moves: Move[], before: Promise<Analysis>, played: Gtp, color: Color, rank: string): Promise<{ move: Gtp; after?: Analysis } | Error> {
     try {
       const size = this.game!.size;
-      const policy = await this.engine.analyze(this.position(moves), {
-        maxVisits: 1,
-        includePolicy: true,
-        overrideSettings: { humanSLProfile: toHumanSLProfile(rank) },
-        priority: REFERENCE_PRIORITY,
-      });
+      const policy = await this.engine.analyze(this.position(moves), humanPolicyOptions(rank, { priority: REFERENCE_PRIORITY }));
       const move = topHumanMove(policy, size);
       if (!needsReferenceAnalysis(await before, played, move)) return { move };
       // Not cached: nobody plays the reference move, and the cache is for the game's real positions.
@@ -1985,7 +1990,7 @@ export class GameController {
   // --- small helpers ------------------------------------------------------------------
 
   private requireGame(): { game: GoGame; settings: GameSettings } {
-    if (!this.game || !this.settings) throw new UserError("No game in progress. Start a new game first.");
+    if (!this.game || !this.settings) throw new UserError(NO_GAME_TEXT);
     return { game: this.game, settings: this.settings };
   }
 

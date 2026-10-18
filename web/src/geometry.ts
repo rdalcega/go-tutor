@@ -4,7 +4,7 @@
 import { gameBefore } from "../../src/engine/game.ts";
 import { GTP_COLUMNS, movePoint } from "../../src/shared/coords.ts";
 import { ratingToRank } from "../../src/shared/rank.ts";
-import { categoryLabel, comeBackText, estimateRankText, rankEstimateText } from "../../src/shared/text.ts";
+import { categoryLabel, comeBackText, estimateRankText, plural, rankEstimateText } from "../../src/shared/text.ts";
 import { sizeText, thresholdMultiplier, thresholdNum, thresholdText } from "../../src/shared/threshold.ts";
 import type {
   Board,
@@ -230,7 +230,7 @@ export function generationFact(g: GenerationStatus | undefined): { short: string
 export function attemptsLeftText(p: ProblemView): string {
   if (p.revealed) return "";
   const left = Math.max(0, p.maxAttempts - p.attempts);
-  return `${left} attempt${left === 1 ? "" : "s"} left`;
+  return `${plural(left, "attempt")} left`;
 }
 
 /**

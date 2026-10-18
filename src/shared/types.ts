@@ -127,8 +127,16 @@ export interface AtLevelEval {
 
 export type GameStatus = "playing" | "paused" | "finished";
 
+/** The board sizes the app plays on, smallest first. */
+export const BOARD_SIZES = [9, 13, 19] as const;
+export type BoardSize = (typeof BOARD_SIZES)[number];
+
+export function isBoardSize(n: number): n is BoardSize {
+  return (BOARD_SIZES as readonly number[]).includes(n);
+}
+
 export interface GameSettings {
-  size: 9 | 13 | 19;
+  size: BoardSize;
   komi: number;
   /** Which color the human plays. */
   humanColor: Color;
@@ -483,10 +491,12 @@ export interface SavedGame {
   takenBack?: TakenBackMove[];
   /** Help the learner had so far. */
   assistance?: AssistCounts;
-  /** Help the learner has for the move they play next, at move count `at`, so a restart still counts that move as assisted. */
-  help?: { at: number; kinds: AssistKind[] };
-  /** A hint request the attached tutor hasn't answered yet: the move count it was asked at. */
-  hintAskedAt?: number;
+  /**
+   * Help the learner has for the move they play next, at move count `at`, so a restart still counts
+   * that move as assisted; `hintAsked`: they asked the attached tutor for a hint there and have no
+   * answer yet (the answer adds "hint").
+   */
+  help?: { at: number; kinds: AssistKind[]; hintAsked?: true };
   /** The learner's latest question or hint request reached the tutor and has no answer yet (on Silent, the tutor may answer it with one say). */
   questionOpen?: true;
   /** The reference rank for "at_level" judging, fixed when the game started (absent before judge modes existed). */
@@ -632,7 +642,7 @@ export interface GeneratedProblemInfo {
 
 /** One board size's share of a batch of generated problems. */
 export interface GenerationSizeStatus {
-  size: 9 | 13 | 19;
+  size: BoardSize;
   found: number;
   target: number;
   /** Self-play games finished on this size so far, and KataGo time spent on this size, in minutes. */
@@ -673,8 +683,5 @@ export interface GenerationStatus {
   batches: number;
 }
 
-/**
- * Rank scale used for `Profile.rating`: 30k = 0, 1k = 29, 1d = 30, 9d = 38.
- * Convert with rankToRating / ratingToRank in src/shared/rank.ts.
- */
-export const RANK_SCALE_NOTE = "30k=0 … 1k=29, 1d=30 … 9d=38";
+// Rank scale used for `Profile.rating`: 30k = 0 … 1k = 29, 1d = 30 … 9d = 38. Convert with
+// rankToRating / ratingToRank in src/shared/rank.ts.

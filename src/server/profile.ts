@@ -5,7 +5,7 @@
 import { GoGame, getCell, groupAt, neighbors, opponent } from "../engine/index.ts";
 import { moveGtp, movePoint, pointKey, tryFromGtp } from "../shared/coords.ts";
 import { clampRating, rankToRating, ratingToRank } from "../shared/rank.ts";
-import { categoryLabel, round1 } from "../shared/text.ts";
+import { categoryLabel, plural, round1, round2 } from "../shared/text.ts";
 import { sizeText, thresholdMultiplier } from "../shared/threshold.ts";
 import type {
   AssistCounts,
@@ -143,8 +143,6 @@ export interface GameUpdate {
   threshold?: { from: number; to: number; reason: string };
 }
 
-const round2 = (n: number) => Math.round(n * 100) / 100;
-
 /** Whether `gameId` was already applied to the profile (it is in the rating history, the recent games or waiting for its estimate). */
 export function gameApplied(profile: Profile, gameId: string): boolean {
   return profile.ratingHistory.some((e) => e.gameId === gameId) || profile.recentGames.some((g) => g.gameId === gameId) || isEstimating(profile, gameId);
@@ -176,7 +174,7 @@ function recordedChange(profile: Profile, gameId: string): RatingChange | null {
     after: entry.rating,
     rated: true,
     nextBotRank: profile.botRank,
-    nextHandicap: profile.handicap ?? 0,
+    nextHandicap: profile.handicap,
     ...(entry.estimate && { estimate: entry.estimate }),
   };
 }
@@ -230,10 +228,21 @@ export function worstFirst(mistakes: SummaryMistake[]): SummaryMistake[] {
   return mistakes.sort((a, b) => b.pointLoss - a.pointLoss);
 }
 
+/** Every human move of a game: the moves on the board and the taken-back first attempts. */
+function humanRecords(moves: readonly MoveRecord[], humanColor: Color, takenBack: readonly TakenBackMove[]): MoveRecord[] {
+  return [...moves.filter((r) => r.move.color === humanColor), ...takenBack.map((t) => t.record)];
+}
+
 /** A game's total point loss: every human move on the board plus every taken-back first attempt. */
 export function totalPointLoss(moves: readonly MoveRecord[], humanColor: Color, takenBack: readonly TakenBackMove[]): number {
-  const records = [...moves.filter((r) => r.move.color === humanColor), ...takenBack.map((t) => t.record)];
-  return round1(records.reduce((sum, r) => sum + (r.eval?.pointLoss ?? 0), 0));
+  return round1(humanRecords(moves, humanColor, takenBack).reduce((sum, r) => sum + (r.eval?.pointLoss ?? 0), 0));
+}
+
+/** The evaluated human moves of a game (first attempts included) and their average loss, as `recentGames` records them; null when none was evaluated. */
+export function lossStats(moves: readonly MoveRecord[], humanColor: Color, takenBack: readonly TakenBackMove[]): { humanMoves: number; avgPointLoss: number } | null {
+  const evaluated = humanRecords(moves, humanColor, takenBack).filter((r) => r.eval);
+  if (evaluated.length === 0) return null;
+  return { humanMoves: evaluated.length, avgPointLoss: round2(evaluated.reduce((sum, r) => sum + r.eval!.pointLoss, 0) / evaluated.length) };
 }
 
 /**
@@ -252,14 +261,13 @@ export function applyGame(profile: Profile, game: FinishedGame): GameUpdate {
     rated,
     ...(pending && { pending }),
     nextBotRank: profile.botRank,
-    nextHandicap: profile.handicap ?? 0,
+    nextHandicap: profile.handicap,
   });
   if (gameApplied(profile, game.gameId)) {
     // Its estimate may still be waiting (only a rated game gets one).
     const pending = isEstimating(profile, game.gameId);
     return { rating: recordedChange(profile, game.gameId) ?? unchanged(pending, pending) };
   }
-  const human = game.moves.filter((r) => r.move.color === settings.humanColor);
   profile.gamesPlayed++;
   const rated = isRated(game);
   if (rated) markEstimating(profile, game.gameId);
@@ -284,18 +292,9 @@ export function applyGame(profile: Profile, game: FinishedGame): GameUpdate {
   );
 
   // Game stats and the threshold, first attempts included.
-  const evaluated = [...human, ...(game.takenBack ?? []).map((t) => t.record)].filter((r) => r.eval);
-  if (evaluated.length > 0) {
-    const loss = evaluated.reduce((sum, r) => sum + r.eval!.pointLoss, 0);
-    profile.recentGames.push({
-      ts: game.ts,
-      gameId: game.gameId,
-      size: settings.size,
-      humanMoves: evaluated.length,
-      avgPointLoss: round2(loss / evaluated.length),
-      mistakes: summary.mistakes.length,
-      threshold: game.threshold,
-    });
+  const stats = lossStats(game.moves, settings.humanColor, game.takenBack ?? []);
+  if (stats) {
+    profile.recentGames.push({ ts: game.ts, gameId: game.gameId, size: settings.size, ...stats, mistakes: summary.mistakes.length, threshold: game.threshold });
     profile.recentGames = profile.recentGames.slice(-RECENT_GAMES_CAP);
   }
   const threshold = adaptThreshold(profile, game);
@@ -437,7 +436,7 @@ export function applyTag(
 
 /** A practice problem ended (solved, or the answer was shown): count the solve and mark the category as worked on. Mutates the profile. */
 export function applyProblemResult(profile: Profile, category: MistakeCategory, solved: boolean): void {
-  if (solved) profile.problemsSolved = (profile.problemsSolved ?? 0) + 1;
+  if (solved) profile.problemsSolved++;
   profile.practiced = { ...profile.practiced, [category]: profile.gamesPlayed };
 }
 
@@ -483,7 +482,7 @@ export function ownershipFlipped(before: number, after: number): boolean {
   return Math.sign(after) !== Math.sign(before) && Math.abs(after) >= STATUS_MIN && Math.abs(before) >= STATUS_MIN && Math.abs(after - before) >= STATUS_SWING;
 }
 
-interface Chain {
+export interface Chain {
   color: Color;
   stones: Point[];
   liberties: Set<string>;
@@ -510,17 +509,28 @@ function touches(chain: Chain, other: Chain, size: number): boolean {
 }
 
 /** Average ownership of a chain's points from the chain owner's view (+1 = alive and owned). */
-function chainOwnership(chain: Chain, ownership: number[], size: number): number {
+function chainOwnership(chain: Chain, ownership: readonly number[], size: number): number {
   const sign = chain.color === "B" ? 1 : -1;
   const sum = chain.stones.reduce((s, p) => s + (ownership[p.y * size + p.x] ?? 0), 0);
   return (sign * sum) / chain.stones.length;
 }
 
+/**
+ * The chains on `board` whose average ownership (KataGo's, Black's view, row-major) flipped between
+ * `before` and `after` (`ownershipFlipped`): groups that died or came to life. None when the
+ * ownership arrays don't fit the board.
+ */
+export function flippedChains(board: Board, before: readonly number[], after: readonly number[]): Chain[] {
+  const size = board.length;
+  if (before.length !== size * size || after.length !== size * size) return [];
+  return chains(board).filter((chain) => ownershipFlipped(chainOwnership(chain, before, size), chainOwnership(chain, after, size)));
+}
+
 /** Some group of 2+ stones went from alive to dead (or dead to alive) because of the move. */
 function lifeStatusChanged(ctx: MistakeContext): boolean {
-  const { ownershipBefore: before, ownershipAfter: after, size } = ctx;
-  if (!before || !after || before.length !== size * size || after.length !== size * size) return false;
-  return chains(ctx.boardBefore).some((chain) => chain.stones.length >= 2 && ownershipFlipped(chainOwnership(chain, before, size), chainOwnership(chain, after, size)));
+  const { ownershipBefore, ownershipAfter } = ctx;
+  if (!ownershipBefore || !ownershipAfter) return false;
+  return flippedChains(ctx.boardBefore, ownershipBefore, ownershipAfter).some((chain) => chain.stones.length >= 2);
 }
 
 /** Adjacent opposing groups both short of liberties (≤ 3), with the played or best move on one of their liberties. */
@@ -672,7 +682,7 @@ export function recommendFocus(profile: Profile): FocusRecommendation {
     if (age < 3) lastThree.set(m.category, (lastThree.get(m.category) ?? 0) + 1);
   }
   const boost = (c: MistakeCategory) => {
-    const at = profile.practiced?.[c];
+    const at = profile.practiced[c];
     const since = at === undefined ? Infinity : profile.gamesPlayed - at;
     return Math.min(MAX_BOOST, BOOST_PER_GAME * since);
   };
@@ -702,15 +712,15 @@ export function recommendFocus(profile: Profile): FocusRecommendation {
     // "Keeps costing" only when it still does: older mistakes alone get their own wording.
     const reason =
       recent > 0
-        ? `${label} keeps costing points: ${recent} mistake${recent === 1 ? "" : "s"} in the last 3 games, ${total} of the last ${profile.recentMistakes.length} recorded.`
+        ? `${label} keeps costing points: ${plural(recent, "mistake")} in the last 3 games, ${total} of the last ${profile.recentMistakes.length} recorded.`
         : `${label} cost the most points in earlier games (${total} of the last ${profile.recentMistakes.length} recorded mistakes), with none in the last 3 games.`;
     return { category: best, reason, suggestion };
   }
-  const since = profile.practiced?.[best];
+  const since = profile.practiced[best];
   const when = since === undefined ? "hasn't been worked on yet" : `hasn't been worked on for ${profile.gamesPlayed - since} games`;
   return {
     category: best,
-    reason: `No category stands out (${total} recent ${label} mistake${total === 1 ? "" : "s"}); ${label} ${when}, so it keeps practice balanced.`,
+    reason: `No category stands out (${plural(total, `recent ${label} mistake`)}); ${label} ${when}, so it keeps practice balanced.`,
     suggestion,
   };
 }

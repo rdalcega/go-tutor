@@ -81,10 +81,6 @@ export class TutorBridge {
     controller.onChange(() => this.queueView());
   }
 
-  get lastSeq(): number {
-    return this.seq;
-  }
-
   /** Stamp, log and fan out one event. */
   publish(input: TutorEventInput): TutorEvent {
     const event = { ...input, seq: ++this.seq, ts: this.now() } as TutorEvent;

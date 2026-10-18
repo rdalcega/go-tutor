@@ -66,6 +66,20 @@ export function takeBackBlocked(
   return (s.toPlay === s.humanColor || s.status === "paused") && !twoPasses(s.moves) ? null : "not_now";
 }
 
+/**
+ * Why a hint can't be asked for now, or null when it can: there must be a game without a result,
+ * on the learner's turn (not in a pause, not while the bot thinks), and someone to answer: an
+ * attached tutor, or KataGo ready.
+ */
+export function hintBlocked(
+  s: Pick<ActionState, "humanColor" | "finished" | "toPlay" | "status" | "tutorAttached" | "engineReady">,
+): "no_game" | "finished" | "paused" | "bot_turn" | "nobody" | null {
+  if (s.humanColor === null) return "no_game";
+  if (s.finished) return "finished";
+  if (s.toPlay !== s.humanColor) return s.status === "paused" ? "paused" : "bot_turn";
+  return s.tutorAttached || s.engineReady ? null : "nobody";
+}
+
 /** The browser actions accepted in this state. Always a fresh array. */
 export function allowedActions(s: ActionState): ActionType[] {
   if (s.mode === "problem") {
@@ -80,6 +94,6 @@ export function allowedActions(s: ActionState): ActionType[] {
   if (paused) allowed.push("continue");
   if (retryBlocked(s) === null) allowed.push("retry");
   if (takeBackBlocked(s) === null) allowed.push("take_back");
-  if (humanToPlay && (s.tutorAttached || s.engineReady)) allowed.push("ask_tutor");
+  if (hintBlocked(s) === null) allowed.push("ask_tutor");
   return allowed;
 }

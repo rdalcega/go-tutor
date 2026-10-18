@@ -32,6 +32,11 @@ export interface Scheduled {
   lastSeen?: number;
 }
 
+/** A new problem's schedule: box 1, due at once, never shown. */
+export function freshSchedule(now: number): Pick<Scheduled, "box" | "due" | "seen" | "solves"> {
+  return { box: 1, due: now, seen: 0, solves: 0 };
+}
+
 /** Leitner scheduling (mutates): the problem moves to its next box and is due again after that box's interval. */
 export function schedule(p: Scheduled, result: ProblemResult, now: number): void {
   p.box = nextBox(p.box, result);

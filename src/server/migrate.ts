@@ -11,6 +11,7 @@ import { gameFromLine, movesFromLine, writeSgf } from "../engine/index.ts";
 import { moveGtp, movePoint, samePoint } from "../shared/coords.ts";
 import { ratingToRank } from "../shared/rank.ts";
 import { assistText, rankEstimateText } from "../shared/text.ts";
+import { playedThreshold } from "../shared/threshold.ts";
 import {
   ASSIST_KINDS,
   type AssistCounts,
@@ -38,6 +39,7 @@ import {
   clearEstimating,
   firstAttemptMistakes,
   isRated,
+  lossStats,
   mistakeKey,
   noAssistance,
   totalPointLoss,
@@ -268,7 +270,7 @@ export async function migrateRatingModel(deps: MigrationDeps): Promise<Migration
   for (const saved of games) {
     const rebuilt = reconstructGame(saved, events);
     // The game's own threshold on its board; older games used the profile's threshold on every size.
-    const threshold = saved.summary?.threshold ?? original.recentGames.find((g) => g.gameId === saved.id)?.threshold ?? deps.threshold;
+    const threshold = playedThreshold(saved, deps.threshold, original.recentGames);
     // Keep what an earlier (interrupted) run or the live game already knew about the first attempts.
     const known = saved.takenBack ?? [];
     rebuilt.takenBack.forEach((t, i) => {
@@ -396,15 +398,9 @@ export async function migrateRatingModel(deps: MigrationDeps): Promise<Migration
       profile.mistakeCounts[m.category] = (profile.mistakeCounts[m.category] ?? 0) + 1;
       profile.recentMistakes.push({ ts: t.ts, gameId: saved.id, moveNumber: m.moveNumber, category: m.category, pointLoss: m.pointLoss, takenBack: m.takenBack });
     }
-    const stats = profile.recentGames.find((g) => g.gameId === saved.id);
-    if (stats) {
-      const evaluated = [...rebuilt.moves.filter((r) => r.move.color === saved.settings.humanColor), ...rebuilt.takenBack.map((t) => t.record)].filter((r) => r.eval);
-      if (evaluated.length) {
-        stats.humanMoves = evaluated.length;
-        stats.avgPointLoss = Math.round((evaluated.reduce((s, r) => s + r.eval!.pointLoss, 0) / evaluated.length) * 100) / 100;
-        stats.mistakes = summary.mistakes.filter((m) => m.pointLoss >= threshold).length;
-      }
-    }
+    const entry = profile.recentGames.find((g) => g.gameId === saved.id);
+    const stats = entry && lossStats(rebuilt.moves, saved.settings.humanColor, rebuilt.takenBack);
+    if (entry && stats) Object.assign(entry, stats, { mistakes: summary.mistakes.filter((m) => m.pointLoss >= threshold).length });
   }
   profile.recentMistakes = profile.recentMistakes.sort((a, b) => b.ts - a.ts).slice(0, RECENT_MISTAKES_CAP);
   store.saveProfile(profile);

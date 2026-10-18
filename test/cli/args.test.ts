@@ -10,7 +10,7 @@ const usage = (argv: string[]) => expect(() => parseInvocation(argv)).toThrow(Us
 
 describe("parseInvocation", () => {
   it("defaults to help", () => {
-    expect(parseInvocation([])).toEqual({ kind: "help", topic: undefined });
+    expect(parseInvocation([])).toEqual({ kind: "help" });
     expect(parseInvocation(["help"]).kind).toBe("help");
     expect(parseInvocation(["say", "--help"]).kind).toBe("help");
   });

@@ -206,25 +206,31 @@ export class Store {
 
   // --- profile -------------------------------------------------------------
 
+  /** The JSON in `path`, or undefined when there is no file. A corrupt file is set aside (`.corrupt-<time>`), not lost. */
+  private readJsonOrSetAside(path: string): unknown {
+    if (!existsSync(path)) return undefined;
+    try {
+      return JSON.parse(readFileSync(path, "utf8")) as unknown;
+    } catch {
+      renameSync(path, `${path}.corrupt-${Date.now()}`);
+      return undefined;
+    }
+  }
+
   /** The profile, with defaults for anything missing. A corrupt file is set aside, not lost. */
   loadProfile(): Profile {
     const base = defaultProfile();
-    if (!existsSync(this.profilePath)) return base;
-    try {
-      const saved = JSON.parse(readFileSync(this.profilePath, "utf8")) as Partial<Profile>;
-      const tutorLevel = TUTOR_LEVELS.includes(saved.tutorLevel as TutorLevel) ? saved.tutorLevel! : base.tutorLevel;
-      const judgeMode = JUDGE_MODES.includes(saved.judgeMode as JudgeMode) ? saved.judgeMode! : base.judgeMode;
-      const profile: Profile = { ...base, ...saved, mistakeCounts: { ...base.mistakeCounts, ...saved.mistakeCounts }, tutorLevel, judgeMode };
-      // `estimating` held one game id before it became a list.
-      const estimating: unknown = saved.estimating;
-      const pending = typeof estimating === "string" ? [estimating] : Array.isArray(estimating) ? estimating.filter((id): id is string => typeof id === "string") : [];
-      if (pending.length) profile.estimating = pending;
-      else delete profile.estimating;
-      return profile;
-    } catch {
-      renameSync(this.profilePath, `${this.profilePath}.corrupt-${Date.now()}`);
-      return base;
-    }
+    const saved = this.readJsonOrSetAside(this.profilePath) as Partial<Profile> | undefined;
+    if (!saved) return base;
+    const tutorLevel = TUTOR_LEVELS.includes(saved.tutorLevel as TutorLevel) ? saved.tutorLevel! : base.tutorLevel;
+    const judgeMode = JUDGE_MODES.includes(saved.judgeMode as JudgeMode) ? saved.judgeMode! : base.judgeMode;
+    const profile: Profile = { ...base, ...saved, mistakeCounts: { ...base.mistakeCounts, ...saved.mistakeCounts }, tutorLevel, judgeMode };
+    // `estimating` held one game id before it became a list.
+    const estimating: unknown = saved.estimating;
+    const pending = typeof estimating === "string" ? [estimating] : Array.isArray(estimating) ? estimating.filter((id): id is string => typeof id === "string") : [];
+    if (pending.length) profile.estimating = pending;
+    else delete profile.estimating;
+    return profile;
   }
 
   saveProfile(profile: Profile): void {
@@ -238,14 +244,8 @@ export class Store {
    * is set aside, not lost.
    */
   loadProblems(): StoredProblem[] {
-    if (!existsSync(this.problemsPath)) return [];
-    try {
-      const saved = JSON.parse(readFileSync(this.problemsPath, "utf8")) as { problems?: StoredProblem[] };
-      return Array.isArray(saved.problems) ? saved.problems : [];
-    } catch {
-      renameSync(this.problemsPath, `${this.problemsPath}.corrupt-${Date.now()}`);
-      return [];
-    }
+    const saved = this.readJsonOrSetAside(this.problemsPath) as { problems?: StoredProblem[] } | undefined;
+    return Array.isArray(saved?.problems) ? saved.problems : [];
   }
 
   saveProblems(problems: readonly StoredProblem[]): void {
@@ -256,14 +256,9 @@ export class Store {
 
   /** generation.json: the generated batches and the one in progress. A corrupt file is set aside, not lost. */
   loadGeneration(): GenerationFile {
-    if (!existsSync(this.generationPath)) return emptyGeneration();
-    try {
-      const saved = JSON.parse(readFileSync(this.generationPath, "utf8")) as Partial<GenerationFile>;
-      return { ...emptyGeneration(), ...saved, batches: Array.isArray(saved.batches) ? saved.batches : [] };
-    } catch {
-      renameSync(this.generationPath, `${this.generationPath}.corrupt-${Date.now()}`);
-      return emptyGeneration();
-    }
+    const saved = this.readJsonOrSetAside(this.generationPath) as Partial<GenerationFile> | undefined;
+    if (!saved) return emptyGeneration();
+    return { ...emptyGeneration(), ...saved, batches: Array.isArray(saved.batches) ? saved.batches : [] };
   }
 
   saveGeneration(state: GenerationFile): void {

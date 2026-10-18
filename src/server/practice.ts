@@ -4,10 +4,10 @@
 
 import { toAscii, type GoGame } from "../engine/index.ts";
 import { samePoint, toGtp } from "../shared/coords.ts";
-import { round1 } from "../shared/text.ts";
+import { plural, round1 } from "../shared/text.ts";
 import { sizeText } from "../shared/threshold.ts";
 import type { ClientAction, Color, GameSettings, GameView, Gtp, Overlay, Point, ProblemAttempt, TutorCommand } from "../shared/types.ts";
-import { ILLEGAL_TEXT, PV_STONES, UserError, alternatingStones, lineStones, plural, type TutorEventInput } from "./common.ts";
+import { ILLEGAL_TEXT, PV_STONES, UserError, alternatingStones, lineStones, type TutorEventInput } from "./common.ts";
 import { moveEvalFrom, trustedCandidate, type Analysis, type Engine } from "./katago.ts";
 import { ANSWER_MARGIN, MAX_ATTEMPTS, gameSource, generatedInfo, problemGame, problemPosition, promptFor, type StoredProblem } from "./problems.ts";
 

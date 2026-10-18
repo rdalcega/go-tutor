@@ -11,18 +11,32 @@
 // data/generation.json, written after every self-play move, so a restart resumes the batch.
 // Pure helpers first (quotas, ranks, the filters, difficulty, the trigger), then the generator.
 
-import { GoGame, groupAt, opponent, toAscii, type IllegalReason } from "../engine/index.ts";
-import { pointKey, tryFromGtp } from "../shared/coords.ts";
-import { ratingToRank } from "../shared/rank.ts";
-import { round1 } from "../shared/text.ts";
-import type { Board, Color, GenerationBatchStatus, GenerationSizeStatus, GenerationStatus, Gtp, MoveRecord, Point } from "../shared/types.ts";
-import { UserError, type Clock, type TutorEventInput } from "./common.ts";
-import { ESTIMATE_RANKS, ESTIMATE_RATINGS, policyIndex } from "./estimate.ts";
+import { GoGame, gameFromLine, opponent, toAscii, type IllegalReason } from "../engine/index.ts";
+import { tryFromGtp } from "../shared/coords.ts";
+import { ratingToRank, toHumanSLProfile } from "../shared/rank.ts";
+import { freshSchedule } from "../shared/schedule.ts";
+import { colorName, round1, round2 } from "../shared/text.ts";
+import {
+  BOARD_SIZES,
+  type Board,
+  type BoardSize,
+  type Color,
+  type GenerationBatchStatus,
+  type GenerationSizeStatus,
+  type GenerationStatus,
+  type Gtp,
+  type MoveRecord,
+  type Point,
+} from "../shared/types.ts";
+import { UserError, nextNumber, type Clock, type TutorEventInput } from "./common.ts";
+import { ESTIMATE_RANKS, ESTIMATE_RATINGS } from "./estimate.ts";
 import {
   GENERATION_PRIORITY,
   TRUSTED_CANDIDATE_VISITS,
   abortError,
   chooseBotMove,
+  humanMoveProbability,
+  humanPolicyOptions,
   isAbortError,
   moveEvalFrom,
   type Analysis,
@@ -45,14 +59,11 @@ import {
   type Candidate,
   type StoredProblem,
 } from "./problems.ts";
-import { MAX_BOT_RATING, MIN_BOT_RATING, classifyPlayed, ownershipFlipped } from "./profile.ts";
+import { MAX_BOT_RATING, MIN_BOT_RATING, classifyPlayed, flippedChains, ownershipFlipped } from "./profile.ts";
 
 // ---------------------------------------------------------------------------
 // Settings
 // ---------------------------------------------------------------------------
-
-export const BOARD_SIZES = [9, 13, 19] as const;
-export type BoardSize = (typeof BOARD_SIZES)[number];
 
 /** Problems per batch, split 7/7/6 across the sizes (`batchQuotas`). */
 export const BATCH_SIZE = 20;
@@ -183,6 +194,21 @@ export function emptyGeneration(): GenerationFile {
   return { version: 1, batches: [], progress: null };
 }
 
+/**
+ * Restores the file's one invariant (mutating it): `progress` belongs to the newest batch, which is
+ * the one in progress while it is unfinished. A damaged file (progress for a batch that isn't the
+ * newest, or none for an unfinished newest batch) is repaired: the unfinished batch is resumed from
+ * a fresh game, or the stray progress dropped. Returns what was repaired, for the log, or null.
+ */
+export function normalizeGeneration(file: GenerationFile): string | null {
+  const last = file.batches.at(-1);
+  const unfinished = last && !last.finishedAt ? last : null;
+  const named = file.progress?.batchId ?? null;
+  if (named === (unfinished?.id ?? null)) return null;
+  file.progress = unfinished ? { batchId: unfinished.id, game: null, reserve: [] } : null;
+  return unfinished ? `progress for ${named ?? "no batch"} replaced: resuming ${unfinished.id}` : `progress for unknown ${named} dropped`;
+}
+
 function perSize<T>(make: (size: BoardSize) => T): Record<BoardSize, T> {
   return { 9: make(9), 13: make(13), 19: make(19) };
 }
@@ -202,15 +228,20 @@ export function batchQuotas(n: number): Record<BoardSize, number> {
   return perSize((size) => (size === short ? BATCH_SIZE - base * (BOARD_SIZES.length - 1) : base));
 }
 
+/** The learner's rating as a whole rank on KataGo's human-SL scale (20k … 9d). */
+function learnerBotRating(rating: number): number {
+  return Math.min(MAX_BOT_RATING, Math.max(MIN_BOT_RATING, Math.round(rating)));
+}
+
 /** Self-play ranks for a learner rated `rating`: the weaker side at their rank (20k … 9d), the other 5 ranks stronger (capped at 9d). */
 export function batchRanks(rating: number): { weaker: string; stronger: string } {
-  const weaker = Math.min(MAX_BOT_RATING, Math.max(MIN_BOT_RATING, Math.round(rating)));
+  const weaker = learnerBotRating(rating);
   return { weaker: ratingToRank(weaker), stronger: ratingToRank(Math.min(MAX_BOT_RATING, weaker + RANK_GAP)) };
 }
 
 /** The preferred difficulty for a learner rated `rating`: their rank to DIFFICULTY_BAND ranks stronger. */
 export function difficultyBand(rating: number): [number, number] {
-  const low = Math.min(MAX_BOT_RATING, Math.max(MIN_BOT_RATING, Math.round(rating)));
+  const low = learnerBotRating(rating);
   return [low, Math.min(MAX_BOT_RATING, low + DIFFICULTY_BAND)];
 }
 
@@ -249,8 +280,7 @@ export function nextBatchTrigger(file: GenerationFile, problems: readonly Stored
 
 /** The next problem id for a generated problem: gen1, gen2, … */
 export function nextGeneratedId(problems: readonly Pick<StoredProblem, "id">[]): string {
-  const max = Math.max(0, ...problems.map((p) => Number(/^gen(\d+)$/.exec(p.id)?.[1] ?? 0)));
-  return `gen${max + 1}`;
+  return `gen${nextNumber(problems.map((p) => p.id), "gen")}`;
 }
 
 // ---------------------------------------------------------------------------
@@ -268,26 +298,16 @@ function chebyshev(a: Point, b: Point): number {
 
 /**
  * Points whose fate the mistake changed, from KataGo's ownership (Black's view) before and after it:
- * every stone of a group whose average ownership flips, and every empty point whose ownership flips
- * (`ownershipFlipped`, the same rule that spots a life-and-death mistake in the learner's games).
+ * every stone of a group whose average ownership flips (`flippedChains`, the rule that spots a
+ * life-and-death mistake in the learner's games), and every empty point whose ownership flips.
  */
 export function flippedPoints(board: Board, before: readonly number[], after: readonly number[]): Point[] {
   const size = board.length;
   if (before.length !== size * size || after.length !== size * size) return [];
-  const out: Point[] = [];
-  const seen = new Set<string>();
+  const out = flippedChains(board, before, after).flatMap((c) => c.stones);
   board.forEach((row, y) =>
     row.forEach((cell, x) => {
-      const p = { x, y };
-      if (cell === null) {
-        if (ownershipFlipped(before[y * size + x]!, after[y * size + x]!)) out.push(p);
-        return;
-      }
-      if (seen.has(pointKey(p))) return;
-      const group = groupAt(board, p).stones;
-      for (const s of group) seen.add(pointKey(s));
-      const average = (o: readonly number[]) => group.reduce((sum, s) => sum + o[s.y * size + s.x]!, 0) / group.length;
-      if (ownershipFlipped(average(before), average(after))) out.push(...group);
+      if (cell === null && ownershipFlipped(before[y * size + x]!, after[y * size + x]!)) out.push({ x, y });
     }),
   );
   return out;
@@ -325,7 +345,7 @@ export function difficultyRating(probs: readonly number[], ratings: readonly num
   const [p0, p1] = [probs[at - 1]!, probs[at]!];
   const [r0, r1] = [ratings[at - 1]!, ratings[at]!];
   const rating = r0 + ((DIFFICULTY_CROSSING - p0) / (p1 - p0)) * (r1 - r0);
-  return { rating: Math.round(rating * 100) / 100, floor: false, ceiling: false };
+  return { rating: round2(rating), floor: false, ceiling: false };
 }
 
 /** A mistake by the weaker side that screening found big, with what the filters need. */
@@ -445,7 +465,7 @@ export async function examineCandidate(input: CandidateInput, ctx: ExamineContex
       answers,
       bestMove: best.move,
       bestPv: best.pv.slice(0, 8),
-      pointLoss: round1(evaluation.pointLoss),
+      pointLoss: metrics.loss,
       difficultyRating: difficultyRating(probs).rating,
       moveNumber: input.moveNumber,
       played,
@@ -459,10 +479,8 @@ export async function examineCandidate(input: CandidateInput, ctx: ExamineContex
 async function answerPolicies(ctx: ExamineContext, position: Position, answers: readonly Gtp[]): Promise<number[]> {
   const probs: number[] = [];
   for (const rank of ESTIMATE_RANKS) {
-    const analysis = await ctx.analyze(position, { maxVisits: 1, includePolicy: true, overrideSettings: { humanSLProfile: `rank_${rank}` } });
-    const policy = analysis.humanPolicy;
-    if (!policy) throw new Error("KataGo returned no humanPolicy; is the human model loaded?");
-    probs.push(answers.reduce((sum, a) => sum + Math.max(0, policy[policyIndex(a, position.size)] ?? 0), 0));
+    const analysis = await ctx.analyze(position, humanPolicyOptions(rank));
+    probs.push(answers.reduce((sum, a) => sum + humanMoveProbability(analysis, a, position.size), 0));
   }
   return probs;
 }
@@ -495,10 +513,7 @@ export function storedProblem(c: CandidateProblem, batch: Pick<GeneratedBatch, "
     },
     hash: c.hash,
     createdAt: now,
-    box: 1,
-    due: now,
-    seen: 0,
-    solves: 0,
+    ...freshSchedule(now),
   };
 }
 
@@ -546,15 +561,13 @@ export interface GeneratorDeps {
   rating(): number;
   /** Whether KataGo is free for the generator: it is ready and the learner isn't using it. */
   mayRun(): boolean;
-  /** Loads the stored problems, lets `change` add to them, and saves them (the controller's). */
+  /** Loads the stored problems, lets `change` add to them, saves them and reports them to `problemsChanged` (the controller's). */
   updateProblems<T>(change: (problems: StoredProblem[]) => T): T;
   /** The status changed (a problem found, a batch started or finished, waiting or running). */
   changed(): void;
   emit(event: TutorEventInput): void;
   /** A line in the learner's chat. */
   system(text: string): void;
-  /** RNG for the self-play moves. Default Math.random. */
-  random?: () => number;
   /** Receives one line per examined candidate (its verdict and measurements), for tuning the filters. */
   debug?(msg: string): void;
   /** Problems per size for batch `n` (default `batchQuotas`); a size with 0 is skipped. For tests. */
@@ -573,6 +586,8 @@ export class ProblemGenerator {
   /** The current game replayed, and the screening analysis of its position after `count` moves. */
   private replay: { game: SelfPlayGame; rules: GoGame } | null = null;
   private prev: { count: number; analysis: Analysis } | null = null;
+  /** The stored problems as of their last change (the controller's `updateProblems` reports every one). */
+  private problems: readonly StoredProblem[] = [];
   /** Mastered problems of the newest finished batch, and its problems still stored. */
   private mastery = { mastered: 0, problems: 0 };
   private failures = 0;
@@ -580,6 +595,8 @@ export class ProblemGenerator {
 
   constructor(private readonly deps: GeneratorDeps) {
     this.file = deps.store.loadGeneration();
+    const repaired = normalizeGeneration(this.file);
+    if (repaired) deps.log(`problem generation: ${repaired} (generation.json was inconsistent)`);
     this.problemsChanged(deps.store.loadProblems());
   }
 
@@ -607,8 +624,9 @@ export class ProblemGenerator {
     this.wakeUp?.();
   }
 
-  /** The stored problems changed: keep the newest finished batch's mastery count current. */
+  /** The stored problems changed: keep them, and the newest finished batch's mastery count, current. */
   problemsChanged(problems: readonly StoredProblem[]): void {
+    this.problems = problems;
     const last = this.file.batches.filter((b) => b.finishedAt).at(-1);
     this.mastery = last
       ? { mastered: masteredCount(problems, last.id), problems: problems.filter((p) => generatedSource(p)?.batchId === last.id).length }
@@ -618,7 +636,7 @@ export class ProblemGenerator {
   /** After a problem result and at startup: start the next batch if it is due (the first one, or the newest one mastered). */
   checkTrigger(): void {
     if (!this.enabled) return;
-    const trigger = nextBatchTrigger(this.file, this.deps.store.loadProblems());
+    const trigger = nextBatchTrigger(this.file, this.problems);
     if (trigger) this.startBatch(trigger);
   }
 
@@ -652,9 +670,9 @@ export class ProblemGenerator {
     while (this.running) await new Promise<void>((r) => setImmediate(r));
   }
 
+  /** The batch in progress: the newest one while `progress` is set (`normalizeGeneration` keeps them in step). */
   private currentBatch(): GeneratedBatch | null {
-    const batch = this.file.batches.at(-1);
-    return this.file.progress && batch && batch.id === this.file.progress.batchId ? batch : null;
+    return this.file.progress ? (this.file.batches.at(-1) ?? null) : null;
   }
 
   private found(batch: GeneratedBatch): number {
@@ -706,8 +724,7 @@ export class ProblemGenerator {
     };
     this.file.batches.push(batch);
     this.file.progress = { batchId: batch.id, game: null, reserve: [] };
-    this.replay = null;
-    this.prev = null;
+    this.forgetReplay();
     this.save();
     const status = this.batchStatus(batch);
     this.deps.log(`problem generation: ${batch.id} started (${trigger}), ${batch.weakerRank} vs ${batch.strongerRank}, difficulty band ${status.band}`);
@@ -727,10 +744,9 @@ export class ProblemGenerator {
   private finishBatch(batch: GeneratedBatch): void {
     batch.finishedAt = this.deps.clock.now();
     this.file.progress = null;
-    this.replay = null;
-    this.prev = null;
+    this.forgetReplay();
     this.save();
-    this.problemsChanged(this.deps.store.loadProblems());
+    this.problemsChanged(this.problems); // this batch is the newest finished one now
     const status = this.batchStatus(batch);
     const minutes = BOARD_SIZES.map((s) => `${s}×${s} ${status.sizes.find((x) => x.size === s)!.minutes} min`).join(", ");
     this.deps.log(`problem generation: ${batch.id} finished, ${status.found} problems (${minutes})`);
@@ -817,7 +833,7 @@ export class ProblemGenerator {
   /** Screening query for a self-play position: the eval (with ownership) and the human-SL policy of the side to move, which picks its move. */
   private screenOptions(game: SelfPlayGame, batch: GeneratedBatch, toPlay: Color): AnalyzeOptions {
     const rank = toPlay === game.weaker ? batch.weakerRank : batch.strongerRank;
-    return { maxVisits: SIZE_SETTINGS[game.size].screenVisits, includeOwnership: true, includePolicy: true, overrideSettings: { humanSLProfile: `rank_${rank}` } };
+    return { maxVisits: SIZE_SETTINGS[game.size].screenVisits, includeOwnership: true, includePolicy: true, overrideSettings: { humanSLProfile: toHumanSLProfile(rank) } };
   }
 
   /** The next self-play game's size: the one with the largest share of its quota still to find (smaller first on a tie). */
@@ -838,12 +854,7 @@ export class ProblemGenerator {
   /** The rules engine for the game in progress (replayed after a restart). */
   private rulesFor(game: SelfPlayGame): GoGame {
     if (this.replay?.game === game) return this.replay.rules;
-    const rules = new GoGame(game.size, GENERATED_KOMI);
-    for (const gtp of game.moves) {
-      const point = tryFromGtp(gtp, game.size);
-      const result = point ? rules.play({ color: rules.toPlay, point }) : rules.pass();
-      if (!result.ok) throw new Error(`self-play game doesn't replay at ${gtp}`);
-    }
+    const rules = gameFromLine({ size: game.size, komi: GENERATED_KOMI, handicap: 0 }, game.moves);
     this.replay = { game, rules };
     return rules;
   }
@@ -855,21 +866,7 @@ export class ProblemGenerator {
    */
   private async step(signal: AbortSignal): Promise<void> {
     const progress = this.file.progress!;
-    const batch = this.currentBatch();
-    if (!batch) {
-      // Progress for a batch that isn't the newest (a damaged generation.json): the newest batch is
-      // resumed if it never finished (the trigger would otherwise wait for it forever), else the
-      // progress is dropped so the trigger can start a new one.
-      const last = this.file.batches.at(-1);
-      const resume = last && !last.finishedAt ? last : null;
-      this.deps.log(`problem generation: progress for unknown ${progress.batchId} dropped${resume ? `; resuming ${resume.id}` : ""}`);
-      this.file.progress = resume ? { batchId: resume.id, game: null, reserve: [] } : null;
-      this.replay = null;
-      this.prev = null;
-      this.save();
-      if (!resume) this.checkTrigger();
-      return;
-    }
+    const batch = this.currentBatch()!;
     let game = progress.game;
     if (!game || batch.stats[game.size].found >= batch.quotas[game.size]) {
       if (game) this.endGame(batch, game);
@@ -911,7 +908,7 @@ export class ProblemGenerator {
       if (atCap) {
         this.endGame(batch, game);
       } else {
-        const move = chooseBotMove(now, game.size, this.deps.random);
+        const move = chooseBotMove(now, game.size);
         const point = move === "pass" ? null : tryFromGtp(move, game.size);
         const result = point ? rules.play({ color: rules.toPlay, point }) : rules.pass();
         if (!result.ok) throw new Error(`KataGo's move ${move} is illegal here (${result.reason satisfies IllegalReason})`);
@@ -925,7 +922,7 @@ export class ProblemGenerator {
         const m = verdict.metrics;
         const measured = m ? `, loss ${m.loss}, answers ${m.answers}, gap ${m.gap}, ${m.local ? "local" : "not local"}` : "";
         const outcome = verdict.ok ? `ok ${verdict.problem.category}, difficulty ${verdict.problem.difficultyRating}` : verdict.reason;
-        this.deps.debug?.(`${batch.id} ${game.size}x${game.size} move ${n} ${moves[n - 1]} (${game.weaker === "B" ? "Black" : "White"}): screened ${round1(loss)}${measured} -> ${outcome}`);
+        this.deps.debug?.(`${batch.id} ${game.size}x${game.size} move ${n} ${moves[n - 1]} (${colorName(game.weaker)}): screened ${round1(loss)}${measured} -> ${outcome}`);
         this.record(batch, game, verdict);
       }
       this.save();
@@ -937,6 +934,11 @@ export class ProblemGenerator {
   private endGame(batch: GeneratedBatch, game: SelfPlayGame): void {
     batch.stats[game.size].games++;
     if (this.file.progress) this.file.progress.game = null;
+    this.forgetReplay();
+  }
+
+  /** The replayed game and its last screening analysis no longer apply (a game ended, a batch started or finished). */
+  private forgetReplay(): void {
     this.replay = null;
     this.prev = null;
   }
@@ -945,7 +947,7 @@ export class ProblemGenerator {
   private async examine(game: SelfPlayGame, rules: GoGame, screenBefore: Analysis, screenAfter: Analysis, signal: AbortSignal): Promise<Verdict> {
     const n = game.moves.length;
     const progress = this.file.progress!;
-    const knownHashes = new Set([...this.deps.store.loadProblems().map((p) => p.hash), ...progress.reserve.map((p) => p.hash)]);
+    const knownHashes = new Set([...this.problems.map((p) => p.hash), ...progress.reserve.map((p) => p.hash)]);
     return examineCandidate(
       {
         size: game.size,

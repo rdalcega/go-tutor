@@ -7,7 +7,7 @@ import { dirname, extname, join, normalize, resolve, sep } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { TutorBridge, parseClientAction, parseTutorCommand } from "./bridge.ts";
 import { UserError } from "./common.ts";
-import { GameController, type GameEngine } from "./game.ts";
+import { GameController } from "./game.ts";
 import { removeLegacyBuiltins } from "./generate.ts";
 import { KataGo } from "./katago.ts";
 import { problemsResponse } from "./problems.ts";
@@ -243,9 +243,8 @@ async function main(): Promise<void> {
       startEngine(engine, controller);
     },
   });
-  const gameEngine: GameEngine = engine;
   controller = new GameController({
-    engine: gameEngine,
+    engine,
     store,
     tutorTimeoutMs,
     log: (m) => console.log(m),

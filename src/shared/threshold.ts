@@ -3,15 +3,11 @@
 // Profile.mistakeThreshold is the 9×9 value. Points lost per mistake grow with the board, so each
 // size scales it: 4 points on 9×9 is 6 on 13×13 and 8 on 19×19.
 
-import type { GameSettings, GameSummary, Profile } from "./types.ts";
-
-type BoardSize = GameSettings["size"];
+import { round2 } from "./text.ts";
+import { BOARD_SIZES, type BoardSize, type GameSettings, type GameSummary, type Profile } from "./types.ts";
 
 /** How much each board size scales the 9×9 mistake threshold. */
 export const THRESHOLD_MULTIPLIERS: Readonly<Record<BoardSize, number>> = { 9: 1, 13: 1.5, 19: 2 };
-
-/** The board sizes with a multiplier, smallest first. */
-export const THRESHOLD_SIZES = (Object.keys(THRESHOLD_MULTIPLIERS).map(Number) as BoardSize[]).sort((a, b) => a - b);
 
 /** The multiplier for a board size. */
 export function thresholdMultiplier(size: BoardSize): number {
@@ -20,17 +16,17 @@ export function thresholdMultiplier(size: BoardSize): number {
 
 /** The mistake threshold in points on a `size` board, from the 9×9 threshold `base` (up to two decimals). */
 export function thresholdFor(base: number, size: BoardSize): number {
-  return Math.round(base * thresholdMultiplier(size) * 100) / 100;
+  return round2(base * thresholdMultiplier(size));
 }
 
 /** A threshold in points as text: 4, 4.5, 6.75 (exact; thresholds have at most two decimals). */
 export function thresholdNum(n: number): string {
-  return String(Math.round(n * 100) / 100);
+  return String(round2(n));
 }
 
 /** The 9×9 threshold `base` on every board: "4 pts on 9×9 (6 on 13×13, 8 on 19×19)". */
 export function thresholdText(base: number): string {
-  const [first, ...rest] = THRESHOLD_SIZES.map((size) => ({ pts: thresholdNum(thresholdFor(base, size)), on: sizeText(size) }));
+  const [first, ...rest] = BOARD_SIZES.map((size) => ({ pts: thresholdNum(thresholdFor(base, size)), on: sizeText(size) }));
   return `${first!.pts} pts on ${first!.on} (${rest.map((t) => `${t.pts} on ${t.on}`).join(", ")})`;
 }
 

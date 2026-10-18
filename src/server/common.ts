@@ -38,8 +38,12 @@ export const ILLEGAL_TEXT: Record<IllegalReason, string> = {
 /** Moves of KataGo's line drawn as ghost stones (a fallback, an answer that was missed). */
 export const PV_STONES = 6;
 
-export function plural(n: number, word: string): string {
-  return `${n} ${word}${n === 1 ? "" : "s"}`;
+/** One more than the largest number in the ids of the form `<prefix><n>` (1 when there is none): the next free id's number. */
+export function nextNumber(ids: Iterable<string>, prefix: string): number {
+  const pattern = new RegExp(`^${prefix}(\\d+)$`);
+  let max = 0;
+  for (const id of ids) max = Math.max(max, Number(pattern.exec(id)?.[1] ?? 0));
+  return max + 1;
 }
 
 /**

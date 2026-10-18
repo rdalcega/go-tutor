@@ -11,10 +11,10 @@ import {
   movePolicies,
   openingSkip,
   peakRating,
-  policyIndex,
   positionFor,
   rankSamples,
 } from "../../src/server/estimate.ts";
+import { policyIndex } from "../../src/server/katago.ts";
 import { movesFromLine } from "../../src/engine/index.ts";
 import { moveGtp } from "../../src/shared/coords.ts";
 import type { GameSettings, MoveRecord, TakenBackMove } from "../../src/shared/types.ts";

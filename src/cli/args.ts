@@ -2,12 +2,12 @@
 
 import { toGtp, tryFromGtp } from "../shared/coords.ts";
 import { normalizeBotRank } from "../shared/rank.ts";
-import { MARK_KINDS, MISTAKE_CATEGORIES, type Color, type GameSettings, type MarkKind, type MistakeCategory, type TutorCommand } from "../shared/types.ts";
+import { MARK_KINDS, MISTAKE_CATEGORIES, isBoardSize, type Color, type GameSettings, type MarkKind, type MistakeCategory, type TutorCommand } from "../shared/types.ts";
 
 export class UsageError extends Error {}
 
 export type Invocation =
-  | { kind: "help"; topic?: string }
+  | { kind: "help" }
   | { kind: "watch"; since?: number; json: boolean }
   | { kind: "state"; json: boolean }
   | { kind: "summary"; json: boolean }
@@ -143,11 +143,9 @@ function noPositionals(positional: string[], command: string): void {
 
 export function parseInvocation(argv: string[]): Invocation {
   const [name, ...rest] = argv;
-  if (name === undefined || name === "help" || name === "--help" || name === "-h") {
-    return { kind: "help", topic: rest[0] };
-  }
+  if (name === undefined || name === "help" || name === "--help" || name === "-h") return { kind: "help" };
   const { positional, flags: flagMap } = splitArgs(rest);
-  if (flagMap.has("help")) return { kind: "help", topic: name };
+  if (flagMap.has("help")) return { kind: "help" };
   const json = flagMap.get("json") === true;
   const flags = new Flags(name, flagMap);
 
@@ -224,8 +222,9 @@ export function parseInvocation(argv: string[]): Invocation {
         const settings: Partial<GameSettings> = {};
         const size = flags.string("size");
         if (size !== undefined) {
-          if (size !== "9" && size !== "13" && size !== "19") throw new UsageError(`--size must be 9, 13 or 19`);
-          settings.size = Number(size) as 9 | 13 | 19;
+          const n = Number(size);
+          if (!isBoardSize(n)) throw new UsageError(`--size must be 9, 13 or 19`);
+          settings.size = n;
         }
         const rank = flags.string("rank");
         if (rank !== undefined) {

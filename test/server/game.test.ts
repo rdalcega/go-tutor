@@ -7,6 +7,7 @@ import { GameController, passIsFine } from "../../src/server/game.ts";
 import type { Store } from "../../src/server/store.ts";
 import { fromGtp } from "../../src/shared/coords.ts";
 import { judgedLoss } from "../../src/shared/judge.ts";
+import { round2 } from "../../src/shared/text.ts";
 import type { GameSummary } from "../../src/shared/types.ts";
 import { FakeClock, FakeEngine, flush, seedProblems, tempStore } from "./fakes.ts";
 
@@ -14,7 +15,6 @@ import { FakeClock, FakeEngine, flush, seedProblems, tempStore } from "./fakes.t
 const C3 = { x: 2, y: 6 };
 const E5 = { x: 4, y: 4 };
 const D4 = { x: 3, y: 5 };
-const round2 = (n: number) => Math.round(n * 100) / 100;
 
 let engine: FakeEngine;
 let clock: FakeClock;

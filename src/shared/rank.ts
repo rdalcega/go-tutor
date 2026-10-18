@@ -1,4 +1,4 @@
-// Rank scale: 30k = 0 … 1k = 29, 1d = 30 … 9d = 38 (see RANK_SCALE_NOTE in types.ts).
+// Rank scale: 30k = 0 … 1k = 29, 1d = 30 … 9d = 38 (the scale Profile.rating uses, src/shared/types.ts).
 
 export const MIN_RATING = 0;
 export const MAX_RATING = 38;

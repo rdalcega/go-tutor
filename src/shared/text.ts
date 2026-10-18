@@ -19,6 +19,16 @@ export function round1(n: number): number {
   return Math.round(n * 10) / 10;
 }
 
+/** Rounded to two decimals. */
+export function round2(n: number): number {
+  return Math.round(n * 100) / 100;
+}
+
+/** "1 mistake", "3 mistakes". */
+export function plural(n: number, word: string): string {
+  return `${n} ${word}${n === 1 ? "" : "s"}`;
+}
+
 /** Whole seconds from `now` until `deadline` (ms epoch), rounded up so a wait still running never reads 0; never negative. */
 export function secondsUntil(deadline: number, now: number): number {
   return Math.max(0, Math.ceil((deadline - now) / 1000));
@@ -96,7 +106,7 @@ export function takenBackTryText(n: number): string {
 
 /** "3 hints, 2 take-backs, 1 tutor take-back" (zero counts left out), or "no help". */
 export function assistText(a: AssistCounts): string {
-  const count = (n: number, word: string) => (n ? [`${n} ${word}${n === 1 ? "" : "s"}`] : []);
+  const count = (n: number, word: string) => (n ? [plural(n, word)] : []);
   const parts = [...count(a.hints, "hint"), ...count(a.takeBacks, "take-back"), ...count(a.rethinks, "tutor take-back")];
   return parts.length ? parts.join(", ") : "no help";
 }
@@ -109,7 +119,7 @@ export function estimateRankText(e: Pick<RankEstimate, "rating" | "floor">): str
 /** "Rank estimate 18k from 34 unassisted moves (3 hints, 2 take-backs)": a game's estimate and the help left out of it. */
 export function rankEstimateText(e: RankEstimate): string {
   const help = assistText(e);
-  return `Rank estimate ${estimateRankText(e)} from ${e.moves} unassisted move${e.moves === 1 ? "" : "s"}${help === "no help" ? "" : ` (${help})`}`;
+  return `Rank estimate ${estimateRankText(e)} from ${plural(e.moves, "unassisted move")}${help === "no help" ? "" : ` (${help})`}`;
 }
 
 const MINUTE = 60_000;

@@ -5,10 +5,11 @@
 // makes the KataGo queries.
 
 import { GoGame, movesFromLine } from "../engine/index.ts";
-import { moveGtp, toGtp, tryFromGtp } from "../shared/coords.ts";
+import { moveGtp, toGtp } from "../shared/coords.ts";
 import { rankToRating } from "../shared/rank.ts";
+import { round2 } from "../shared/text.ts";
 import type { AssistCounts, GameSettings, Gtp, Move, MoveRecord, RankEstimate, TakenBackMove } from "../shared/types.ts";
-import { BACKGROUND_PRIORITY, type Analysis, type AnalyzeOptions, type Position } from "./katago.ts";
+import { BACKGROUND_PRIORITY, humanMoveProbability, humanPolicyOptions, type Analysis, type AnalyzeOptions, type Position } from "./katago.ts";
 
 /** The human-SL profiles the likelihood is measured at, weakest first. */
 export const ESTIMATE_RANKS = ["20k", "18k", "15k", "12k", "10k", "8k", "5k", "3k", "1k", "1d", "3d", "5d", "9d"] as const;
@@ -71,13 +72,6 @@ export function rankSamples(settings: GameSettings, moves: readonly MoveRecord[]
   return samples;
 }
 
-/** Index of a GTP move in a policy array (y * size + x, y = 0 at the top; size*size = pass). */
-export function policyIndex(move: Gtp, size: number): number {
-  const point = tryFromGtp(move, size);
-  if (point === undefined) throw new Error(`"${move}" is not a point on a ${size}×${size} board`);
-  return point ? point.y * size + point.x : size * size;
-}
-
 /** Summed log-probability of the moves under each profile. `probs[i][j]`: move i's probability under profile j. */
 export function logLikelihoods(probs: readonly (readonly number[])[], profiles: number, floor = POLICY_FLOOR): number[] {
   const ll = new Array<number>(profiles).fill(0);
@@ -103,11 +97,10 @@ export function peakRating(ratings: readonly number[], ll: readonly number[]): n
 }
 
 /** The maximum-likelihood rank for these move probabilities (one row per move, one column per profile), or null without moves. */
-export function fitRank(probs: readonly (readonly number[])[], ratings: readonly number[] = ESTIMATE_RATINGS): { rating: number; floor: boolean; logLikelihood: number[] } | null {
+export function fitRank(probs: readonly (readonly number[])[], ratings: readonly number[] = ESTIMATE_RATINGS): { rating: number; floor: boolean } | null {
   if (probs.length === 0) return null;
-  const ll = logLikelihoods(probs, ratings.length);
-  const rating = Math.round(peakRating(ratings, ll) * 100) / 100;
-  return { rating, floor: rating <= ratings[0]!, logLikelihood: ll };
+  const rating = round2(peakRating(ratings, logLikelihoods(probs, ratings.length)));
+  return { rating, floor: rating <= ratings[0]! };
 }
 
 /** What the estimate needs from KataGo. */
@@ -131,15 +124,8 @@ export async function movePolicies(engine: PolicyEngine, samples: readonly RankS
       const [i, j] = job;
       const sample = samples[i]!;
       try {
-        const analysis = await engine.analyze(sample.position, {
-          maxVisits: 1,
-          includePolicy: true,
-          overrideSettings: { humanSLProfile: `rank_${ranks[j]}` },
-          priority: BACKGROUND_PRIORITY,
-        });
-        const policy = analysis.humanPolicy;
-        if (!policy) throw new Error("KataGo returned no humanPolicy; is the human model loaded?");
-        probs[i]![j] = Math.max(0, policy[policyIndex(sample.move, sample.position.size)] ?? 0);
+        const analysis = await engine.analyze(sample.position, humanPolicyOptions(ranks[j]!, { priority: BACKGROUND_PRIORITY }));
+        probs[i]![j] = humanMoveProbability(analysis, sample.move, sample.position.size);
       } catch (err) {
         failed = true;
         throw err;

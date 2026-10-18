@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { round2 } from "../../src/shared/text.ts";
 import {
   applyEstimate,
   applyGame,
@@ -151,8 +152,6 @@ function game(over: Partial<FinishedGame> & { won?: boolean; humanMoves?: number
     ...rest,
   };
 }
-
-const round2 = (n: number) => Math.round(n * 100) / 100;
 
 function estimateAt(rating: number, moves: number): RankEstimate {
   return { rating, floor: rating <= 10, moves, hints: 0, takeBacks: 0, rethinks: 0 };

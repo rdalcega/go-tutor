@@ -113,7 +113,7 @@ position was answered (KataGo's, or a tutor `say`/`show`/`mark` after a hint req
 learner's turn), `"retry"`/`"rethink"` when it replaces a taken-back move, `"shown"` when the tutor
 drew on that position on the learner's turn (or KataGo's hint circled a point), even if the learner
 hid the drawing. Help is kept per position (move count) and cleared by the next move or take-back; it
-is saved with the game (`SavedGame.help`, and `hintAskedAt` for a hint the tutor hasn't answered), so
+is saved with the game (`SavedGame.help`, with `hintAsked` for a hint the tutor hasn't answered), so
 a restart before the move still counts it as assisted.
 
 **Restart.** `restoreLastGame` picks up the newest unfinished game with its chat, tags, first
@@ -460,8 +460,9 @@ refutation after the second miss.
 - **Running in the server**: the controller owns a `ProblemGenerator` (`startGeneration()` from
   `index.ts` at startup; it starts the first batch when there is none). It runs while KataGo is
   ready and the learner isn't using it: nothing they wait on in flight (move eval, bot move,
-  scoring, hint, problem check) and 10 s (`LEARNER_ACTIVE_MS`) since their last action or a tutor
-  command that needs KataGo (`new_game`, `start_problem`, `rethink`, `resume`; a `say` or `tag`
+  scoring, hint, problem check) and 10 s (`LEARNER_ACTIVE_MS`) since the learner's or the tutor's
+  last action that needs KataGo (a move, a hint, a take-back, Continue, a new game, a problem,
+  `rethink`, `resume`; a chat line, a level or judge change, hiding a drawing, a `say` or a `tag`
   doesn't). Each of those also cancels the generator's query in flight (`AbortSignal`, KataGo's
   `terminate`; a terminated query's slot frees after 10 s even if KataGo never answers it), so the
   learner's work never waits behind a 1600-visit search; the cancelled step runs again later, and a

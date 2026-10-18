@@ -1,6 +1,6 @@
 import type { Board, Color, Move, MoveRecord, Point } from "../shared/types.ts";
-import { inBounds, tryFromGtp } from "../shared/coords.ts";
-import { boardStones, cloneBoard, emptyBoard, getCell, groupAt, handicapPoints, neighbors, opponent, positionKey, setCell } from "./board.ts";
+import { gtpMove, inBounds } from "../shared/coords.ts";
+import { boardStones, cloneBoard, emptyBoard, getCell, groupAt, handicapStones, neighbors, opponent, positionKey, setCell } from "./board.ts";
 
 export type IllegalReason = "occupied" | "suicide" | "ko" | "not_your_turn" | "game_over" | "off_board";
 
@@ -43,10 +43,7 @@ export class GoGame {
     this.size = size;
     this.komi = komi;
     this.handicap = handicap;
-    const stones = [
-      ...handicapPoints(size, handicap).map((point) => ({ color: "B" as Color, point })),
-      ...(setup.stones ?? []),
-    ];
+    const stones = [...handicapStones(size, handicap), ...(setup.stones ?? [])];
     this.grid = emptyBoard(size);
     for (const s of stones) {
       if (!inBounds(s.point, size)) throw new RangeError(`Setup stone (${s.point.x}, ${s.point.y}) is off the board`);
@@ -221,9 +218,7 @@ export class GoGame {
 export function movesFromLine(setup: { size: number; handicap: number }, line: readonly string[]): Move[] {
   let color: Color = setup.handicap >= 2 ? "W" : "B";
   return line.map((gtp) => {
-    const point = tryFromGtp(gtp, setup.size);
-    if (point === undefined) throw new Error(`"${gtp}" is not a point on a ${setup.size}×${setup.size} board`);
-    const move: Move = point ? { color, point } : { color, pass: true };
+    const move = gtpMove(gtp, color, setup.size);
     color = opponent(color);
     return move;
   });

@@ -25,7 +25,7 @@ import { createInterface } from "node:readline";
 import { delimiter, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { opponent } from "../engine/board.ts";
-import { toGtp } from "../shared/coords.ts";
+import { toGtp, tryFromGtp } from "../shared/coords.ts";
 import { toHumanSLProfile } from "../shared/rank.ts";
 import type { AtLevelEval, Color, Gtp, MoveEval } from "../shared/types.ts";
 
@@ -167,6 +167,30 @@ export function policyIndexToGtp(index: number, size: number): Gtp {
   return toGtp({ x: index % size, y: Math.floor(index / size) }, size);
 }
 
+/** Index of a GTP move in a policy array (y * size + x, y = 0 at the top; size*size = pass). Throws for a point off the board. */
+export function policyIndex(move: Gtp, size: number): number {
+  const point = tryFromGtp(move, size);
+  if (point === undefined) throw new Error(`"${move}" is not a point on a ${size}×${size} board`);
+  return point ? point.y * size + point.x : size * size;
+}
+
+/** The query that reads the human-SL policy at `rank` (one visit: no search), with any further options. */
+export function humanPolicyOptions(rank: string, extra: AnalyzeOptions = {}): AnalyzeOptions {
+  return { ...extra, maxVisits: 1, includePolicy: true, overrideSettings: { ...extra.overrideSettings, humanSLProfile: toHumanSLProfile(rank) } };
+}
+
+/** The human-SL policy of an analysis (size*size+1 entries, the last for pass; -1 = illegal); throws when the human model wasn't loaded. */
+export function humanPolicyOf(analysis: Pick<Analysis, "humanPolicy">, size: number): number[] {
+  const human = analysis.humanPolicy;
+  if (!human || human.length !== size * size + 1) throw new Error("KataGo response has no humanPolicy; is the human model loaded?");
+  return human;
+}
+
+/** The human-SL probability of `move` in an analysis made with the human policy (0 for an illegal move). */
+export function humanMoveProbability(analysis: Pick<Analysis, "humanPolicy">, move: Gtp, size: number): number {
+  return Math.max(0, humanPolicyOf(analysis, size)[policyIndex(move, size)] ?? 0);
+}
+
 /**
  * Picks the bot's move from a policy-bearing analysis. Pure, for testing.
  * Passes when pass is the human policy's argmax or the regular policy strongly prefers it;
@@ -177,14 +201,11 @@ export function chooseBotMove(
   size: number,
   random: () => number = Math.random,
 ): Gtp {
-  const human = analysis.humanPolicy;
-  if (!human || human.length !== size * size + 1) {
-    throw new Error("KataGo response has no humanPolicy; is the human model loaded?");
-  }
+  const human = humanPolicyOf(analysis, size);
   const passIndex = size * size;
   const regularPass = analysis.policy?.[passIndex] ?? 0;
-
-  if (topHumanMove(analysis, size) === "pass" || regularPass >= PASS_POLICY_THRESHOLD) return "pass";
+  const top = topHumanMove(analysis, size);
+  if (top === "pass" || regularPass >= PASS_POLICY_THRESHOLD) return "pass";
 
   const candidates: { index: number; p: number }[] = [];
   let total = 0;
@@ -195,14 +216,8 @@ export function chooseBotMove(
       total += p;
     }
   }
-  if (candidates.length === 0) {
-    // Every legal board move is under 1%: take the most likely one, or pass if none is legal.
-    let best = -1;
-    for (let i = 0; i < passIndex; i++) {
-      if (human[i]! > 0 && (best < 0 || human[i]! > human[best]!)) best = i;
-    }
-    return best < 0 ? "pass" : policyIndexToGtp(best, size);
-  }
+  // Every board move is under 1%: the most likely one.
+  if (candidates.length === 0) return top;
   let r = random() * total;
   for (const c of candidates) {
     r -= c.p;
@@ -261,10 +276,7 @@ export function moveEvalFrom(before: Analysis, after: Analysis, played?: Gtp): M
 
 /** The human policy's most likely move, pass included (entries of -1 are illegal). */
 export function topHumanMove(analysis: Pick<Analysis, "humanPolicy">, size: number): Gtp {
-  const human = analysis.humanPolicy;
-  if (!human || human.length !== size * size + 1) {
-    throw new Error("KataGo response has no humanPolicy; is the human model loaded?");
-  }
+  const human = humanPolicyOf(analysis, size);
   let best = -1;
   for (let i = 0; i < human.length; i++) {
     if (human[i]! >= 0 && (best < 0 || human[i]! > human[best]!)) best = i;

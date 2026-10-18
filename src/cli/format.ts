@@ -7,7 +7,7 @@ import { moveGtp, movePoint, toGtp } from "../shared/coords.ts";
 import { atLevelOf } from "../shared/judge.ts";
 import { ratingToRank } from "../shared/rank.ts";
 import { playedThreshold, sizeText, thresholdNum, thresholdText } from "../shared/threshold.ts";
-import { JUDGE_MODE_TEXT, TUTOR_LEVEL_TEXT, assistText, estimateRankText, rankEstimateText, round1, secondsUntil, takenBackTry, takenBackTryText } from "../shared/text.ts";
+import { JUDGE_MODE_TEXT, TUTOR_LEVEL_TEXT, assistText, estimateRankText, plural, rankEstimateText, round1, secondsUntil, takenBackTry, takenBackTryText } from "../shared/text.ts";
 import type {
   ChatMessage,
   Color,
@@ -69,7 +69,7 @@ function mistakesText(summary: GameSummary): string {
   const worst = summary.mistakes.reduce((a, b) => (b.pointLoss > a.pointLoss ? b : a));
   const firsts = summary.mistakes.filter((m) => m.takenBack !== undefined).length;
   const taken = firsts ? ` (${firsts} taken back)` : "";
-  return `${n} mistake${n === 1 ? "" : "s"}${taken}, worst move ${worst.moveNumber} (${num(worst.pointLoss)})`;
+  return `${plural(n, "mistake")}${taken}, worst move ${worst.moveNumber} (${num(worst.pointLoss)})`;
 }
 
 /** A game's rating change: its rank estimate, the rating and the next bot. */
@@ -103,7 +103,7 @@ function batchText(b: GenerationBatchStatus): string {
 /** KataGo time per board size: "9x9 12 min (5 games), 13x13 …". */
 function batchTimeText(b: GenerationBatchStatus): string {
   const total = b.sizes.reduce((sum, s) => sum + s.minutes, 0);
-  return `${b.sizes.map((s) => `${s.size}x${s.size} ${num(s.minutes)} min (${s.games} game${s.games === 1 ? "" : "s"})`).join(", ")}; ${num(total)} min in all`;
+  return `${b.sizes.map((s) => `${s.size}x${s.size} ${num(s.minutes)} min (${plural(s.games, "game")})`).join(", ")}; ${num(total)} min in all`;
 }
 
 /** Problem generation in `summary`: the batch in progress, or how close the next one is. */

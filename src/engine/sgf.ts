@@ -1,15 +1,8 @@
-import type { Color, GameResult, GameSettings, Move, MoveRecord, Point } from "../shared/types.ts";
-import { handicapPoints } from "./board.ts";
+import { isBoardSize, type Color, type GameResult, type GameSettings, type Move, type MoveRecord, type Point } from "../shared/types.ts";
+import { handicapStones } from "./board.ts";
 
 /** Comments keyed by move number; 0 is the root node (before the first move). */
 export type SgfComments = ReadonlyMap<number, string> | Readonly<Record<number, string>>;
-
-export interface SgfWriteOptions {
-  /** Extra setup stones beyond the settings' handicap (e.g. a problem position). */
-  setup?: readonly { color: Color; point: Point }[];
-  playerBlack?: string;
-  playerWhite?: string;
-}
 
 export interface SgfGame {
   size: number;
@@ -30,13 +23,7 @@ export interface SgfGame {
 
 const BOT_PREFIX = "KataGo";
 
-export function writeSgf(
-  settings: GameSettings,
-  moves: readonly (Move | MoveRecord)[],
-  result?: GameResult | null,
-  comments?: SgfComments,
-  options: SgfWriteOptions = {},
-): string {
+export function writeSgf(settings: GameSettings, moves: readonly (Move | MoveRecord)[], result?: GameResult | null, comments?: SgfComments): string {
   const commentMap = toMap(comments);
   const bot = `${BOT_PREFIX} ${settings.botRank}`;
   const root: [string, string[]][] = [
@@ -49,14 +36,11 @@ export function writeSgf(
     ["KM", [String(settings.komi)]],
   ];
   if (settings.handicap >= 2) root.push(["HA", [String(settings.handicap)]]);
-  root.push(["PB", [options.playerBlack ?? (settings.humanColor === "B" ? "Human" : bot)]]);
-  root.push(["PW", [options.playerWhite ?? (settings.humanColor === "W" ? "Human" : bot)]]);
+  root.push(["PB", [settings.humanColor === "B" ? "Human" : bot]]);
+  root.push(["PW", [settings.humanColor === "W" ? "Human" : bot]]);
   if (result) root.push(["RE", [formatResult(result)]]);
 
-  const setup = [
-    ...handicapPoints(settings.size, settings.handicap).map((point) => ({ color: "B" as Color, point })),
-    ...(options.setup ?? []),
-  ];
+  const setup = handicapStones(settings.size, settings.handicap);
   for (const color of ["B", "W"] as const) {
     const pts = setup.filter((s) => s.color === color).map((s) => toSgfPoint(s.point));
     if (pts.length > 0) root.push([`A${color}`, pts]);
@@ -126,7 +110,7 @@ export function parseSgf(text: string): SgfGame {
 
 /** Best-effort GameSettings for an SGF written by writeSgf (the bot is the player named "KataGo <rank>"). */
 export function settingsFromSgf(game: SgfGame): GameSettings | null {
-  if (game.size !== 9 && game.size !== 13 && game.size !== 19) return null;
+  if (!isBoardSize(game.size)) return null;
   const botName = [game.playerBlack, game.playerWhite].find((n) => n?.startsWith(`${BOT_PREFIX} `));
   if (!botName) return null;
   return {

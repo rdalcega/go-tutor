@@ -375,17 +375,20 @@ function harness(engine = selfPlayEngine(), store = tempStore(), extra: Partial<
   const chat: string[] = [];
   const mayRun = { value: true };
   const rating = { value: 10 };
-  const generator = new ProblemGenerator({
+  let generator: ProblemGenerator;
+  generator = new ProblemGenerator({
     engine,
     store,
     clock,
     log: () => {},
     rating: () => rating.value,
     mayRun: () => mayRun.value,
+    // As the controller's: every change is reported back to the generator.
     updateProblems: (change) => {
       const problems = store.loadProblems();
       const out = change(problems);
       store.saveProblems(problems);
+      generator.problemsChanged(problems);
       return out;
     },
     changed: () => {},
@@ -673,9 +676,11 @@ describe("generation in the controller", () => {
     expect(generation()).toHaveLength(1);
     expect(ctl.view().generation?.state).toBe("generating");
 
-    // The learner starts a game: the generation query is cancelled and generation waits.
-    ctl.newGame();
+    // A chat line needs no KataGo: generation goes on. The learner starting a game cancels its query, and generation waits.
     await ctl.handleAction({ type: "chat", text: "hi" });
+    await flush(10);
+    expect(generation()[0]!.opts?.signal?.aborted).toBe(false);
+    await ctl.handleAction({ type: "new_game" });
     await flush(10);
     expect(generation()[0]!.opts?.signal?.aborted).toBe(true);
     clock.advance(5000);

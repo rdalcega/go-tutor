@@ -6,7 +6,7 @@
 import { createHash } from "node:crypto";
 import { GoGame, emptyBoard, gameBefore, gameFromLine, opponent, positionKey, setCell } from "../engine/index.ts";
 import { toGtp, tryFromGtp } from "../shared/coords.ts";
-import { MAX_BOX } from "../shared/schedule.ts";
+import { MAX_BOX, freshSchedule } from "../shared/schedule.ts";
 import { colorName, round1 } from "../shared/text.ts";
 import type {
   Board,
@@ -24,10 +24,11 @@ import type {
   ProblemsResponse,
   TakenBackMove,
 } from "../shared/types.ts";
+import { nextNumber } from "./common.ts";
 import { BACKGROUND_PRIORITY, TRUSTED_CANDIDATE_VISITS, type Analysis, type AnalyzeOptions, type Position } from "./katago.ts";
 import { mistakeKey } from "./profile.ts";
 
-export { BOX_INTERVALS, MAX_BOX, resultOf, schedule, type ProblemResult } from "../shared/schedule.ts";
+export { BOX_INTERVALS, MAX_BOX, freshSchedule, resultOf, schedule, type ProblemResult } from "../shared/schedule.ts";
 
 /** A move within this many points of KataGo's best counts as a correct answer. */
 export const ANSWER_MARGIN = 1.0;
@@ -40,7 +41,6 @@ export const DEEP_VISITS = 1000;
 
 /** Where a problem from the learner's game comes from. `takenBack`: a first attempt that was taken back (its index in the game's `takenBack`). */
 export interface GameProblemSource {
-  kind?: "game";
   gameId: string;
   moveNumber: number;
   played: Gtp;
@@ -101,12 +101,12 @@ export interface Candidate {
 
 /** The learner's game and move a problem comes from, or undefined for a generated problem. */
 export function gameSource(p: Pick<StoredProblem, "source">): GameProblemSource | undefined {
-  return p.source && p.source.kind !== "generated" ? p.source : undefined;
+  return p.source && !("kind" in p.source) ? p.source : undefined;
 }
 
 /** A generated problem's self-play source, or undefined for a problem from the learner's game. */
 export function generatedSource(p: Pick<StoredProblem, "source">): GeneratedProblemSource | undefined {
-  return p.source?.kind === "generated" ? p.source : undefined;
+  return p.source && "kind" in p.source ? p.source : undefined;
 }
 
 /** What views, events and lists show of a generated problem's origin. */
@@ -251,17 +251,13 @@ export function problemFromMistake(m: MistakeSnapshot, id: string, now: number):
     source: { gameId: m.gameId, moveNumber: m.moveNumber, played: m.played, ...(m.takenBack !== undefined && { takenBack: m.takenBack }) },
     hash: positionHash(m.board, m.toPlay),
     createdAt: now,
-    box: 1,
-    due: now,
-    seen: 0,
-    solves: 0,
+    ...freshSchedule(now),
   };
 }
 
 /** The next free id for a problem from a game: p1, p2, … */
 export function nextProblemId(problems: readonly Pick<StoredProblem, "id">[]): string {
-  const max = Math.max(0, ...problems.map((p) => Number(/^p(\d+)$/.exec(p.id)?.[1] ?? 0)));
-  return `p${max + 1}`;
+  return `p${nextNumber(problems.map((p) => p.id), "p")}`;
 }
 
 /** Adds new problems, skipping any whose position (or, from the learner's game, source move: `mistakeKey`) is already a problem. */
