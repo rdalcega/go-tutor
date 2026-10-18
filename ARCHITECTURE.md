@@ -85,7 +85,8 @@ The contract for every boundary is `src/shared/types.ts`.
    - For a move played on the **Silent** tutor level (see "Tutor levels") none of this happens: the
      move is evaluated and recorded, and the bot replies.
 4. When not paused, the bot replies (with a small delay so it feels natural). Emit `move` (by bot).
-5. Game ends on two consecutive passes (score with KataGo ownership to remove dead stones) or resign.
+5. Game ends on two consecutive passes (score with KataGo ownership to remove dead stones) or resign
+   (a resignation waits for the verdict on a move still being evaluated, which then opens no moment).
    Build the `GameSummary` (mistakes categorized, taken-back first attempts included, the help the
    learner had), update the profile's tallies and stats, save the game, emit `game_end` (a rated
    game's `summary.rating` is `pending`, and the game id joins the profile's `estimating` list).

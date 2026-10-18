@@ -3,9 +3,9 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { GameController, MAX_MIGRATION_ATTEMPTS, MIGRATION_RETRY_MS } from "../../src/server/game.ts";
 import { BACKGROUND_PRIORITY } from "../../src/server/katago.ts";
-import { MigrationAborted, migrateRatingModel, reconstructGame } from "../../src/server/migrate.ts";
+import { MigrationAborted, migrateRatingModel, pairAttempts, reconstructGame } from "../../src/server/migrate.ts";
 import { defaultProfile, type Store } from "../../src/server/store.ts";
-import type { Profile, SavedGame, TutorEvent } from "../../src/shared/types.ts";
+import type { Profile, SavedGame, TakenBackMove, TutorEvent } from "../../src/shared/types.ts";
 import { FakeClock, FakeEngine, flush, tempStore } from "./fakes.ts";
 
 /** A human-SL policy that likes every move best at 10k (rating 20), less each rank away. */
@@ -108,6 +108,16 @@ describe("rating model migration", () => {
     expect(partial.complete).toBe(false);
     expect(partial.takenBack).toHaveLength(1);
     expect(partial.moves.every((r) => !r.assist)).toBe(true);
+  });
+
+  it("pairs the file's first attempts with the log's by move, position and order, not by index", () => {
+    const a: TakenBackMove = { moveNumber: 3, by: "human", ts: 1, before: ["E5", "J9"], record: { number: 3, move: { color: "B", point: { x: 2, y: 6 } }, captures: [] } };
+    const b: TakenBackMove = { ...a, moveNumber: 5, before: ["E5", "J9", "D4", "J8"] };
+    const file = [{ ...b, tag: { category: "tactics" as const } }, a, { ...a, tag: { category: "shape" as const } }];
+    // The log has the two identical tries at move 3 first; the second one gets the second file entry's tag.
+    expect(pairAttempts(file, [a, a, b]).map((t) => t?.tag?.category)).toEqual([undefined, "shape", "tactics"]);
+    expect(pairAttempts(file, [a, a, a]).map((t) => t?.tag?.category)).toEqual([undefined, "shape", undefined]);
+    expect(pairAttempts([], [a])).toEqual([undefined]);
   });
 
   it("takes the log's first attempts when it replays the game, with what the file knows of them", async () => {

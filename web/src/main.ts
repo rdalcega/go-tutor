@@ -215,9 +215,9 @@ function render(): void {
   renderResultRating();
 }
 
-/** The board before move `fromMove`, memoized by the moves that lead to it (a take-back and a different replay change it, not just the count). */
+/** The board before move `fromMove`, memoized by the moves that lead to it (a take-back and a different replay change it, not just the count) and whether the move is on the board at all. */
 function boardBefore(v: GameView, settings: GameSettings, fromMove: number): ReturnType<typeof positionBefore> {
-  const key = `${v.gameId}|${fromMove}|${gtpLine(v.moves.slice(0, fromMove - 1), settings.size).join(" ")}`;
+  const key = `${v.gameId}|${fromMove}|${fromMove <= v.moves.length}|${gtpLine(v.moves.slice(0, fromMove - 1), settings.size).join(" ")}`;
   if (beforeCache?.key !== key) beforeCache = { key, value: positionBefore(v.moves, settings, fromMove) };
   return beforeCache.value;
 }

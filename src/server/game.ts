@@ -240,6 +240,8 @@ export class GameController {
   private botFailures = 0;
   /** The human move whose evaluation is in flight. The bot waits for it, so a moment can't be skipped. */
   private evaluating: MoveRecord | null = null;
+  /** That evaluation's completion (resolved when none is in flight): a resignation waits for it. */
+  private evaluation: Promise<void> = Promise.resolve();
   private momentTimer: unknown = null;
   /** Mistakes whose teaching moment has opened (or was dismissed before a restart). */
   private readonly momentShown = new WeakSet<MoveRecord>();
@@ -476,7 +478,7 @@ export class GameController {
     }
     if (this.status !== "playing") return;
     if (human && !human.eval && !this.evaluating) {
-      void this.evaluateHumanMove(human);
+      this.evaluation = this.evaluateHumanMove(human);
       return;
     }
     void this.prefetch();
@@ -873,7 +875,7 @@ export class GameController {
       // The bot passed and so did the human: nothing left to evaluate.
       void this.finishByScore();
     } else {
-      void this.evaluateHumanMove(record);
+      this.evaluation = this.evaluateHumanMove(record);
     }
     this.changed();
   }
@@ -1389,10 +1391,16 @@ export class GameController {
 
   // --- game end ------------------------------------------------------------------------
 
-  private resign(): void {
+  private async resign(): Promise<void> {
     const { settings } = this.requireGame();
     if (this.result) throw new UserError("The game is already over.");
-    this.finish({ winner: opponent(settings.humanColor), margin: 0, reason: "resign" });
+    // The move still being evaluated keeps its verdict (it may be the blunder they resign over):
+    // with the result already in, its arrival opens no moment and the bot doesn't reply.
+    this.result = { winner: opponent(settings.humanColor), margin: 0, reason: "resign" };
+    this.status = "finished";
+    this.changed();
+    await this.evaluation;
+    this.finish(this.result);
   }
 
   private async finishByScore(): Promise<void> {

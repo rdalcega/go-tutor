@@ -8,7 +8,7 @@
 // fails partway it writes nothing and throws `MigrationAborted`, and the controller tries again.
 
 import { gameFromLine, movesFromLine, writeSgf } from "../engine/index.ts";
-import { gtpLine, movePoint, samePoint } from "../shared/coords.ts";
+import { gtpLine, movePoint, pointKey, samePoint } from "../shared/coords.ts";
 import { ratingToRank } from "../shared/rank.ts";
 import { assistText, rankEstimateText } from "../shared/text.ts";
 import { playedThreshold } from "../shared/threshold.ts";
@@ -67,10 +67,24 @@ export interface Reconstruction {
 
 const sameMove = (a: Move, b: Move) => a.color === b.color && ("pass" in a ? "pass" in b : samePoint(movePoint(a), movePoint(b)));
 
-/** The attempt in `list` that is `t` (same move number, move and position): the file's and the log's lists needn't align by index. */
-function sameAttempt(list: readonly TakenBackMove[], t: TakenBackMove): TakenBackMove | undefined {
-  const line = t.before.join(" ");
-  return list.find((k) => k.moveNumber === t.moveNumber && sameMove(k.record.move, t.record.move) && k.before.join(" ") === line);
+/** What makes a first attempt the one it is: its move number, move and position. */
+function attemptKey(t: TakenBackMove): string {
+  const point = movePoint(t.record.move);
+  return `${t.moveNumber}|${t.record.move.color}${point ? pointKey(point) : "pass"}|${t.before.join(" ")}`;
+}
+
+/**
+ * For each of `attempts`, the entry of `list` that is the same first attempt (`attemptKey`), or
+ * undefined: the file's and the log's lists needn't align by index, and identical repeated tries
+ * (the same move taken back twice from one position) pair up in order.
+ */
+export function pairAttempts(list: readonly TakenBackMove[], attempts: readonly TakenBackMove[]): (TakenBackMove | undefined)[] {
+  const queues = new Map<string, TakenBackMove[]>();
+  for (const k of list) {
+    const key = attemptKey(k);
+    queues.set(key, [...(queues.get(key) ?? []), k]);
+  }
+  return attempts.map((t) => queues.get(attemptKey(t))?.shift());
 }
 
 /** A copy of the first attempt `t`, with what the file knows of it (`old`: its eval, category and tag). */
@@ -163,7 +177,7 @@ export function reconstructGame(saved: SavedGame, events: readonly TutorEvent[])
   // log yields. All copies: the file's objects are left alone.
   const known = saved.takenBack ?? [];
   const firsts = complete
-    ? takenBack.map((t) => copyAttempt(t, sameAttempt(known, t)))
+    ? pairAttempts(known, takenBack).map((old, i) => copyAttempt(takenBack[i]!, old))
     : known.length
       ? known.map((t) => copyAttempt(t))
       : consistent
@@ -294,7 +308,7 @@ export async function migrateRatingModel(deps: MigrationDeps): Promise<Migration
 
   // 1. KataGo work, nothing written: rebuild each game, categorize its taken-back mistakes, estimate its rank.
   const reports: GameReport[] = [];
-  const rebuiltGames: { saved: SavedGame; rebuilt: Reconstruction; threshold: number; report: GameReport; summary: GameSummary }[] = [];
+  const rebuiltGames: { saved: SavedGame; rebuilt: Reconstruction; threshold: number; report: GameReport }[] = [];
   for (const saved of games) {
     const rebuilt = reconstructGame(saved, events);
     // The game's own threshold on its board; older games used the profile's threshold on every size.
@@ -331,7 +345,7 @@ export async function migrateRatingModel(deps: MigrationDeps): Promise<Migration
       estimate,
     };
     reports.push(report);
-    rebuiltGames.push({ saved, rebuilt, threshold, report, summary: summaryWithFirstAttempts(saved, saved.summary!, rebuilt, threshold) });
+    rebuiltGames.push({ saved, rebuilt, threshold, report });
   }
   abortIfFailed("the rank estimates");
 
@@ -339,10 +353,10 @@ export async function migrateRatingModel(deps: MigrationDeps): Promise<Migration
   // scratch copy: they are added to the stored problems when everything is written.
   const scratch = store.loadProblems();
   const candidates: StoredProblem[] = [];
-  for (const { saved, rebuilt, summary } of rebuiltGames) {
-    const firsts = summary.mistakes.filter((m) => m.takenBack !== undefined);
+  for (const { saved, rebuilt, threshold } of rebuiltGames) {
+    const firsts = firstAttemptMistakes(rebuilt.takenBack, saved.settings.size, threshold);
     if (firsts.length === 0) continue;
-    const only = { ...summary, mistakes: firsts };
+    const only = { ...saved.summary!, mistakes: firsts };
     const added = await generateProblems(
       { gameId: saved.id, settings: saved.settings, moves: rebuilt.moves, summary: only, takenBack: rebuilt.takenBack },
       {
@@ -391,19 +405,18 @@ export async function migrateRatingModel(deps: MigrationDeps): Promise<Migration
 
   // 3. Writes, with no await in between: back up, then the games, the profile and the problems.
   const backupDir = store.backup(["profile.json", "problems.json", ...games.map((g) => `games/${g.id}.json`)], deps.now());
-  for (const entry of rebuiltGames) {
-    const { saved, rebuilt, threshold } = entry;
+  const written: { saved: SavedGame; rebuilt: Reconstruction; threshold: number; summary: GameSummary }[] = [];
+  for (const { saved, rebuilt, threshold } of rebuiltGames) {
     // The file as it is now: a tag the tutor made while KataGo worked is in its summary (a board
     // move) or on its first attempts, so the summary written is built from it, not the snapshot.
     const current = store.loadGame(saved.id) ?? saved;
-    for (const t of rebuilt.takenBack) {
-      const tag = sameAttempt(current.takenBack ?? [], t)?.tag;
-      if (tag) t.tag = tag;
-    }
+    pairAttempts(current.takenBack ?? [], rebuilt.takenBack).forEach((now, i) => {
+      if (now?.tag) rebuilt.takenBack[i]!.tag = now.tag;
+    });
     const summary = summaryWithFirstAttempts(current, current.summary ?? saved.summary!, rebuilt, threshold);
     const change = changes.get(saved.id);
     if (change) summary.rating = change;
-    entry.summary = summary;
+    written.push({ saved, rebuilt, threshold, summary });
     const updated: SavedGame = { ...current, moves: rebuilt.moves, takenBack: rebuilt.takenBack, assistance: rebuilt.assistance, summary };
     store.saveGame(updated, store.loadSgf(saved.id) ?? writeSgf(saved.settings, saved.moves, saved.result, {}));
   }
@@ -418,7 +431,7 @@ export async function migrateRatingModel(deps: MigrationDeps): Promise<Migration
   profile.ratingModel = 2;
   for (const g of games) clearEstimating(profile, g.id);
   const present = new Set(profile.recentMistakes.map(mistakeKey));
-  for (const { saved, rebuilt, threshold, summary } of rebuiltGames) {
+  for (const { saved, rebuilt, threshold, summary } of written) {
     for (const m of summary.mistakes) {
       if (m.takenBack === undefined || !m.category || present.has(mistakeKey({ gameId: saved.id, ...m }))) continue;
       const t = rebuilt.takenBack[m.takenBack]!;

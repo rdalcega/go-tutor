@@ -765,6 +765,22 @@ describe("GameController", () => {
     expect(again.view().moves[0]!.eval).toBeDefined();
   });
 
+  it("resigning while the last move is evaluated keeps its verdict in the summary, with no moment", async () => {
+    await startGame();
+    engine.hold = true;
+    engine.lossAfter(["C3"], 6);
+    ctl.play(C3);
+    const resigned = ctl.handleAction({ type: "resign" });
+    expect(ctl.view()).toMatchObject({ status: "finished", result: { reason: "resign" } });
+    engine.releaseAll();
+    await resigned;
+    await flush();
+    expect(ctl.view().moment).toBeNull();
+    expect(ctl.view().summary?.mistakes).toMatchObject([{ moveNumber: 1, move: "C3", pointLoss: 6 }]);
+    expect(types()).toEqual(["game_start", "move", "game_end"]);
+    expect(store.lastGame({ finished: true })!.moves[0]!.eval?.pointLoss).toBe(6);
+  });
+
   it("a restart during a teaching moment opens it again instead of letting the bot move", async () => {
     await startGame();
     engine.lossAfter(["C3"], 14.8);
