@@ -40,6 +40,8 @@ SESSION FLOW
                  first attempt ask what they see (say); after the answer is shown, explain it with show.
                  "review g12 2/4" on the line: the 2nd of 4 problems in a review of game g12's mistakes;
                  the learner's Next goes on through it, and after the last it ends.
+                 Once answered, the learner may play the problem out against KataGo (unjudged, not in
+                 the stream): show/mark are refused, and say only answers their chat, once per message.
   8. on BATCH:   a batch of generated practice problems finished (see GENERATED PROBLEMS); mention
                  it when it fits, not in the middle of a game on Silent.
   GAME_START, PROBLEM_START, BATCH finished and FALLBACK need no answer of their own: watch prints

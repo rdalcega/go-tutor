@@ -21,7 +21,7 @@ The contract for every boundary is `src/shared/types.ts`.
 |---|---|
 | `src/shared/types.ts` | All cross-boundary types. |
 | `src/shared/coords.ts` | `toGtp(point, size)`, `fromGtp(gtp, size)` (columns `A`–`T` skipping `I`; row 1 at the bottom), `movePoint(move)`, `moveGtp(move, size)`, `samePoint`. |
-| `src/shared/allowed.ts` | `allowedActions(state)`: the browser actions the server accepts in a given state (mode, status, result, moment, turn, engine, tutor, problem, drawing on the board), used by the controller and the UI mock; `retryBlocked` (Try again) and `takeBackBlocked` (Take back) say why a take-back can't happen. |
+| `src/shared/allowed.ts` | `allowedActions(state)`: the browser actions the server accepts in a given state (mode, status, result, moment, turn, engine, tutor, problem and its play-out, drawing on the board), used by the controller and the UI mock; `retryBlocked` (Try again) and `takeBackBlocked` (Take back) say why a take-back can't happen. |
 | `src/shared/text.ts` | Wording shared by server, CLI and UI: `colorName`, `categoryLabel`, `round1`, `formatScore`, `TUTOR_LEVEL_TEXT` (each level's label, the learner's description and the tutor's), `tutorLevelChangedText` (the chat line for a level change), `JUDGE_MODE_TEXT` and `judgeModeChangedText` (the same for judge modes), `comeBackText` (when a problem is due again), `assistText` ("3 hints, 2 take-backs"), `estimateRankText` and `rankEstimateText` ("Rank estimate 18k from 34 unassisted moves (3 hints, 2 take-backs)"). |
 | `src/shared/schedule.ts` | Leitner scheduling for practice problems (`BOX_INTERVALS`, `MAX_BOX`, `resultOf`, `nextBox`, `schedule`), used by the server's problems and the UI mock. |
 | `src/shared/threshold.ts` | The mistake threshold by board size: `THRESHOLD_MULTIPLIERS` (9×9 ×1, 13×13 ×1.5, 19×19 ×2), `thresholdMultiplier(size)`, `thresholdFor(base, size)` (the profile's 9×9 threshold on a board), `sizeText`. Used by the controller, the profile's adaptation, the CLI and the UI so they agree. |
@@ -30,7 +30,7 @@ The contract for every boundary is `src/shared/types.ts`.
 | `src/engine/` | Pure Go rules: `GoGame` class (play/pass/undo, captures, suicide illegal, positional superko; `before(n)` copies the game before move n from its history, `fromBoard` sets up a position), `gameBefore(settings, moves, n)` (replays a saved move list), `movesFromLine`/`gameFromLine` (a GTP move line, colors alternating from the first mover, e.g. a taken-back move's position), `boardFromDiagram`, area scoring with komi, dead-stone input from KataGo ownership, `toAscii(board)`, SGF read/write. No I/O. |
 | `src/server/katago.ts` | Long-lived `katago analysis` child process speaking the JSON analysis protocol; query queue with ids and priorities (`BACKGROUND_PRIORITY` −10, `GENERATION_PRIORITY` −20); `analyze(position, opts)` (an `AbortSignal` in `opts.signal` cancels a query: a waiting one leaves the queue, one KataGo is searching gets KataGo's `terminate` action; either rejects with an `AbortError`), `botMove(position, rank)`, `ownership`. |
 | `src/server/game.ts` | `GameController`: owns the current game, turns, bot replies, per-move evals, teaching-moment detection, pause + fallback timer, chat log, the profile and problem writes, producing `GameView` (with the actions it accepts) and `TutorEvent`s. Takes an engine interface so tests can use a fake. |
-| `src/server/practice.ts` | `PracticeSession`: the practice problem on the board (attempts, judging against KataGo, its overlay and view) while the game waits underneath; the controller delegates to it in problem mode and writes the problem's progress. |
+| `src/server/practice.ts` | `PracticeSession`: the practice problem on the board (attempts, judging against KataGo, its overlay and view) while the game waits underneath, and its play-out once answered (`playoutMove` picks KataGo's move); the controller delegates to it in problem mode and writes the problem's progress. |
 | `src/server/common.ts` | What the controller and the session share: `UserError`, the clock, and turning GTP into ghost stones and marks. |
 | `src/server/bridge.ts` | Tutor bridge: event sequence numbers, `data/events.jsonl` append log, SSE fan-out to `tutor watch` connections, `tutorAttached` tracking, applying `TutorCommand`s to the controller. |
 | `src/server/store.ts` | Persistence under `data/` (path overridable with `GO_TUTOR_DATA`): `games/<id>.sgf` + `games/<id>.json` (settings, moves with evals, result, summary), `games/index.json` (creation time and finished flag per game, so finding the last game reads one file; read and checked against the files once at startup, then kept in memory), `profile.json`, `problems.json`, `generation.json` (generated batches and the one in progress), and `backup(paths)` (copies data files into a new `backup-<time>/` folder before the migration rewrites them). The controller writes a game at the end of the tick that changed it (one action's burst of changes is one write), and at once for a new game, at game end and on shutdown (SIGINT, SIGTERM, SIGHUP, beforeExit). |
@@ -200,8 +200,9 @@ emits `hint_request` (with the current ASCII board) and adds the text to the cha
 attached the server answers with KataGo's top move marked as a hint.
 
 `chat` from the user emits `user_message`. On a practice problem it carries `problemId` (and no moment
-id), since the message is about the problem on the board, not the game waiting underneath. With no
-tutor attached, the server adds a system reply saying the tutor isn't connected.
+id), since the message is about the problem on the board, not the game waiting underneath, and
+`playout: true` while the learner plays the problem out (the tutor may answer it with one `say`).
+With no tutor attached, the server adds a system reply saying the tutor isn't connected.
 
 ## Tutor bridge
 
@@ -447,6 +448,34 @@ variation's numbers, hidden under a drawn stone or mark); `tutor state` lists th
   new game or any other problem start ends the review. Each problem's `ProblemView.review` and
   `problem_start.review` (`{ gameId, index, total }`, 1-based) say where it stands. Results are
   scheduled like any other attempt.
+- **Playing a problem out**: once a problem is answered (solved or out of attempts, and not while an
+  attempt is being checked), `playout_start` lets the learner keep playing from it against KataGo to
+  see how it unfolds. Not the default: the problem card offers it only then.
+  - State (`PracticeSession`, never saved): one `line` of GTP moves from the problem position (the
+    learner first), a `cursor` (moves of the line on the board), a `GoGame` at the cursor (built from
+    the problem position and stepped with `play`/`undo`, so ko and passes count from the problem), a
+    `gen` counter and `thinking`. It starts at the problem position with the answer's drawn line
+    ahead (the learner's correct move and KataGo's follow-up, or KataGo's answer); the answer's
+    drawing goes and comes back with `playout_exit` (Done).
+  - `playout_back` / `playout_forward` step one move; Back also works while KataGo thinks (its answer
+    is dropped) and after two passes. Forward replays the next move of the line; at the end of the
+    line it asks KataGo for the side to play, so on the learner's turn KataGo moves for them (one move
+    per press, no automatic reply). The learner's `play` or `pass` (their turn only, not while KataGo
+    thinks, not after two passes) drops the moves that were ahead, only once the move is legal, and
+    KataGo answers it unless that pass ended it. No branches are kept.
+  - KataGo's move: a plain `analyze` of the play-out position (main net, no `humanSLProfile`, 600
+    visits), never `botMove`, whatever the learner's level; `playoutMove` takes its best candidate that
+    is legal in our rules, or a pass. The attempts' cached analyses are reused when they match; others
+    are not cached. Every way a request ends checks the session, the play-out and `gen`, so a step,
+    play, exit or problem change meanwhile drops the answer, a failure included; a failure otherwise
+    says so in the chat, and Forward tries again.
+  - Nothing is judged or recorded: the moves carry no eval, and the play-out emits no event, writes
+    no problem, profile or rating. The view shows the play-out's board, side to move, `moves` (plain
+    records) and captures, with `ProblemView.playout` (`line`, `cursor`, `thinking`, `over`).
+  - The tutor stays out: `show` and `mark` are refused, `say` only answers a learner's chat message
+    sent during the play-out (once per message), a fresh `watch` doesn't get the problem's
+    `problem_start` replayed, and `watch` attaches no state to a `problem_start` whose problem is
+    being played out. `retry` and `take_back` point to Back; resign and hints are refused as in problems.
 
 ## Generated problems
 
@@ -642,6 +671,10 @@ Next problem / Back to playing buttons. A finished game with practice problems s
 (3)" in the result dialog and in the controls; during the review the card's heading is
 "Review 2/3 · Shape · move 20" and Next reads "Next mistake", then "Finish review" on the last. The
 board takes clicks and shows the hover stone as in games; Pass, Take back, Hint and Resign are disabled.
+Once the problem is answered the card offers "Play it out": a play-out row ("Move 3 of 5 · nothing
+here is judged") with ◀ Back, Forward ▶ (its tooltip says when KataGo moves for the learner) and
+Done replaces the verdict, the Left and Right arrow keys step, Pass (P) works on the learner's turn,
+and the play-out's stones are numbered from 1 (the last move has the marker).
 Live updates arrive over `GET /api/events` (SSE of `GameView`; each connection starts with the current
 view, and `GET /api/state` is fetched only if the stream never opens). Controls follow the view's
 `allowed` actions. The canvas draws the scene into an offscreen layer once per change; the hover
