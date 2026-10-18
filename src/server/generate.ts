@@ -18,6 +18,7 @@ import { freshSchedule } from "../shared/schedule.ts";
 import { colorName, round1, round2 } from "../shared/text.ts";
 import {
   BOARD_SIZES,
+  isBoardSize,
   type Board,
   type BoardSize,
   type Color,
@@ -203,15 +204,23 @@ export function emptyGeneration(): GenerationFile {
 export function normalizeGeneration(file: GenerationFile): string | null {
   const last = file.batches.at(-1);
   const unfinished = last && !last.finishedAt ? last : null;
-  const named = file.progress?.batchId ?? "no batch";
+  const p = file.progress;
+  const named = p?.batchId ?? "no batch";
   if (!unfinished) {
-    if (file.progress === null) return null;
+    if (p === null) return null;
     file.progress = null;
     return `progress for ${named} dropped`;
   }
-  if (file.progress?.batchId === unfinished.id) return null;
-  file.progress = { batchId: unfinished.id, game: null, reserve: [] };
-  return `progress for ${named} replaced: resuming ${unfinished.id}`;
+  if (p?.batchId !== unfinished.id) {
+    file.progress = { batchId: unfinished.id, game: null, reserve: [] };
+    return `progress for ${named} replaced: resuming ${unfinished.id}`;
+  }
+  // The right batch, but a damaged entry (a hand edit, a torn write): it resumes from a new game, keeping a reserve that is a list.
+  const game = p.game ?? null;
+  const gameOk = game === null || (isBoardSize(game.size) && (game.weaker === "B" || game.weaker === "W") && Array.isArray(game.moves));
+  if (gameOk && Array.isArray(p.reserve)) return null;
+  file.progress = { batchId: p.batchId, game: null, reserve: Array.isArray(p.reserve) ? p.reserve : [] };
+  return `damaged progress for ${named} reset`;
 }
 
 function perSize<T>(make: (size: BoardSize) => T): Record<BoardSize, T> {

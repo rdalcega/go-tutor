@@ -514,6 +514,7 @@ export class GameController {
     // Help for the move the learner hadn't played yet (a hint, a drawing, a take-back) still counts for it.
     if (saved.help) this.help = { at: saved.help.at, kinds: new Set(saved.help.kinds), ...(saved.help.hintAsked && { hintAsked: true }) };
     this.questionOpen = saved.questionOpen === true;
+    this.overlay = saved.overlay ?? null;
     this.chat = saved.chat ?? [];
     this.nextChatId = Math.max(this.nextChatId, nextNumber(this.chat.map((m) => m.id), "c"));
     this.system(`Picked up where you left off: game ${saved.id}, move ${game.moves.length}.`);
@@ -723,8 +724,12 @@ export class GameController {
   }
 
   private set activeOverlay(overlay: Overlay | null) {
-    if (this.practice) this.practice.overlay = overlay;
-    else this.overlay = overlay;
+    if (this.practice) {
+      this.practice.overlay = overlay;
+    } else {
+      this.overlay = overlay;
+      this.save(); // the game's drawing survives a restart
+    }
   }
 
   // --- game lifecycle ----------------------------------------------------------
@@ -957,21 +962,17 @@ export class GameController {
   }
 
   /**
-   * After a restart, the open moment as it was saved rather than a fresh one (its event is already
-   * in the log: a fresh `watch` finds it there). A moment already answered stays answered, waiting
-   * for the learner's Continue: KataGo's fallback is drawn again without repeating its chat message;
-   * the tutor's drawing is gone, but their words are in the chat. A moment the tutor was still on,
-   * or was about to get (it had a deadline), waits for the tutor to reconnect as after a dropped
-   * connection: `watch` shows it waiting again, and KataGo answers if the wait runs out. One nobody
-   * was handling falls back at once (resumeTurn settles it).
+   * After a restart, the open moment as it was saved, its drawing included (its event is already in
+   * the log: a fresh `watch` finds it there). The tutor's moment stays the tutor's, as after a dropped
+   * connection, and KataGo's fallback stays answered; both wait for the learner's Continue. A moment
+   * that was waiting for the tutor waits again (a fresh TUTOR_TIMEOUT_MS: `watch` reconnects with
+   * its cursor, and the claim it was about to make still works); one nobody was handling falls back
+   * at once (resumeTurn settles it).
    */
   private restoreMoment(record: MoveRecord, saved: TeachingMoment): void {
     const { deadline, ...rest } = saved;
-    const fallback = saved.state === "fallback";
-    const answered = fallback || (saved.state === "tutor" && saved.awaitingLearner === true);
-    this.openMoment(record, answered ? rest : { ...rest, state: "waiting" });
-    if (!answered && (saved.state === "tutor" || deadline !== undefined)) this.waitForTutor();
-    if (fallback && record.eval) this.overlay = this.fallbackFor(this.game!, record, record.eval).overlay;
+    this.openMoment(record, rest);
+    if (saved.state === "waiting" && deadline !== undefined) this.waitForTutor();
   }
 
   /** The game pauses on `moment`, about `record` (the last move): it won't open again for that move. */
@@ -1871,6 +1872,7 @@ export class GameController {
       tags: this.tags,
       heuristics: this.heuristics,
       moment: this.moment,
+      ...(this.overlay && { overlay: this.overlay }),
       takenBack: this.takenBack,
       assistance: this.assistance,
       ...(this.help && { help: { at: this.help.at, kinds: [...this.help.kinds], ...(this.help.hintAsked && { hintAsked: true as const }) } }),

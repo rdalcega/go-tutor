@@ -192,16 +192,20 @@ export function humanPolicyOptions(rank: string, extra: AnalyzeOptions = {}): An
   return { ...extra, maxVisits: 1, includePolicy: true, overrideSettings: { ...extra.overrideSettings, humanSLProfile: toHumanSLProfile(rank) } };
 }
 
+const NO_HUMAN_POLICY = "KataGo response has no humanPolicy; is the human model loaded?";
+
 /** The human-SL policy of an analysis (size*size+1 entries, the last for pass; -1 = illegal); throws when the human model wasn't loaded. */
 export function humanPolicyOf(analysis: Pick<Analysis, "humanPolicy">, size: number): number[] {
   const human = analysis.humanPolicy;
-  if (!human || human.length !== size * size + 1) throw new Error("KataGo response has no humanPolicy; is the human model loaded?");
+  if (!human || human.length !== size * size + 1) throw new Error(NO_HUMAN_POLICY);
   return human;
 }
 
-/** The human-SL probability of `move` in an analysis made with the human policy (0 for an illegal move). */
+/** The human-SL probability of `move` in an analysis made with the human policy: 0 for an illegal move, or one the policy doesn't cover; throws without a human policy. */
 export function humanMoveProbability(analysis: Pick<Analysis, "humanPolicy">, move: Gtp, size: number): number {
-  return Math.max(0, humanPolicyOf(analysis, size)[policyIndex(move, size)] ?? 0);
+  const human = analysis.humanPolicy;
+  if (!human) throw new Error(NO_HUMAN_POLICY);
+  return Math.max(0, human[policyIndex(move, size)] ?? 0);
 }
 
 /**

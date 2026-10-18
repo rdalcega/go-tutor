@@ -110,6 +110,17 @@ describe("rating model migration", () => {
     expect(partial.moves.every((r) => !r.assist)).toBe(true);
   });
 
+  it("takes the log's first attempts when it replays the game, with what the file knows of them", async () => {
+    const { store, gameId, current } = await oldGame();
+    // The file kept the attempt, and the tutor tagged it: the log's rebuild carries the tag.
+    store.saveGame({ ...current, takenBack: [{ ...current.takenBack![0]!, tag: { category: "shape" } }] }, store.loadSgf(gameId)!);
+    const saved = store.loadGame(gameId)!;
+    const rebuilt = reconstructGame(saved, store.readEvents());
+    expect(rebuilt.complete).toBe(true);
+    expect(rebuilt.takenBack).toMatchObject([{ moveNumber: 3, tag: { category: "shape" }, record: { eval: { pointLoss: 6 } } }]);
+    expect(rebuilt.takenBack[0]).not.toBe(saved.takenBack![0]); // a copy: the migration's work leaves the file's objects alone
+  });
+
   it("keeps a game's saved first attempts when the log can't rebuild them", async () => {
     const { store, engine, gameId, current } = await oldGame();
     tenKyu(engine);

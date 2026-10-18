@@ -215,9 +215,9 @@ function render(): void {
   renderResultRating();
 }
 
-/** The board before move `fromMove`, memoized: it only changes with the game, its moves and the move. */
+/** The board before move `fromMove`, memoized by the moves that lead to it (a take-back and a different replay change it, not just the count). */
 function boardBefore(v: GameView, settings: GameSettings, fromMove: number): ReturnType<typeof positionBefore> {
-  const key = `${v.gameId}|${v.moves.length}|${fromMove}`;
+  const key = `${v.gameId}|${fromMove}|${v.moves.slice(0, fromMove - 1).map((r) => moveGtp(r.move, settings.size)).join(" ")}`;
   if (beforeCache?.key !== key) beforeCache = { key, value: positionBefore(v.moves, settings, fromMove) };
   return beforeCache.value;
 }

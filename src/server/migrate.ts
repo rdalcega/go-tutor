@@ -56,7 +56,7 @@ const CLASSIFY_VISITS = 100;
 export interface Reconstruction {
   /** The saved moves, with `assist` set from the log. */
   moves: MoveRecord[];
-  /** The saved game's first attempts when it kept them, else the log's. */
+  /** The log's first attempts when it replays the whole game, else the file's; each with what the file knows of it. */
   takenBack: TakenBackMove[];
   assistance: AssistCounts;
   /** The log's moves replay to exactly the saved game (else the saved moves keep their own help flags). */
@@ -142,9 +142,20 @@ export function reconstructGame(saved: SavedGame, events: readonly TutorEvent[])
     const { assist: _old, ...rest } = r;
     return assist?.length ? { ...rest, assist } : rest;
   });
-  // A game saved with its first attempts keeps them (the live record, evals and tags included); one
-  // saved before first attempts were kept gets the log's.
-  const firsts = saved.takenBack?.length ? saved.takenBack : consistent ? takenBack : [];
+  // First attempts: the log's when it replays the whole game (it can hold ones from before the file
+  // kept them), else the file's when it has them, else what the log yields. What the file knows of
+  // an attempt (its eval, category and tag) is kept; the attempts are copies, the file's are left alone.
+  const known = saved.takenBack ?? [];
+  const base = complete || !known.length ? (consistent ? takenBack : []) : known;
+  const firsts = base.map((t) => {
+    const old = known.find((k) => k.moveNumber === t.moveNumber && k.before.join(" ") === t.before.join(" "));
+    return {
+      ...t,
+      record: { ...t.record, ...(old?.record.eval && { eval: old.record.eval }) },
+      ...(old?.heuristic && { heuristic: old.heuristic }),
+      ...(old?.tag && { tag: old.tag }),
+    };
+  });
   return { moves, takenBack: firsts, assistance: complete ? assistance : { ...assistance, ...saved.assistance }, complete, events: mine.length };
 }
 /** What `migrateRatingModel` needs. */

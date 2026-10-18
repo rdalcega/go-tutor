@@ -110,6 +110,9 @@ describe("the next batch's trigger", () => {
     const fine: GenerationFile = { version: 1, batches: [batch("batch2", false)], progress: { batchId: "batch2", game: null, reserve: [] } };
     expect(normalizeGeneration(fine)).toBeNull();
     expect(fine.progress?.batchId).toBe("batch2");
+    const damaged: GenerationFile = { version: 1, batches: [batch("batch2", false)], progress: { batchId: "batch2", game: { size: 9 } } as unknown as GenerationFile["progress"] };
+    expect(normalizeGeneration(damaged)).toMatch(/damaged progress for batch2 reset/);
+    expect(damaged.progress).toEqual({ batchId: "batch2", game: null, reserve: [] });
   });
 
   it("starts the next batch once 15 of the newest batch's 20 problems are in box 3 or higher", () => {

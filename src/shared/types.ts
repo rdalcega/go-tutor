@@ -487,6 +487,8 @@ export interface SavedGame {
   heuristics?: Record<number, MistakeCategory>;
   /** The teaching moment as of the last save, so a restart can tell an open one from a dismissed one. */
   moment?: TeachingMoment | null;
+  /** The drawing on the board as of the last save (the tutor's, KataGo's line, a hint mark), so a restart keeps it. */
+  overlay?: Overlay | null;
   /** Human moves that were taken back, in the order they were (absent in games saved before they were kept). */
   takenBack?: TakenBackMove[];
   /** Help the learner had so far. */

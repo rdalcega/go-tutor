@@ -784,7 +784,7 @@ describe("GameController", () => {
     expect(again.view().chat.filter((m) => /cost about 14\.8/.test(m.text))).toHaveLength(1);
   });
 
-  it("a restart during a moment the tutor had waits for the tutor to come back before falling back", async () => {
+  it("a restart during a moment the tutor is on keeps it the tutor's, as a dropped connection would", async () => {
     setup({ tutor: true });
     await startGame();
     engine.lossAfter(["C3"], 6);
@@ -792,25 +792,61 @@ describe("GameController", () => {
     await flush();
     const id = ctl.view().moment!.id;
     await ctl.handleTutor({ type: "claim", momentId: id });
+    await ctl.handleTutor({ type: "mark", points: ["C3"] });
     await ctl.handleTutor({ type: "say", text: "Which of your groups is weakest?" });
     ctl.flush(); // as on shutdown
-    // The server comes back up before `tutor watch` reconnects.
+    // The server comes back up before `tutor watch` reconnects; the tutor still holds the moment.
     const again = new GameController({ engine, store, clock, botDelayMs: 0, tutorTimeoutMs: 30_000 });
     const replayed: TutorEventInput[] = [];
     again.onEvent((e) => replayed.push(e));
     expect(again.restoreLastGame()).toBe(true);
     again.setEngineState("ready");
     await flush();
-    expect(again.view().status).toBe("paused");
-    expect(again.view().moment).toMatchObject({ id, state: "waiting", deadline: clock.now() + 30_000 });
+    expect(again.view()).toMatchObject({ status: "paused", moment: { id, state: "tutor" }, overlay: { marks: [{ point: C3 }] } });
+    expect(again.view().moment?.deadline).toBeUndefined();
     expect(replayed).toEqual([]); // nothing is logged again: a fresh watch finds the moment's event in the log
-    expect(again.view().chat.some((m) => /cost about/.test(m.text))).toBe(false);
-    // The tutor is back in time and picks it up again.
     again.setTutorAttached(true);
-    await again.handleTutor({ type: "claim", momentId: id });
     clock.advance(60_000);
-    expect(again.view().moment?.state).toBe("tutor");
+    expect(again.view().moment?.state).toBe("tutor"); // no KataGo fallback under the tutor
     expect(again.view().chat.some((m) => /cost about/.test(m.text))).toBe(false);
+    await again.handleTutor({ type: "resume" });
+    expect(again.view().moment).toMatchObject({ state: "tutor", awaitingLearner: true }); // the drawing is up: the learner presses Continue
+  });
+
+  it("a restart during a moment waiting for the tutor gives the tutor a fresh wait, then falls back", async () => {
+    setup({ tutor: true });
+    await startGame();
+    engine.lossAfter(["C3"], 6);
+    ctl.play(C3);
+    await flush();
+    const id = ctl.view().moment!.id;
+    expect(ctl.view().moment?.state).toBe("waiting");
+    ctl.flush();
+    clock.advance(10_000);
+    const again = new GameController({ engine, store, clock, botDelayMs: 0, tutorTimeoutMs: 30_000 });
+    again.restoreLastGame();
+    again.setEngineState("ready");
+    await flush();
+    expect(again.view().moment).toMatchObject({ id, state: "waiting", deadline: clock.now() + 30_000 });
+    clock.advance(30_000);
+    expect(again.view().moment?.state).toBe("fallback");
+    expect(again.view().chat.filter((m) => /cost about 6/.test(m.text))).toHaveLength(1);
+    expect(again.view().overlay?.variation).toMatchObject({ fromMove: 1 });
+  });
+
+  it("a drawing the learner hid stays hidden after a restart", async () => {
+    await startGame();
+    engine.lossAfter(["C3"], 6);
+    ctl.play(C3);
+    await flush();
+    expect(ctl.view().overlay).not.toBeNull(); // KataGo's fallback line
+    await ctl.handleAction({ type: "clear_overlay" });
+    ctl.flush();
+    const again = new GameController({ engine, store, clock, botDelayMs: 0 });
+    again.restoreLastGame();
+    again.setEngineState("ready");
+    await flush();
+    expect(again.view()).toMatchObject({ status: "paused", moment: { state: "fallback" }, overlay: null });
   });
 
   it("a restart after the tutor resumed with a drawing up keeps the pause for the learner's Continue, without a fallback", async () => {
@@ -832,6 +868,7 @@ describe("GameController", () => {
     expect(again.view().status).toBe("paused");
     expect(again.view().moment).toMatchObject({ id, state: "tutor", awaitingLearner: true });
     expect(again.view().moment?.deadline).toBeUndefined();
+    expect(again.view().overlay?.variation?.moves).toHaveLength(2); // the tutor's drawing is back too
     clock.advance(60_000);
     expect(again.view().moment?.state).toBe("tutor"); // the tutor already answered: KataGo doesn't
     expect(again.view().chat.some((m) => /cost about/.test(m.text))).toBe(false);
@@ -869,24 +906,6 @@ describe("GameController", () => {
     expect(again.view().moves[2]!.assist).toEqual(["rethink"]);
   });
 
-  it("a restart during a moment the tutor had falls back once nobody comes back for it", async () => {
-    setup({ tutor: true });
-    await startGame();
-    engine.lossAfter(["C3"], 6);
-    ctl.play(C3);
-    await flush();
-    await ctl.handleTutor({ type: "claim", momentId: ctl.view().moment!.id });
-    ctl.flush();
-    const again = new GameController({ engine, store, clock, botDelayMs: 0, tutorTimeoutMs: 30_000 });
-    again.restoreLastGame();
-    again.setEngineState("ready");
-    await flush();
-    expect(again.view().moment?.state).toBe("waiting");
-    clock.advance(30_000);
-    expect(again.view().moment?.state).toBe("fallback");
-    expect(again.view().chat.filter((m) => /cost about 6/.test(m.text))).toHaveLength(1);
-    expect(again.view().overlay?.variation).toMatchObject({ fromMove: 1 });
-  });
 
   it("a restart after Continue doesn't reopen the dismissed moment", async () => {
     await startGame();

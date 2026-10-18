@@ -117,13 +117,11 @@ is saved with the game (`SavedGame.help`, with `hintAsked` for a hint the tutor 
 a restart before the move still counts it as assisted.
 
 **Restart.** `restoreLastGame` picks up the newest unfinished game with its chat, tags, first
-attempts, help and open question. A moment the learner dismissed stays dismissed. An open one comes
-back as it was saved, with its id (its `teaching_moment` is already in the event log, where a fresh
-`watch` finds it): KataGo's
-fallback is drawn again without repeating its chat message; a moment the tutor finished (resumed
-with a drawing up) keeps waiting for the learner's Continue, its drawing gone but its words in the
-chat; a moment the tutor was still on, or was waiting for (it had a deadline), waits
-`TUTOR_TIMEOUT_MS` for the tutor to reconnect, as after a dropped connection, before KataGo answers;
+attempts, help, open question and the drawing on the board. A moment the learner dismissed stays
+dismissed. An open one comes back as it was saved, with its id (its `teaching_moment` is already in
+the event log, where a fresh `watch` finds it): the tutor's stays the tutor's, as after a dropped
+connection, and KataGo's fallback stays answered, both waiting for the learner's Continue; one that
+was waiting for the tutor (it had a deadline) waits `TUTOR_TIMEOUT_MS` again before KataGo answers;
 one nobody was handling falls back at once; one whose move the tutor took back (`rethink`) stays
 open, with the tutor, for the learner's new move. A mistake whose eval arrived but never opened a
 moment opens one now.
@@ -148,7 +146,8 @@ Bot moves are never evaluated as teaching moments. Only the human's moves are.
 verdict) stay on the board until the learner's next move or action that changes the position (a
 move or problem attempt, Continue, Try again, a new game), until the tutor's `clear`, or until the learner hides
 them: the `clear_overlay` action (the Hide button next to the board caption, or Esc), offered in
-`allowed` whenever a drawing is up. Hiding a drawing during a pause keeps the pause.
+`allowed` whenever a drawing is up. Hiding a drawing during a pause keeps the pause. The game's
+drawing is saved with it (`SavedGame.overlay`), so a restart shows the board as it was.
 
 **Tutor levels** (`Profile.tutorLevel`, in `GameView.tutorLevel`; default `coach`): the learner's
 `set_tutor_level` action changes it at any time (the profile is saved, `tutor_level` is emitted with a
@@ -331,8 +330,9 @@ profile or problems; `ratingModel` unchanged), and the controller logs it and tr
   (with the moves before them) and mark the next human move `retry`/`rethink`, and a `hint_request`
   marks the next move `hint` when the saved chat has a tutor message or KataGo's hint between the
   request and that move. The rebuild's help flags count only when its moves replay to exactly the
-  saved game; otherwise the saved moves keep their own. A game saved with its first attempts keeps
-  them (the live record, tags and all); one saved before first attempts were kept gets the log's.
+  saved game; otherwise the saved moves keep their own. First attempts come from the log when it
+  replays the whole game (it can hold ones from before the file kept them), else from the file; what
+  the file knows of each (its eval, category and tag) is kept.
 - categorizes each taken-back mistake (`classifyPlayed`, as the controller does, with ownership
   from 100-visit analyses), rank-estimates each rated game, works out the practice problems for the
   taken-back mistakes on a scratch copy, and replays the rating from 20k through `applyEstimate` in
