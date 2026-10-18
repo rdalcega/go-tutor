@@ -122,10 +122,10 @@ a restart before the move still counts it as assisted.
 attempts, help, open question and the drawing on the board. A moment the learner dismissed stays
 dismissed. An open one comes back as it was saved, with its id (its `teaching_moment` is already in
 the event log, where a fresh `watch` finds it): the tutor's stays the tutor's, as after a dropped
-connection, and KataGo's fallback stays answered, both waiting for the learner's Continue; one that
-was waiting for the tutor (it had a deadline) waits `TUTOR_TIMEOUT_MS` again before KataGo answers;
-one nobody was handling falls back at once, as does KataGo's answer from a game saved before
-drawings were (it is given again); one whose move the tutor took back (`rethink`) stays open, with
+connection, and KataGo's fallback stays answered, both waiting for the learner's Continue; one still
+waiting for a tutor falls back at once (nobody is attached at boot; a tutor who reconnects sees it
+as fallen back and can still comment), as does KataGo's answer from a game saved before drawings
+were (it is given again); one whose move the tutor took back (`rethink`) stays open, with
 the tutor, for the learner's new move. A mistake whose eval arrived but never opened a moment opens
 one now. A game resigned while its last move was being evaluated, and stopped before the verdict
 landed (a result on file but no summary), finishes now, without it.

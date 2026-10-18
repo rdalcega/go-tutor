@@ -201,11 +201,9 @@ export function humanPolicyOf(analysis: Pick<Analysis, "humanPolicy">, size: num
   return human;
 }
 
-/** The human-SL probability of `move` in an analysis made with the human policy: 0 for an illegal move, or one the policy doesn't cover; throws without a human policy. */
+/** The human-SL probability of `move` in an analysis made with the human policy (0 for an illegal move); throws without a human policy for the board. */
 export function humanMoveProbability(analysis: Pick<Analysis, "humanPolicy">, move: Gtp, size: number): number {
-  const human = analysis.humanPolicy;
-  if (!human) throw new Error(NO_HUMAN_POLICY);
-  return Math.max(0, human[policyIndex(move, size)] ?? 0);
+  return Math.max(0, humanPolicyOf(analysis, size)[policyIndex(move, size)]!);
 }
 
 /**

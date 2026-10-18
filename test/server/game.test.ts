@@ -889,7 +889,7 @@ describe("GameController", () => {
     expect(again.view().chat.some((m) => /cost about/.test(m.text))).toBe(false);
   });
 
-  it("a restart during a moment waiting for the tutor gives the tutor a fresh wait, then falls back", async () => {
+  it("a restart during a moment still waiting for the tutor falls back at once, keeping the moment's id", async () => {
     setup({ tutor: true });
     await startGame();
     engine.lossAfter(["C3"], 6);
@@ -898,16 +898,17 @@ describe("GameController", () => {
     const id = ctl.view().moment!.id;
     expect(ctl.view().moment?.state).toBe("waiting");
     ctl.flush();
-    clock.advance(10_000);
     const again = new GameController({ engine, store, clock, botDelayMs: 0, tutorTimeoutMs: 30_000 });
-    again.restoreLastGame();
+    again.restoreLastGame(); // nobody is attached at boot
     again.setEngineState("ready");
     await flush();
-    expect(again.view().moment).toMatchObject({ id, state: "waiting", deadline: clock.now() + 30_000 });
-    clock.advance(30_000);
-    expect(again.view().moment?.state).toBe("fallback");
+    expect(again.view().moment).toMatchObject({ id, state: "fallback" });
     expect(again.view().chat.filter((m) => /cost about 6/.test(m.text))).toHaveLength(1);
     expect(again.view().overlay?.variation).toMatchObject({ fromMove: 1 });
+    // The tutor reconnects and can still take it up.
+    again.setTutorAttached(true);
+    await again.handleTutor({ type: "claim", momentId: id });
+    expect(again.view().moment?.state).toBe("tutor");
   });
 
   it("a game saved before drawings were kept gets KataGo's answer again after a restart", async () => {
@@ -1558,6 +1559,19 @@ describe("GameController tutor levels", () => {
     await ctl.handleAction({ type: "chat", text: "Is it the eye?" });
     await ctl.handleAction({ type: "leave_problem" });
     await expect(ctl.handleTutor({ type: "say", text: "Yes, the eye." })).rejects.toThrow(/chose Silent/);
+  });
+
+  it("silent: a question asked on a problem isn't the game's after a restart", async () => {
+    setup({ tutor: true });
+    await ctl.handleAction({ type: "set_tutor_level", level: "silent" });
+    await startGame();
+    await ctl.handleAction({ type: "next_problem" });
+    await ctl.handleAction({ type: "chat", text: "Is it the eye?" });
+    ctl.flush();
+    const again = new GameController({ engine: new FakeEngine(), store, clock, botDelayMs: 0 });
+    expect(again.restoreLastGame()).toBe(true); // the game, not the problem
+    again.setTutorAttached(true);
+    await expect(again.handleTutor({ type: "say", text: "Yes." })).rejects.toThrow(/chose Silent/);
   });
 
   it("silent: a question Practice dropped stays dropped after a restart", async () => {

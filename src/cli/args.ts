@@ -223,7 +223,7 @@ export function parseInvocation(argv: string[]): Invocation {
         const size = flags.string("size");
         if (size !== undefined) {
           const n = Number(size);
-          if (!isBoardSize(n)) throw new UsageError(`--size must be 9, 13 or 19`);
+          if (!/^\d+$/.test(size) || !isBoardSize(n)) throw new UsageError(`--size must be 9, 13 or 19`);
           settings.size = n;
         }
         const rank = flags.string("rank");

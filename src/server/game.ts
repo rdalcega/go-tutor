@@ -989,15 +989,13 @@ export class GameController {
   /**
    * After a restart, the open moment as it was saved, its drawing included (its event is already in
    * the log: a fresh `watch` finds it there). The tutor's moment stays the tutor's, as after a dropped
-   * connection, and KataGo's fallback stays answered; both wait for the learner's Continue. A moment
-   * that was waiting for the tutor waits again (a fresh TUTOR_TIMEOUT_MS: `watch` reconnects with
-   * its cursor, and the claim it was about to make still works); one nobody was handling falls back
-   * at once (resumeTurn settles it).
+   * connection, and KataGo's fallback stays answered; both wait for the learner's Continue. One still
+   * waiting for a tutor falls back at once (resumeTurn settles it: nobody is attached at boot, and a
+   * tutor who reconnects sees it as fallen back and can still comment).
    */
   private restoreMoment(record: MoveRecord, saved: TeachingMoment): void {
-    const { deadline, ...rest } = saved;
+    const { deadline: _deadline, ...rest } = saved;
     this.openMoment(record, rest);
-    if (saved.state === "waiting" && deadline !== undefined) this.waitForTutor();
   }
 
   /** The game pauses on `moment`, about `record` (the last move): it won't open again for that move. */
@@ -1269,7 +1267,7 @@ export class GameController {
     } finally {
       if (this.botFor === gen) this.botFor = null;
     }
-    if (this.gen !== gen || this.game !== game || game.moves.length !== moveCount || this.status !== "playing" || this.practice) {
+    if (this.gen !== gen || this.game !== game || game.moves.length !== moveCount || this.status !== "playing" || this.practice || this.result) {
       this.changed();
       return;
     }
@@ -1445,7 +1443,7 @@ export class GameController {
     this.status = "finished";
     this.moment = null;
     this.overlay = null;
-    this.questionOpen = false;
+    if (!this.practice) this.questionOpen = false; // a question about a problem on the board stays open
     const summary = this.buildSummary();
     this.summary = summary;
     // The game must still be saved and announced if the profile can't be updated.
@@ -1903,7 +1901,8 @@ export class GameController {
       takenBack: this.takenBack,
       assistance: this.assistance,
       ...(this.help && { help: { at: this.help.at, kinds: [...this.help.kinds], ...(this.help.hintAsked && { hintAsked: true as const }) } }),
-      ...(this.questionOpen && { questionOpen: true as const }),
+      // A question asked on a practice problem isn't the game's (a restart brings the game back, not the problem).
+      ...(this.questionOpen && !this.practice && { questionOpen: true as const }),
       ...(this.atLevelRank && { atLevelRank: this.atLevelRank }),
     };
     try {

@@ -73,6 +73,7 @@ describe("parseInvocation", () => {
       settings: { size: 13, botRank: "18k", humanColor: "W", komi: 6.5, handicap: 2 },
     });
     usage(["new-game", "--size", "10"]);
+    usage(["new-game", "--size", "0x9"]); // digits only: Number() would read it as 9
     usage(["new-game", "--rank", "40k"]);
     // KataGo's human-SL profiles stop at 20k, and the server rejects weaker ranks the same way.
     usage(["new-game", "--rank", "25k"]);
