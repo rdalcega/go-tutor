@@ -256,6 +256,8 @@ export interface GameView {
   mistakeThreshold: number;
   /** A finished game's summary (its mistakes worst first, as the server counted them); absent otherwise. */
   summary?: GameSummary;
+  /** A finished game's practice problems (made from its mistakes in the background), which `review_game` goes through; absent otherwise. */
+  reviewProblems?: number;
   /** Problem generation: the batch in progress and the newest finished one. */
   generation?: GenerationStatus;
 }
@@ -297,6 +299,8 @@ export interface ProblemView {
    * on the board, oldest first: `ago` 1 is the last move. Absent when the problem doesn't know them.
    */
   recentMoves?: RecentMove[];
+  /** Part of a review of one game's mistakes: this is problem `index` (1-based) of `total`. */
+  review?: ProblemReview;
 }
 
 /** How many of the moves before a problem's position it labels on the board (-1 … -5). */
@@ -307,6 +311,14 @@ export interface RecentMove {
   color: Color;
   point: Point;
   ago: number;
+}
+
+/** Where a problem stands in a review of one game's mistakes (its problems in move order, each once). */
+export interface ProblemReview {
+  gameId: string;
+  /** 1-based. */
+  index: number;
+  total: number;
 }
 
 export interface ProblemAttempt {
@@ -331,7 +343,8 @@ export type ClientAction =
   | { type: "chat"; text: string }
   | { type: "ask_tutor"; text?: string } // explicit "hint please" button
   | { type: "next_problem" } // enter problem mode, or go on to the next problem
-  | { type: "leave_problem" } // back to the game (or the idle board)
+  | { type: "leave_problem" } // back to the game (or the idle board); ends a review
+  | { type: "review_game"; gameId: string } // a review of a finished game's mistakes: its problems in move order, each once
   | { type: "clear_overlay" } // hide the drawing on the board (the tutor's, KataGo's or a hint)
   | { type: "set_tutor_level"; level: TutorLevel } // applies from the learner's next move
   | { type: "set_judge_mode"; mode: JudgeMode }; // applies from the learner's next move
@@ -356,7 +369,8 @@ export type TutorCommand =
   /** Tutor took ownership of the current moment; cancels the fallback timer. */
   | { type: "claim"; momentId: string }
   | { type: "new_game"; settings?: Partial<GameSettings> }
-  | { type: "start_problem"; problemId?: string }
+  /** A problem by id, the next due one, or with `gameId` (or "last") a review of that game's mistakes. */
+  | { type: "start_problem"; problemId?: string; gameId?: string }
   /** Start the next batch of generated problems now, even if the mastery trigger hasn't fired. */
   | { type: "generate" }
   /**
@@ -462,6 +476,8 @@ export type TutorEvent =
       /** Board size (absent in events logged before generated problems, which were all 9×9). */
       size?: number;
       generated?: GeneratedProblemInfo;
+      /** Part of a review of one game's mistakes. */
+      review?: ProblemReview;
       /** ASCII rendering of the problem position. */
       board: string;
     }

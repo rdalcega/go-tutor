@@ -6,7 +6,7 @@ import { toAscii, type GoGame } from "../engine/index.ts";
 import { samePoint, toGtp } from "../shared/coords.ts";
 import { plural, round1 } from "../shared/text.ts";
 import { sizeText } from "../shared/threshold.ts";
-import type { ClientAction, Color, GameSettings, GameView, Gtp, Overlay, Point, ProblemAttempt, RecentMove, TutorCommand } from "../shared/types.ts";
+import type { ClientAction, Color, GameSettings, GameView, Gtp, Overlay, Point, ProblemAttempt, ProblemReview, RecentMove, TutorCommand } from "../shared/types.ts";
 import { ILLEGAL_TEXT, PV_STONES, UserError, alternatingStones, lineStones, type TutorEventInput } from "./common.ts";
 import { moveEvalFrom, trustedCandidate, type Analysis, type Engine } from "./katago.ts";
 import { ANSWER_MARGIN, MAX_ATTEMPTS, gameSource, generatedInfo, problemGame, problemPosition, promptFor, recentMovesView, type StoredProblem } from "./problems.ts";
@@ -55,10 +55,11 @@ export class PracticeSession {
   /** The last moves before the position that the board labels (the position never changes). */
   private readonly recentMoves: RecentMove[] | undefined;
 
-  /** Throws a UserError when the problem can't be set up. */
+  /** Throws a UserError when the problem can't be set up. `review`: the problem's place in a review of one game's mistakes. */
   constructor(
     problem: StoredProblem,
     private readonly deps: PracticeDeps,
+    private readonly review?: ProblemReview,
   ) {
     this.problem = problem;
     try {
@@ -89,7 +90,8 @@ export class PracticeSession {
       : generated
         ? ` on ${sizeText(problem.size)} (about ${generated.difficultyRank} level)`
         : "";
-    this.deps.system(`Practice problem${from}: ${problem.prompt}${early ? " (Nothing is due right now, so this is an early review.)" : ""}`);
+    const what = this.review ? `Review ${this.review.index}/${this.review.total}, mistake` : "Practice problem";
+    this.deps.system(`${what}${from}: ${problem.prompt}${early ? " (Nothing is due right now, so this is an early review.)" : ""}`);
     this.deps.emit({
       type: "problem_start",
       problemId: problem.id,
@@ -102,6 +104,7 @@ export class PracticeSession {
       size: problem.size,
       ...(source && { source: { gameId: source.gameId, moveNumber: source.moveNumber } }),
       ...(generated && { generated }),
+      ...(this.review && { review: { ...this.review } }),
       board: toAscii(this.game.board, null),
     });
     if (this.deps.engineNotReady() === null) this.analysis([]).catch(() => {});
@@ -200,6 +203,7 @@ export class PracticeSession {
         ...(this.answer && { answer: { move: this.answer.move, pv: [...this.answer.pv] } }),
         ...(this.nextDue !== undefined && { nextDue: this.nextDue }),
         ...(this.recentMoves && { recentMoves: this.recentMoves }),
+        ...(this.review && { review: { ...this.review } }),
       },
     };
   }

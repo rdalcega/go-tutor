@@ -162,7 +162,8 @@ function respond(protocol: Protocol, text: string, beat: Beat, w: World): Call[]
         }
         return [{ tools: [chain("show", "say", "tag")], out: OUT.chained }, final()];
       }
-      if (beat.kind === "start-problems") return [{ tools: [chain("problem", "say")], out: OUT.chained }, final()];
+      // The review of the game's mistakes as problems (CLAUDE.md, GAME_END step 5).
+      if (beat.kind === "start-problems") return [{ tools: [chain("problem --game g1", "say")], out: OUT.chained }, final()];
       // A question about the board during the game needs the position, which the stream's moves no longer bring.
       // ("before" streamed every move, so its tutor followed the game without it.)
       if (p === "after" && beat.kind === "board-question" && !text.includes("state below")) return [{ tools: [state], out: OUT.state }, { tools: [say], out: OUT.say }, final()];
@@ -411,13 +412,14 @@ function script(level: TutorLevel): Step[] {
   // The review: the learner answers the tutor's question about each of two mistakes.
   at(60, (w) => w.event({ type: "user_message", text: "I wanted to cut there, I thought it was big.", gameId: "g1" }), { kind: "review-answer", last: false });
   at(60, (w) => w.event({ type: "user_message", text: "I didn't see that my group was short of liberties.", gameId: "g1" }), { kind: "review-answer", last: true });
-  at(30, (w) => w.event({ type: "user_message", text: "Sure, let's do some problems.", gameId: "g1" }), { kind: "start-problems" });
+  at(30, (w) => w.event({ type: "user_message", text: "Sure, let's review those mistakes.", gameId: "g1" }), { kind: "start-problems" });
 
-  // Three problems: solved first try; solved on the second attempt after a nudge; missed twice.
+  // A review of the game's three mistakes as problems: solved first try; solved on the second attempt after a nudge; missed twice.
   const problem = (id: string, attempts: ("right" | "wrong")[]) => {
     at(10, (w) => {
       w.problem = problemView(id);
-      return w.event({ type: "problem_start", problemId: id, kind: "game", category: "life_and_death", toPlay: "B", prompt: w.problem.prompt, answers: ["E1", "D1"], box: 1, source: { gameId: "g1", moveNumber: 14 }, size: 9, board: toAscii(w.game.board) });
+      const review = { gameId: "g1", index: Number(id.slice(1)), total: 3 };
+      return w.event({ type: "problem_start", problemId: id, kind: "game", category: "life_and_death", toPlay: "B", prompt: w.problem.prompt, answers: ["E1", "D1"], box: 1, source: { gameId: "g1", moveNumber: 14 }, size: 9, review, board: toAscii(w.game.board) });
     });
     attempts.forEach((a, i) => {
       at(40, (w) => {
@@ -456,7 +458,7 @@ function summaryOf(w: World, pending: boolean): GameSummary {
 }
 
 function problemView(id: string): ProblemView {
-  return { id, prompt: "Black to play. Make this group live.", source: { gameId: "g1", moveNumber: 14 }, attempts: 0, solved: false, kind: "game", category: "life_and_death", toPlay: "B", maxAttempts: 2, revealed: false, box: 1, recentMoves: RECENT_SIM };
+  return { id, prompt: "Black to play. Make this group live.", source: { gameId: "g1", moveNumber: 14 }, attempts: 0, solved: false, kind: "game", category: "life_and_death", toPlay: "B", maxAttempts: 2, revealed: false, box: 1, recentMoves: RECENT_SIM, review: { gameId: "g1", index: Number(id.slice(1)), total: 3 } };
 }
 
 /** The last moves before a problem's position, which the state lists on one line. */

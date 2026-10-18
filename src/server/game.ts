@@ -133,6 +133,14 @@ interface PendingHelp {
   hintAsked?: boolean;
 }
 
+/** A review of one game's mistakes: its problem ids in move order, the one on the board (0-based), and the ones solved. */
+interface ReviewState {
+  gameId: string;
+  ids: string[];
+  index: number;
+  solved: Set<string>;
+}
+
 /** Rating-migration attempts per server run that KataGo may fail before it waits for a restart. */
 export const MAX_MIGRATION_ATTEMPTS = 4;
 /** Wait before trying a failed migration again; each further failure waits 4× longer (1, 4, 16 min). */
@@ -236,6 +244,10 @@ export class GameController {
   private practice: PracticeSession | null = null;
   /** The problem shown last, so Next problem moves on to a different one. */
   private lastProblemId: string | undefined;
+  /** A review of one game's mistakes: its problems in move order, the one on the board, and those solved. */
+  private review: ReviewState | null = null;
+  /** Practice problems per source game (from problems.json, kept in step by updateProblems), for the finished game's Review mistakes count. */
+  private problemsPerGame = new Map<string, number>();
   /** Generated practice problems, made in the background while the learner doesn't need KataGo. */
   private readonly generator: ProblemGenerator;
   /** When the learner (or the tutor) last did something; problem generation waits LEARNER_ACTIVE_MS after it. */
@@ -270,6 +282,7 @@ export class GameController {
     this.analysisVisits = opts.analysisVisits;
     this.log = opts.log ?? (() => {});
     this.profile = this.store.loadProfile();
+    this.countProblems(this.store.loadProblems());
     this.practiceDeps = {
       engine: this.engine,
       problemVisits: opts.problemVisits ?? DEFAULT_PROBLEM_VISITS,
@@ -385,6 +398,7 @@ export class GameController {
       // A finished game keeps the threshold it was played with (the profile's may have just moved).
       ...(finished && { mistakeThreshold: playedThreshold(finished, this.profile.mistakeThreshold, this.profile.recentGames) }),
       ...(finished?.summary && { summary: finished.summary }),
+      ...(finished && { reviewProblems: this.reviewProblems }),
     };
   }
 
@@ -432,6 +446,7 @@ export class GameController {
       tutorAttached: this.tutorAttached,
       problem: this.practice ? this.practice.actionState : null,
       overlay: this.activeOverlay !== null,
+      reviewProblems: this.reviewProblems,
     };
   }
 
@@ -588,9 +603,11 @@ export class GameController {
       case "new_game":
         return this.newGame(action.settings);
       case "next_problem":
-        return this.startProblem();
+        return this.review ? this.nextInReview() : this.startProblem();
       case "leave_problem":
         return this.leaveProblem();
+      case "review_game":
+        return this.startReview(action.gameId);
     }
     // In problem mode the game waits underneath: the problem answers the game's actions.
     if (this.practice) return this.practice.handleAction(action);
@@ -668,6 +685,11 @@ export class GameController {
       case "new_game":
         return this.newGame(cmd.settings);
       case "start_problem":
+        if (cmd.gameId !== undefined) {
+          if (cmd.problemId !== undefined) throw new UserError("Start a problem by id, or a game's review, not both.");
+          if (!cmd.gameId) throw new UserError('Name the game to review (or "last").');
+          return this.startReview(cmd.gameId);
+        }
         return this.startProblem(cmd.problemId);
       case "generate":
         this.generator.startNow();
@@ -1641,7 +1663,11 @@ export class GameController {
     // The migration wrote the profile, and maybe the problems; the controller's and the generator's copies follow.
     this.profile = this.store.loadProfile();
     this.profileVersion++;
-    if (report.problemsAdded.length) this.generator.problemsChanged(this.store.loadProblems());
+    if (report.problemsAdded.length) {
+      const problems = this.store.loadProblems();
+      this.generator.problemsChanged(problems);
+      this.countProblems(problems);
+    }
     if (report.message) {
       this.log(report.summary);
       this.system(report.message);
@@ -1668,7 +1694,7 @@ export class GameController {
         if (added.length === 0) return;
         this.log(`practice problems from ${gameId}: ${added.map((p) => p.id).join(", ")}`);
         if (this.gameId === gameId && !this.practice) {
-          this.system(`${added.length === 1 ? "One of your mistakes is" : `${added.length} of your mistakes are`} now a practice problem. Press Practice to try ${added.length === 1 ? "it" : "them"}.`);
+          this.system(`${added.length === 1 ? "One of your mistakes is" : `${added.length} of your mistakes are`} now a practice problem. Press Review mistakes to try ${added.length === 1 ? "it" : "them"}.`);
         }
       },
       (err: unknown) => this.log(`making practice problems from ${gameId} failed: ${(err as Error).message}`),
@@ -1801,9 +1827,10 @@ export class GameController {
 
   /**
    * Enter problem mode with problem `id`, or the next one due: the recommended focus category
-   * first, then the learner's own problems, then generated ones (src/server/problems.ts).
+   * first, then the learner's own problems, then generated ones (src/server/problems.ts). With
+   * `review`, the problem is that review's problem at `review.index` (any other start ends a review).
    */
-  private startProblem(id?: string): void {
+  private startProblem(id?: string, review?: ReviewState): void {
     const problems = this.store.loadProblems();
     let problem: StoredProblem | undefined;
     let early = false;
@@ -1816,11 +1843,14 @@ export class GameController {
       ({ problem, early } = next);
     }
     if (!problem.recent && problem.kind === "game") problem = this.backfillRecent(problem);
-    const session = new PracticeSession(problem, this.practiceDeps); // checks the setup before the current problem closes
+    const place = review && { gameId: review.gameId, index: review.index + 1, total: review.ids.length };
+    // Checks the setup before the current problem closes.
+    const session = new PracticeSession(problem, this.practiceDeps, place);
     // Leaving a problem after a wrong attempt reschedules it: the same problem again starts from its new box.
     const rescheduled = this.closePractice();
     if (rescheduled?.id === problem.id) Object.assign(session.problem, rescheduled);
     this.practice = session;
+    this.review = review ?? null;
     this.lastProblemId = problem.id;
     session.start(early);
     this.changed();
@@ -1845,6 +1875,60 @@ export class GameController {
     return { ...problem, recent };
   }
 
+  /**
+   * Review a finished game's mistakes: its practice problems in move order (a taken-back first try
+   * before the move that stayed), each once, whether due or not. `gameId` "last" is the newest
+   * finished game. Results are scheduled like any other attempt.
+   */
+  private startReview(gameId: string): void {
+    const id = gameId === "last" ? (this.result && this.gameId ? this.gameId : this.store.lastGame({ finished: true })?.id) : gameId;
+    if (!id) throw new UserError("There is no finished game to review yet.");
+    if (id === this.gameId && !this.result) throw new UserError(`Game ${id} is still going: its mistakes become practice problems when it ends.`);
+    // Move order; at one move, the taken-back first tries in order, then the move that stayed.
+    const order = (p: StoredProblem): [number, number] => {
+      const source = gameSource(p)!;
+      return [source.moveNumber, source.takenBack ?? Number.MAX_SAFE_INTEGER];
+    };
+    const ids = this.store
+      .loadProblems()
+      .filter((p) => gameSource(p)?.gameId === id)
+      .map((p) => ({ id: p.id, key: order(p) }))
+      .sort((a, b) => a.key[0] - b.key[0] || a.key[1] - b.key[1])
+      .map((p) => p.id);
+    if (ids.length === 0) {
+      throw new UserError(`Game ${id} has no practice problems${id === this.gameId ? " yet: they are made from its mistakes a little after it ends" : ""}.`);
+    }
+    this.reviewFrom({ gameId: id, ids, index: 0, solved: new Set() }, 0);
+  }
+
+  /** Next problem during a review: the review's next one, or after the last, back to the game with how it went. */
+  private nextInReview(): void {
+    // The attempt KataGo is checking would be dropped, and with it the problem's result.
+    if (this.practice?.actionState.checking) throw new UserError("KataGo is still checking your move.");
+    const review = this.review!;
+    this.reviewFrom(review, review.index + 1);
+  }
+
+  /** Put the review's problem at `index` on the board, skipping any that can't be set up; past the last, end the review. */
+  private reviewFrom(review: ReviewState, index: number): void {
+    for (let i = index; i < review.ids.length; i++) {
+      try {
+        return this.startProblem(review.ids[i], { ...review, index: i });
+      } catch (err) {
+        if (!(err instanceof UserError)) throw err;
+        this.log(`review of ${review.gameId}: skipping ${review.ids[i]}: ${err.message}`);
+      }
+    }
+    this.leaveProblem();
+    const n = review.ids.length;
+    const solved = review.solved.size;
+    const all = n === 1 ? "it" : `all ${n}`;
+    this.system(
+      `Review done: you solved ${solved === n ? all : `${solved} of ${n}`}. ` +
+        (solved === n ? `${n === 1 ? "That mistake looks" : "Those mistakes look"} fixed.` : "Practice brings back the ones you missed."),
+    );
+  }
+
   /** Why Practice has nothing to show: the first problems are still being generated, or there are none yet. */
   private noProblemsText(): string {
     const current = this.generator.status().current;
@@ -1865,6 +1949,7 @@ export class GameController {
   private closePractice(): StoredProblem | undefined {
     const session = this.practice;
     this.practice = null;
+    this.review = null;
     // Entering or leaving a problem: a question about the game isn't one about the problem, nor the other way round.
     this.noteQuestion(false);
     return session?.close();
@@ -1879,6 +1964,7 @@ export class GameController {
         if (p) schedule(p, resultOf(solved, attempts), this.clock.now());
         return p;
       });
+      if (solved && this.review?.ids.includes(problem.id)) this.review.solved.add(problem.id);
     } catch (err) {
       this.log(`saving problem ${problem.id} failed: ${(err as Error).message}`);
     }
@@ -1922,7 +2008,22 @@ export class GameController {
     const result = change(problems);
     this.store.saveProblems(problems);
     this.generator.problemsChanged(problems);
+    this.countProblems(problems);
     return result;
+  }
+
+  /** The finished game's practice problems (Review mistakes goes through them); 0 without a finished game. */
+  private get reviewProblems(): number {
+    return this.result && this.gameId ? (this.problemsPerGame.get(this.gameId) ?? 0) : 0;
+  }
+
+  /** Count the practice problems per source game, for the finished game's Review mistakes. */
+  private countProblems(problems: readonly StoredProblem[]): void {
+    this.problemsPerGame = new Map();
+    for (const p of problems) {
+      const gameId = gameSource(p)?.gameId;
+      if (gameId) this.problemsPerGame.set(gameId, (this.problemsPerGame.get(gameId) ?? 0) + 1);
+    }
   }
 
   /**

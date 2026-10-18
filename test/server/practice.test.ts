@@ -542,7 +542,9 @@ describe("problem mode", () => {
     expect(problem.stones).toEqual({ B: [], W: [] });
     // The stored candidates (one move) were thin, so the position was analyzed again, deeper.
     expect(engine.analyzeCalls.some((c) => c.opts?.maxVisits === DEEP_VISITS)).toBe(true);
-    expect(ctl.view().chat.at(-1)?.text).toBe("One of your mistakes is now a practice problem. Press Practice to try it.");
+    expect(ctl.view().chat.at(-1)?.text).toBe("One of your mistakes is now a practice problem. Press Review mistakes to try it.");
+    // The finished game offers a review of its mistakes.
+    expect(ctl.view()).toMatchObject({ reviewProblems: 1, allowed: expect.arrayContaining(["review_game"]) });
 
     // A tag changes the problem's category and prompt with it.
     await ctl.handleTutor({ type: "tag", gameId, moveNumber: 1, category: "opening" });
@@ -563,5 +565,99 @@ describe("problem mode", () => {
       await flush();
     }
     expect(ofType("problem_attempt").map((e) => e.category)).toEqual(["shape", "shape"]);
+
+    // The tutor's review of the last game: its one problem, whatever its due time.
+    await ctl.handleTutor({ type: "start_problem", gameId: "last" });
+    expect(ctl.view().problem).toMatchObject({ id: "p1", review: { gameId, index: 1, total: 1 } });
+  });
+});
+
+describe("reviewing a game's mistakes", () => {
+  // Game g7's mistakes as problems, stored out of move order (a taken-back first try at move 9
+  // comes before the move that stayed), one of them not due for weeks; and another game's.
+  const fromGame = (id: string, gameId: string, moveNumber: number, takenBack?: number) =>
+    liveProblem({ id, kind: "game", hash: id, source: { gameId, moveNumber, played: "D1", ...(takenBack !== undefined && { takenBack }) } });
+  beforeEach(() => {
+    setup();
+    seedProblems(store, [
+      fromGame("p1", "g7", 9),
+      { ...fromGame("p2", "g7", 3), box: 4, due: clock.now() + 30 * 86_400_000 },
+      fromGame("p3", "g7", 9, 1),
+      fromGame("p4", "g8", 2),
+    ]);
+  });
+
+  it("goes through the game's problems in move order, each once, and ends with how it went", async () => {
+    await ctl.handleAction({ type: "review_game", gameId: "g7" });
+    let v = ctl.view();
+    expect(v.problem).toMatchObject({ id: "p2", review: { gameId: "g7", index: 1, total: 3 } });
+    expect(ofType("problem_start").at(-1)).toMatchObject({ problemId: "p2", review: { gameId: "g7", index: 1, total: 3 } });
+    expect(v.chat.at(-1)?.text).toContain("Review 1/3, mistake from your game g7 (move 3)");
+    // Solved: scheduled as usual.
+    await ctl.handleAction({ type: "play", point: at("E1") });
+    await flush();
+    expect(stored("p2")).toMatchObject({ box: 5, solves: 1 });
+
+    await ctl.handleAction({ type: "next_problem" });
+    expect(ctl.view().problem).toMatchObject({ id: "p3", review: { index: 2, total: 3 } });
+    await ctl.handleAction({ type: "next_problem" }); // skipped without an attempt
+    expect(ctl.view().problem).toMatchObject({ id: "p1", review: { index: 3, total: 3 } });
+    engine.lossAfter(["D1"], 19);
+    engine.lossAfter(["F1"], 19);
+    for (const gtp of ["D1", "F1"]) {
+      await ctl.handleAction({ type: "play", point: at(gtp) });
+      await flush();
+    }
+    expect(stored("p1")).toMatchObject({ box: 1, lastResult: "failed" });
+
+    // After the last one, back to the board rather than on into the due queue.
+    await ctl.handleAction({ type: "next_problem" });
+    v = ctl.view();
+    expect(v.mode).toBe("idle");
+    expect(v.problem).toBeNull();
+    expect(v.chat.at(-1)?.text).toBe("Review done: you solved 1 of 3. Practice brings back the ones you missed.");
+    // Practice is the due queue again.
+    await ctl.handleAction({ type: "next_problem" });
+    expect(ctl.view().problem?.review).toBeUndefined();
+  });
+
+  it("waits for KataGo's verdict before moving on, and skips a problem that can't be set up", async () => {
+    // p3 (move 9's first try) is broken: a stone off the board.
+    const problems = store.loadProblems();
+    problems.find((p) => p.id === "p3")!.stones.B.push("Z99");
+    store.saveProblems(problems);
+    await ctl.handleAction({ type: "review_game", gameId: "g7" });
+    engine.hold = true;
+    await ctl.handleAction({ type: "play", point: at("E1") });
+    await expect(ctl.handleAction({ type: "next_problem" })).rejects.toThrow(/still checking/);
+    engine.releaseAll();
+    await flush();
+    await ctl.handleAction({ type: "next_problem" });
+    expect(ctl.view().problem).toMatchObject({ id: "p1", review: { index: 3, total: 3 } });
+    await ctl.handleAction({ type: "next_problem" });
+    expect(ctl.view().chat.at(-1)?.text).toBe("Review done: you solved 1 of 3. Practice brings back the ones you missed.");
+  });
+
+  it("ends the review when the learner leaves it, or another problem starts", async () => {
+    await ctl.handleTutor({ type: "start_problem", gameId: "g7" });
+    await ctl.handleAction({ type: "leave_problem" });
+    await ctl.handleAction({ type: "next_problem" });
+    expect(ctl.view().problem?.review).toBeUndefined();
+
+    await ctl.handleAction({ type: "review_game", gameId: "g7" });
+    await ctl.handleTutor({ type: "start_problem", problemId: "p4" });
+    await ctl.handleAction({ type: "next_problem" });
+    expect(ctl.view().problem?.review).toBeUndefined();
+  });
+
+  it("refuses a game without problems, a game in progress, and a problem id with a game", async () => {
+    await expect(ctl.handleAction({ type: "review_game", gameId: "g9" })).rejects.toThrow(/no practice problems/);
+    await expect(ctl.handleTutor({ type: "start_problem", gameId: "g7", problemId: "p1" })).rejects.toThrow(/not both/);
+    await expect(ctl.handleTutor({ type: "start_problem", gameId: "" })).rejects.toThrow(/Name the game/);
+    ctl.newGame();
+    const gameId = ctl.view().gameId!;
+    await expect(ctl.handleTutor({ type: "start_problem", gameId })).rejects.toThrow(/still going/);
+    expect(ctl.view()).not.toHaveProperty("reviewProblems");
+    expect(ctl.view().allowed).not.toContain("review_game");
   });
 });

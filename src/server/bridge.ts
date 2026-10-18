@@ -473,6 +473,8 @@ export function parseClientAction(body: unknown): ClientAction {
     }
     case "chat":
       return { type: "chat", text: str(o, "text", true) };
+    case "review_game":
+      return { type: "review_game", gameId: str(o, "gameId", true) };
     case "ask_tutor": {
       const text = str(o, "text");
       return text === undefined ? { type: "ask_tutor" } : { type: "ask_tutor", text };
@@ -520,7 +522,8 @@ export function parseTutorCommand(body: unknown): TutorCommand {
       return { type: "new_game", settings: settings(o) };
     case "start_problem": {
       const problemId = str(o, "problemId");
-      return { type: "start_problem", ...(problemId && { problemId }) };
+      const gameId = str(o, "gameId");
+      return { type: "start_problem", ...(problemId && { problemId }), ...(gameId !== undefined && { gameId }) };
     }
     case "tag": {
       const category = str(o, "category", true);

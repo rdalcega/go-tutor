@@ -24,6 +24,7 @@ import type {
   MoveRecord,
   Overlay,
   ProblemListItem,
+  ProblemReview,
   ProblemsResponse,
   ProblemView,
   Profile,
@@ -92,6 +93,11 @@ export function problemOrigin(p: { source?: { gameId: string; moveNumber: number
   const size = p.size ?? 9;
   if (p.generated) return `generated ${size}x${size}, difficulty ${p.generated.difficultyRank}, ${p.generated.batchId}`;
   return "built-in";
+}
+
+/** ", review g12 2/4" for a problem in a review of one game's mistakes, else "". */
+function reviewText(r: ProblemReview | undefined): string {
+  return r ? `, review ${r.gameId} ${r.index}/${r.total}` : "";
 }
 
 /** "batch2 (17k vs 12k): 7/20 (9x9 3/7, 13x13 2/7, 19x19 2/6)". */
@@ -228,7 +234,7 @@ function formatKnownEvent(e: TutorEvent, ctx: EventContext): string {
       return `RATING ${e.gameId} ${ratingChangeText(e.rating)}`;
     case "problem_start":
       return (
-        `PROBLEM_START ${e.problemId} ${e.category} ${e.toPlay} to play (${problemOrigin(e)}, box ${e.box}) answers ${e.answers.join(",")} — ` +
+        `PROBLEM_START ${e.problemId} ${e.category} ${e.toPlay} to play (${problemOrigin(e)}, box ${e.box}${reviewText(e.review)}) answers ${e.answers.join(",")} — ` +
         `${quote(e.prompt)} — ${ctx.attached ? "state below" : "run: state"}; let them try, don't give the answer`
       );
     case "generation": {
@@ -301,7 +307,7 @@ function chatLine(c: ChatMessage): string {
 export function problemLines(p: ProblemView, size?: number): string[] {
   const from = problemOrigin({ ...p, ...(size !== undefined && { size }) });
   const state = p.revealed ? (p.solved ? "solved" : "answer shown") : `attempt ${p.attempts + 1} of ${p.maxAttempts}`;
-  const lines = [`problem ${p.id} ${p.category} (${from}, box ${p.box}) ${p.toPlay} to play, ${state}: ${p.prompt}`];
+  const lines = [`problem ${p.id} ${p.category} (${from}, box ${p.box}${reviewText(p.review)}) ${p.toPlay} to play, ${state}: ${p.prompt}`];
   const a = p.lastAttempt;
   if (a) lines.push(`last attempt ${a.move} ${a.correct ? "correct" : "wrong"}${a.pointLoss !== null ? `, lost ${num(a.pointLoss)}` : ""}`);
   if (p.answer) lines.push(`answer ${p.answer.move} (pv ${pv(p.answer.pv)})`);

@@ -253,7 +253,10 @@ export function parseInvocation(argv: string[]): Invocation {
       case "problem": {
         if (positional.length > 1) throw new UsageError("problem takes at most one problem id");
         const problemId = positional[0];
-        return cmd({ type: "start_problem", ...(problemId && { problemId }) });
+        const gameId = flags.string("game");
+        if (gameId !== undefined && problemId) throw new UsageError("problem takes a problem id or --game <id>, not both");
+        if (gameId === "") throw new UsageError(`--game needs a game id (or "last")`);
+        return cmd({ type: "start_problem", ...(problemId && { problemId }), ...(gameId !== undefined && { gameId }) });
       }
       case "tag": {
         const [gameId, moveRaw, category, ...noteParts] = positional;

@@ -436,6 +436,17 @@ variation's numbers, hidden under a drawn stone or mark); `tutor state` lists th
   fresh 30 s to take the moment instead.
 - Problems of every board size work the same way: the view's `settings.size` is the problem's, and
   `problem_start` carries `size` (and `generated`: batch, difficulty rank, self-play ranks).
+- **Reviewing a game's mistakes**: `review_game` (browser, with the finished game's id) or
+  `start_problem` with `gameId` (tutor, `problem --game <id|last>`; "last" is the newest finished
+  game) runs that game's problems in move order (a taken-back first try before the move that
+  stayed), each once, due or not. A finished game's view has `reviewProblems` (its problem count,
+  which the controller keeps per game from `problems.json`), and `review_game` is allowed when it is
+  above 0. During a review, `next_problem` goes on to the review's next problem; after the last it
+  leaves problem mode and says how it went ("Review done: you solved 2 of 3. …"); Next is refused
+  while KataGo checks an attempt, and a problem that can't be set up is skipped. `leave_problem`, a
+  new game or any other problem start ends the review. Each problem's `ProblemView.review` and
+  `problem_start.review` (`{ gameId, index, total }`, 1-based) say where it stands. Results are
+  scheduled like any other attempt.
 
 ## Generated problems
 
@@ -552,6 +563,8 @@ unless `--json`).
   rising/falling trend, recent mistakes, the recommended focus and its reason, and practice problems
   (counts from games and generated, problem generation: the batch in progress or the last batch's
   mastery count, due now by category, per box, and the next few due). Used at session start.
+- `problem --game <gameId|last>` — review a finished game's mistakes (see "Reviewing a game's
+  mistakes"); `PROBLEM_START` and `state`'s problem line then say `review g12 2/4`.
 - `problems` — every practice problem in the order `problem` picks them, with source (or "generated
   13x13, difficulty 14k, batch2"), box, due time, results and the accepted answers.
 - `generate [--status]` — problem generation: the batch in progress (per size found/target), the
@@ -625,7 +638,9 @@ first ones are being generated, with the count; the button's tooltip shows it to
 replaces the eval strip with the category and source ("from your game, move 14", or for a generated
 problem its board and difficulty, "13×13 · about 14k"), the prompt, attempts left, the verdict (correct, or the point loss of
 the attempt and, once out of attempts, the answer; once the problem is over, when it comes back), and
-Next problem / Back to playing buttons. The
+Next problem / Back to playing buttons. A finished game with practice problems shows "Review mistakes
+(3)" in the result dialog and in the controls; during the review the card's heading is
+"Review 2/3 · Shape · move 20" and Next reads "Next mistake", then "Finish review" on the last. The
 board takes clicks and shows the hover stone as in games; Pass, Take back, Hint and Resign are disabled.
 Live updates arrive over `GET /api/events` (SSE of `GameView`; each connection starts with the current
 view, and `GET /api/state` is fetched only if the stream never opens). Controls follow the view's

@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { ProblemView } from "../../src/shared/types.ts";
 import { categoryLabel } from "../../src/shared/text.ts";
-import { attemptsLeftText, generationFact, problemHeading, problemResult, recentMoveLabels } from "../../web/src/geometry.ts";
+import { attemptsLeftText, generationFact, nextProblemLabel, problemHeading, problemResult, recentMoveLabels } from "../../web/src/geometry.ts";
 
 const base: ProblemView = {
   id: "p4",
@@ -24,6 +24,14 @@ describe("problem card helpers", () => {
     const { source: _source, ...rest } = base;
     const generated = { batchId: "batch1", difficultyRank: "17k", weakerRank: "20k", strongerRank: "15k" };
     expect(problemHeading({ ...rest, kind: "generated", generated, category: "tactics" }, 13)).toBe("Tactics · 13×13 · about 17k");
+  });
+
+  it("shows a review's progress in the heading and the Next button", () => {
+    const review = { ...base, review: { gameId: "g1", index: 2, total: 4 } };
+    expect(problemHeading(review)).toBe("Review 2/4 · Life and death · move 14");
+    expect(nextProblemLabel(base)).toBe("Next problem");
+    expect(nextProblemLabel(review)).toBe("Next mistake");
+    expect(nextProblemLabel({ ...review, review: { gameId: "g1", index: 4, total: 4 } })).toBe("Finish review");
   });
 
   it("shows problem generation in the progress card: the batch in progress, else the mastery count", () => {

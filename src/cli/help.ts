@@ -32,11 +32,13 @@ SESSION FLOW
                  learner presses Hint next to the chat input; anything they typed comes as the question.
                  Your answer marks their next move as helped, so it doesn't count for the rank estimate.)
   5. on USER:    answer with say (pass --moment <id> when the line names one).
-  6. on GAME_END: read the review below the line, discuss the top 1-2 mistakes, tag categories, maybe
-                 new-game. The server waits up to 15 s for the rank estimate, so the RATING line
+  6. on GAME_END: read the review below the line, discuss the top 1-2 mistakes, tag categories, then
+                 offer a review of the game's mistakes as problems (problem --game <id>) or new-game. The server waits up to 15 s for the rank estimate, so the RATING line
                  usually comes with GAME_END; a slower one follows on its own.
   7. on PROBLEM_START / PROBLEM: the learner is on a practice problem. Let them try; after a wrong
                  first attempt ask what they see (say); after the answer is shown, explain it with show.
+                 "review g12 2/4" on the line: the 2nd of 4 problems in a review of game g12's mistakes;
+                 the learner's Next goes on through it, and after the last it ends.
   8. on BATCH:   a batch of generated practice problems finished (see GENERATED PROBLEMS); mention
                  it when it fits, not in the middle of a game on Silent.
   GAME_START, PROBLEM_START, BATCH finished and FALLBACK need no answer of their own: watch prints
@@ -113,6 +115,7 @@ COMMANDS
         GAME_END g12 W+3.5 — 3 mistakes (1 taken back), worst move 14 (6.2), total loss 15 over 61 moves, help: 1 hint, rank estimate running (a RATING line follows) — review below
         RATING g12 rank estimate 18k from 25 unassisted moves (1 hint); rating 10 -> 11.9 (+1.9, rank 18k); next bot 18k
         PROBLEM_START p4 life_and_death B to play (from g12 move 14, box 1) answers D5 — "Black to play. ..." — state below; ...
+        PROBLEM_START p5 shape B to play (from g12 move 20, box 1, review g12 2/3) answers E4 — ...
         PROBLEM_START gen7 tactics B to play (generated 13x13, difficulty 14k, batch1, box 1) answers K4 — ...
         PROBLEM p4 attempt 1 C7 wrong, lost 5.2 (life_and_death; another attempt left) — ask what they see, ...
         PROBLEM p4 attempt 2 D5 correct (life_and_death) — best D5, pv D5 E4 C6 — say why it works
@@ -179,14 +182,18 @@ COMMANDS
       Bot ranks run from 20k to 9d (KataGo's human-style profiles).
       Example: npm run -s tutor -- new-game --size 9 --rank 18k
 
-  problem [id]
+  problem [id] [--game <gameId|last>]
       Put a practice problem on the learner's board (problem mode; any game waits underneath). With
       no id, the next due one: the recommended focus category first, then problems from the learner's
       own mistakes, then generated ones. The learner gets 2 attempts; KataGo judges each move
       (within 1 point of its best counts as correct) and shows its line when the problem is over.
       In problem mode, show and mark draw on the problem position (show starts with the learner's
       color); the learner presses Next problem or Back to playing, or you run new-game.
+      --game: review a finished game's mistakes instead (the learner's Review mistakes button): its
+      problems in move order, each once, due or not; Next goes through them, and after the last (or
+      Back to playing) the review ends. Results are scheduled like any attempt.
       Example: npm run -s tutor -- problem p4
+      Example: npm run -s tutor -- problem --game last
 
   problems
       Every practice problem in the order "problem" picks them: id, category, source game and move
