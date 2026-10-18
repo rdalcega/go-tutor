@@ -26,6 +26,9 @@ import { colorName, judgeModeChangedText, round1, tutorLevelChangedText } from "
 import { atLevelOf, judgedLoss } from "../../src/shared/judge.ts";
 import { thresholdFor } from "../../src/shared/threshold.ts";
 
+/** The mock bot's move that is a pass (its third), to show how the UI marks the bot's pass. */
+const MOCK_BOT_PASS_AT = 3;
+
 /** A batch of generated problems halfway done, for the progress card. */
 const MOCK_GENERATION: GenerationStatus = {
   state: "waiting",
@@ -427,6 +430,11 @@ class MockServer implements Transport {
       case "pass": {
         if (!s || !game || game.toPlay !== s.humanColor || v.status !== "playing") return "It isn't your turn.";
         game.pass();
+        // Passing after the bot passed ends the game; otherwise the bot passes too.
+        if (game.isOver) {
+          this.finish({ winner: "W", margin: -4.5, reason: "score" });
+          return null;
+        }
         v.engineBusy = true;
         setTimeout(() => {
           game.pass();
@@ -584,7 +592,9 @@ class MockServer implements Transport {
     v.engineBusy = true;
     this.emit();
     setTimeout(() => {
-      for (let tries = 0; tries < 50; tries++) {
+      // The bot passes on its third move of a game, so the pass banner and status can be eyeballed.
+      const botMoves = game.moves.filter((r) => r.move.color !== v.settings?.humanColor).length;
+      for (let tries = 0; tries < 50 && botMoves !== MOCK_BOT_PASS_AT - 1; tries++) {
         const p = this.randomEmpty();
         if (!p) break;
         if (game.playAt(p).ok) break;

@@ -20,9 +20,11 @@ import { readCollapsed, writeCollapsed } from "./collapse.ts";
 import { gtpLine, moveGtp, movePoint } from "../../src/shared/coords.ts";
 import {
   attemptsLeftText,
+  botPassBanner,
   formatLoss,
   humanMoves,
   lastHumanMove,
+  lastPass,
   latestEstimate,
   lossLevel,
   nextBotText,
@@ -54,6 +56,7 @@ const $ = <T extends Element = HTMLElement>(id: string): T => {
 const el = {
   boardWrap: $("board-wrap"),
   canvas: $<HTMLCanvasElement>("board"),
+  passBanner: $("pass-banner"),
   variationLabel: $("variation-label"),
   captionRow: $("caption-row"),
   hideOverlay: $<HTMLButtonElement>("hide-overlay"),
@@ -207,6 +210,7 @@ function can(v: GameView | null, action: ClientAction["type"]): v is GameView {
 function render(): void {
   const v = view;
   renderBoard(v);
+  renderPassBanner(v);
   renderStatus(v);
   renderControls(v);
   renderLevels(v);
@@ -248,6 +252,31 @@ function renderBoard(v: GameView | null): void {
   // Any drawing gets a Hide button (Esc too); it stays until the learner moves on or hides it.
   el.captionRow.hidden = !v.overlay;
   el.hideOverlay.disabled = !can(v, "clear_overlay");
+}
+
+/** How long the banner for the bot's pass stays on the board; the status line keeps saying it. */
+const PASS_BANNER_MS = 4000;
+let passBannerShownFor: string | null = null;
+let passBannerTimer: ReturnType<typeof setTimeout> | undefined;
+
+/**
+ * The bot's pass is easy to miss (no stone appears), so it gets a banner on the board, once per
+ * pass. It is visual only: the status line says the same and is the live region screen readers hear.
+ */
+function renderPassBanner(v: GameView | null): void {
+  const text = v?.mode === "game" && v.settings ? botPassBanner(lastPass(v.moves, v.settings.humanColor)) : null;
+  if (!text || !v) {
+    clearTimeout(passBannerTimer);
+    el.passBanner.hidden = true;
+    return;
+  }
+  const key = `${v.gameId}|${v.moves.length}`;
+  if (key === passBannerShownFor) return;
+  passBannerShownFor = key;
+  el.passBanner.textContent = text;
+  el.passBanner.hidden = false;
+  clearTimeout(passBannerTimer);
+  passBannerTimer = setTimeout(() => (el.passBanner.hidden = true), PASS_BANNER_MS);
 }
 
 /**
@@ -321,10 +350,17 @@ function turnText(v: GameView): string {
     return v.engineBusy ? "Checking your move…" : `Problem: ${colorName(p.toPlay)} to play.`;
   }
   if (v.mode === "idle" || !s) return "Start a new game to begin.";
-  if (v.status === "finished") return "Game over.";
+  // A pass places no stone, so the status line says so until the next move.
+  const pass = lastPass(v.moves, s.humanColor);
+  const passed = !pass ? "" : pass.by === "bot" ? `${colorName(pass.color)} passed${pass.final ? " too" : ""}. ` : pass.final ? "You both passed. " : "";
+  if (v.status === "finished") return pass?.final ? `${passed}Game over.` : "Game over.";
   if (v.result) return "You resigned. KataGo is finishing its verdict on your last move…";
+  if (pass?.final) return `${passed}Counting the score…`;
   if (v.status === "paused") return "Paused for a teaching moment.";
-  if (v.toPlay === s.humanColor) return v.engineBusy ? "Analyzing your position…" : `Your move (${colorName(s.humanColor)}).`;
+  if (v.toPlay === s.humanColor) {
+    if (v.engineBusy) return `${passed}Analyzing your position…`;
+    return pass ? `${passed}Your move (${colorName(s.humanColor)}): pass too to end the game, or play on.` : `Your move (${colorName(s.humanColor)}).`;
+  }
   return "Bot is thinking…";
 }
 
