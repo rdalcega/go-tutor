@@ -639,6 +639,23 @@ describe("ProblemGenerator", () => {
     expect(h.generator.batches.map((b) => b.id)).toEqual(["batch1"]);
   });
 
+  it("drops a self-play game in progress that doesn't replay, and starts another", async () => {
+    const store = tempStore();
+    const first = harness(selfPlayEngine(), store);
+    first.mayRun.value = false;
+    first.generator.startNow();
+    first.generator.stop();
+    const file = store.loadGeneration();
+    file.progress!.game = { size: 9, weaker: "B", moves: ["E5", "E5"] }; // the second E5 is on a stone
+    store.saveGeneration(file);
+    const h = harness(selfPlayEngine(), store);
+    h.mayRun.value = true;
+    await runUntilStopped(h, () => h.engine.analyzeCalls.length > 0); // the next game's first query
+    const game = store.loadGeneration().progress?.game;
+    expect(game).toBeTruthy();
+    expect(game!.moves.slice(0, 2)).not.toEqual(["E5", "E5"]);
+  });
+
   it("starts a batch on demand when none is in progress", () => {
     const h = harness();
     h.mayRun.value = false;

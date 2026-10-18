@@ -17,7 +17,7 @@ import { JUDGE_MODE_TEXT, TUTOR_LEVEL_TEXT, categoryLabel, colorName, formatScor
 import { type ConnectionState, type Transport, httpTransport } from "./api.ts";
 import { BoardView } from "./board.ts";
 import { readCollapsed, writeCollapsed } from "./collapse.ts";
-import { moveGtp, movePoint } from "../../src/shared/coords.ts";
+import { gtpLine, moveGtp, movePoint } from "../../src/shared/coords.ts";
 import {
   attemptsLeftText,
   formatLoss,
@@ -217,7 +217,7 @@ function render(): void {
 
 /** The board before move `fromMove`, memoized by the moves that lead to it (a take-back and a different replay change it, not just the count). */
 function boardBefore(v: GameView, settings: GameSettings, fromMove: number): ReturnType<typeof positionBefore> {
-  const key = `${v.gameId}|${fromMove}|${v.moves.slice(0, fromMove - 1).map((r) => moveGtp(r.move, settings.size)).join(" ")}`;
+  const key = `${v.gameId}|${fromMove}|${gtpLine(v.moves.slice(0, fromMove - 1), settings.size).join(" ")}`;
   if (beforeCache?.key !== key) beforeCache = { key, value: positionBefore(v.moves, settings, fromMove) };
   return beforeCache.value;
 }

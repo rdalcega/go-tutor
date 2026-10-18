@@ -8,7 +8,7 @@
 // fails partway it writes nothing and throws `MigrationAborted`, and the controller tries again.
 
 import { gameFromLine, movesFromLine, writeSgf } from "../engine/index.ts";
-import { moveGtp, movePoint, samePoint } from "../shared/coords.ts";
+import { gtpLine, movePoint, samePoint } from "../shared/coords.ts";
 import { ratingToRank } from "../shared/rank.ts";
 import { assistText, rankEstimateText } from "../shared/text.ts";
 import { playedThreshold } from "../shared/threshold.ts";
@@ -66,6 +66,22 @@ export interface Reconstruction {
 }
 
 const sameMove = (a: Move, b: Move) => a.color === b.color && ("pass" in a ? "pass" in b : samePoint(movePoint(a), movePoint(b)));
+
+/** The attempt in `list` that is `t` (same move number, move and position): the file's and the log's lists needn't align by index. */
+function sameAttempt(list: readonly TakenBackMove[], t: TakenBackMove): TakenBackMove | undefined {
+  const line = t.before.join(" ");
+  return list.find((k) => k.moveNumber === t.moveNumber && sameMove(k.record.move, t.record.move) && k.before.join(" ") === line);
+}
+
+/** A copy of the first attempt `t`, with what the file knows of it (`old`: its eval, category and tag). */
+function copyAttempt(t: TakenBackMove, old?: TakenBackMove): TakenBackMove {
+  return {
+    ...t,
+    record: { ...t.record, ...(old?.record.eval && { eval: old.record.eval }) },
+    ...(old?.heuristic && { heuristic: old.heuristic }),
+    ...(old?.tag && { tag: old.tag }),
+  };
+}
 
 /**
  * Whether the learner's hint request at `asked` was answered before their next move at `next`
@@ -125,7 +141,7 @@ export function reconstructGame(saved: SavedGame, events: readonly TutorEvent[])
         break;
       }
       const removed = stack.splice(e.moves);
-      const line = stack.map((r) => moveGtp(r.move, size));
+      const line = gtpLine(stack, size);
       for (const record of removed) {
         if (record.move.color !== human) continue;
         takenBack.push({ moveNumber: record.number, record, by: e.by, ts: e.ts, before: line });
@@ -143,19 +159,16 @@ export function reconstructGame(saved: SavedGame, events: readonly TutorEvent[])
     return assist?.length ? { ...rest, assist } : rest;
   });
   // First attempts: the log's when it replays the whole game (it can hold ones from before the file
-  // kept them), else the file's when it has them, else what the log yields. What the file knows of
-  // an attempt (its eval, category and tag) is kept; the attempts are copies, the file's are left alone.
+  // kept them), with what the file knows of each; else the file's when it has them; else what the
+  // log yields. All copies: the file's objects are left alone.
   const known = saved.takenBack ?? [];
-  const base = complete || !known.length ? (consistent ? takenBack : []) : known;
-  const firsts = base.map((t) => {
-    const old = known.find((k) => k.moveNumber === t.moveNumber && k.before.join(" ") === t.before.join(" "));
-    return {
-      ...t,
-      record: { ...t.record, ...(old?.record.eval && { eval: old.record.eval }) },
-      ...(old?.heuristic && { heuristic: old.heuristic }),
-      ...(old?.tag && { tag: old.tag }),
-    };
-  });
+  const firsts = complete
+    ? takenBack.map((t) => copyAttempt(t, sameAttempt(known, t)))
+    : known.length
+      ? known.map((t) => copyAttempt(t))
+      : consistent
+        ? takenBack.map((t) => copyAttempt(t))
+        : [];
   return { moves, takenBack: firsts, assistance: complete ? assistance : { ...assistance, ...saved.assistance }, complete, events: mine.length };
 }
 /** What `migrateRatingModel` needs. */
@@ -383,10 +396,10 @@ export async function migrateRatingModel(deps: MigrationDeps): Promise<Migration
     // The file as it is now: a tag the tutor made while KataGo worked is in its summary (a board
     // move) or on its first attempts, so the summary written is built from it, not the snapshot.
     const current = store.loadGame(saved.id) ?? saved;
-    rebuilt.takenBack.forEach((t, i) => {
-      const now = current.takenBack?.[i];
-      if (now?.tag && now.moveNumber === t.moveNumber) t.tag = now.tag;
-    });
+    for (const t of rebuilt.takenBack) {
+      const tag = sameAttempt(current.takenBack ?? [], t)?.tag;
+      if (tag) t.tag = tag;
+    }
     const summary = summaryWithFirstAttempts(current, current.summary ?? saved.summary!, rebuilt, threshold);
     const change = changes.get(saved.id);
     if (change) summary.rating = change;

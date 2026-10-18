@@ -63,6 +63,11 @@ export function moveGtp(move: Move, size: number): Gtp {
   return toGtp(movePoint(move), size);
 }
 
+/** The GTP line of a run of move records: a position, as the moves that led to it. */
+export function gtpLine(records: readonly { move: Move }[], size: number): Gtp[] {
+  return records.map((r) => moveGtp(r.move, size));
+}
+
 /** A `color` move at a GTP coordinate (fromGtp's errors for anything off the board). */
 export function gtpMove(gtp: Gtp, color: Move["color"], size: number): Move {
   const point = fromGtp(gtp, size);

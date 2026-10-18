@@ -216,10 +216,11 @@ export function normalizeGeneration(file: GenerationFile): string | null {
     return `progress for ${named} replaced: resuming ${unfinished.id}`;
   }
   // The right batch, but a damaged entry (a hand edit, a torn write): it resumes from a new game, keeping a reserve that is a list.
-  const game = p.game ?? null;
-  const gameOk = game === null || (isBoardSize(game.size) && (game.weaker === "B" || game.weaker === "W") && Array.isArray(game.moves));
-  if (gameOk && Array.isArray(p.reserve)) return null;
-  file.progress = { batchId: p.batchId, game: null, reserve: Array.isArray(p.reserve) ? p.reserve : [] };
+  const game = p.game;
+  const gameOk = !game || (isBoardSize(game.size) && (game.weaker === "B" || game.weaker === "W") && Array.isArray(game.moves));
+  const reserve = Array.isArray(p.reserve) ? p.reserve : null;
+  if (gameOk && reserve) return null;
+  file.progress = { batchId: p.batchId, game: null, reserve: reserve ?? [] };
   return `damaged progress for ${named} reset`;
 }
 
@@ -895,7 +896,17 @@ export class ProblemGenerator {
       this.save();
       return;
     }
-    const rules = this.rulesFor(game);
+    let rules: GoGame;
+    try {
+      rules = this.rulesFor(game);
+    } catch (err) {
+      // A game in progress that doesn't replay (a damaged generation.json) makes way for a new one, instead of failing every step.
+      this.deps.log(`problem generation: the self-play game in progress doesn't replay (${(err as Error).message}); starting another`);
+      progress.game = null;
+      this.forgetReplay();
+      this.save();
+      return;
+    }
     const settings = SIZE_SETTINGS[game.size];
     const stats = batch.stats[game.size];
     const n = game.moves.length;

@@ -813,6 +813,25 @@ describe("GameController", () => {
     expect(again.view().moment).toMatchObject({ state: "tutor", awaitingLearner: true }); // the drawing is up: the learner presses Continue
   });
 
+  it("a claim alone is saved: a restart right after it keeps the moment the tutor's", async () => {
+    setup({ tutor: true });
+    await startGame();
+    engine.lossAfter(["C3"], 6);
+    ctl.play(C3);
+    await flush();
+    const id = ctl.view().moment!.id;
+    await ctl.handleTutor({ type: "claim", momentId: id });
+    ctl.flush(); // as on shutdown
+    const again = new GameController({ engine, store, clock, botDelayMs: 0, tutorTimeoutMs: 30_000 });
+    again.restoreLastGame();
+    again.setEngineState("ready");
+    await flush();
+    expect(again.view().moment).toMatchObject({ id, state: "tutor" });
+    clock.advance(60_000);
+    expect(again.view().moment?.state).toBe("tutor");
+    expect(again.view().chat.some((m) => /cost about/.test(m.text))).toBe(false);
+  });
+
   it("a restart during a moment waiting for the tutor gives the tutor a fresh wait, then falls back", async () => {
     setup({ tutor: true });
     await startGame();

@@ -9,7 +9,7 @@
 import { randomBytes } from "node:crypto";
 import { GoGame, deadStonesFromOwnership, emptyBoard, gameFromLine, opponent, scoreArea, toAscii, writeSgf } from "../engine/index.ts";
 import { allowedActions, hintBlocked, retryBlocked, takeBackBlocked, type ActionState } from "../shared/allowed.ts";
-import { gtpMove, moveGtp, movePoint, samePoint, tryFromGtp } from "../shared/coords.ts";
+import { gtpLine, gtpMove, moveGtp, movePoint, samePoint, tryFromGtp } from "../shared/coords.ts";
 import { atLevelOf, judgedLoss } from "../shared/judge.ts";
 import { atLevelRankFor, normalizeBotRank } from "../shared/rank.ts";
 import { colorName, formatScore, judgeModeChangedText, plural, round1, takenBackTryText, tutorLevelChangedText } from "../shared/text.ts";
@@ -32,7 +32,6 @@ import {
   type JudgeMode,
   type MistakeCategory,
   type Move,
-  type MoveEval,
   type MoveRecord,
   type Overlay,
   type Point,
@@ -1013,7 +1012,12 @@ export class GameController {
     }, this.tutorTimeoutMs);
   }
 
-  /** KataGo answers instead of the tutor: best move and its line on the board, plus plain words. */
+  /**
+   * KataGo answers instead of the tutor: the better line, drawn on the board from before the move
+   * (an alternative to it) with the move actually played marked ✕ and the answer highlighted, so
+   * hiding the drawing hides both; and plain words with it. Judged at level, the answer is the
+   * reference move (a stronger player's), else KataGo's best.
+   */
   private applyFallback(): void {
     const moment = this.moment;
     const game = this.game;
@@ -1021,50 +1025,41 @@ export class GameController {
     this.cancelMomentTimer();
     this.setMomentState("fallback");
     const record = game.moves[moment.moveNumber - 1];
-    if (record?.eval) {
-      const { overlay, text } = this.fallbackFor(game, record, record.eval);
-      this.overlay = overlay;
-      this.system(text, moment.id);
+    const evaluation = record?.eval;
+    if (record && evaluation) {
+      const played = moveGtp(record.move, game.size);
+      const atLevel = atLevelOf(record);
+      const answer = atLevel ? { move: atLevel.move, pv: atLevel.pv } : { move: evaluation.bestMove, pv: evaluation.bestPv };
+      const moves = lineStones(game.before(record.number), answer.pv, PV_STONES);
+      const playedPoint = movePoint(record.move);
+      const marks: NonNullable<Overlay["marks"]> = playedPoint && !moves.some((m) => samePoint(m.point, playedPoint)) ? [{ point: playedPoint, kind: "x" }] : [];
+      const bestPoint = answer.move === "pass" ? undefined : tryFromGtp(answer.move, game.size);
+      const label = atLevel ? `A ${atLevel.rank}'s line instead of ${played}` : `KataGo's line instead of ${played}`;
+      this.overlay = moves.length
+        ? { variation: { label, moves, fromMove: record.number }, ...(marks.length && { marks }), ...(bestPoint && { best: bestPoint }) }
+        : null;
+      const playedText = played === "pass" ? "Passing" : `Your move at ${played}`;
+      const best = answer.move === "pass" ? "passing" : answer.move;
+      const where = playedPoint ? ` (your move is marked ✕)` : "";
+      const line = moves.length > 1 ? ` The board shows the position before your move${where}; the numbered stones show how play might go instead.` : "";
+      const verdict = atLevel
+        ? `${playedText} cost about ${round1(judgedLoss(record)!)} points compared with ${best}, the move a ${atLevel.rank} player would most likely play.`
+        : `${playedText} cost about ${round1(evaluation.pointLoss)} points. KataGo would have played ${best}.`;
+      this.system(`${verdict}${line} Press Continue to play on, or Try again to take your move back.`, moment.id);
     }
     this.emit({ type: "fallback", momentId: moment.id });
   }
 
   /**
-   * KataGo's answer to a mistake, for the fallback: the better line, drawn on the board from before
-   * the move (an alternative to it) with the move actually played marked ✕ and the answer
-   * highlighted, so hiding the drawing hides both; and the words that go with it. Judged at level,
-   * the answer is the reference move (a stronger player's), else KataGo's best.
-   */
-  private fallbackFor(game: GoGame, record: MoveRecord, evaluation: MoveEval): { overlay: Overlay | null; text: string } {
-    const played = moveGtp(record.move, game.size);
-    const atLevel = atLevelOf(record);
-    const answer = atLevel ? { move: atLevel.move, pv: atLevel.pv } : { move: evaluation.bestMove, pv: evaluation.bestPv };
-    const moves = lineStones(game.before(record.number), answer.pv, PV_STONES);
-    const playedPoint = movePoint(record.move);
-    const marks: NonNullable<Overlay["marks"]> = playedPoint && !moves.some((m) => samePoint(m.point, playedPoint)) ? [{ point: playedPoint, kind: "x" }] : [];
-    const bestPoint = answer.move === "pass" ? undefined : tryFromGtp(answer.move, game.size);
-    const label = atLevel ? `A ${atLevel.rank}'s line instead of ${played}` : `KataGo's line instead of ${played}`;
-    const overlay = moves.length
-      ? { variation: { label, moves, fromMove: record.number }, ...(marks.length && { marks }), ...(bestPoint && { best: bestPoint }) }
-      : null;
-    const playedText = played === "pass" ? "Passing" : `Your move at ${played}`;
-    const best = answer.move === "pass" ? "passing" : answer.move;
-    const where = playedPoint ? ` (your move is marked ✕)` : "";
-    const line = moves.length > 1 ? ` The board shows the position before your move${where}; the numbered stones show how play might go instead.` : "";
-    const verdict = atLevel
-      ? `${playedText} cost about ${round1(judgedLoss(record)!)} points compared with ${best}, the move a ${atLevel.rank} player would most likely play.`
-      : `${playedText} cost about ${round1(evaluation.pointLoss)} points. KataGo would have played ${best}.`;
-    return { overlay, text: `${verdict}${line} Press Continue to play on, or Try again to take your move back.` };
-  }
-
-  /**
-   * The moment's new state. Only a waiting moment has a deadline, and only when one is given; a
+   * The moment's new state, saved with the game (a restart restores the moment as it is; a claim
+   * alone changes nothing else). Only a waiting moment has a deadline, and only when one is given; a
    * state change ends any wait for the learner's Continue (tutorResume sets it again).
    */
   private setMomentState(state: TeachingMoment["state"], deadline?: number): void {
     if (!this.moment) return;
     const { deadline: _old, awaitingLearner: _awaiting, ...rest } = this.moment;
     this.moment = { ...rest, state, ...(state === "waiting" && deadline !== undefined && { deadline }) };
+    this.save();
   }
 
   private activeMoment(): TeachingMoment | null {
@@ -1180,7 +1175,7 @@ export class GameController {
     const by = text === null ? "human" : "tutor";
     this.invalidatePending();
     const removed = game.moves.slice(game.moves.length - count);
-    const line = game.moves.slice(0, game.moves.length - count).map((r) => moveGtp(r.move, game.size));
+    const line = gtpLine(game.moves.slice(0, game.moves.length - count), game.size);
     game.undo(count);
     for (const record of removed) if (record.move.color === settings.humanColor) this.keepTakenBack(record, by, line);
     if (by === "human") this.assistance.takeBacks++;

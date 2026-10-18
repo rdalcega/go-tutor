@@ -444,10 +444,9 @@ export class Store {
   }
 
   /** The newest logged event of `type` that `matches` accepts, or null. Lines of other types are skipped unparsed, so a miss is cheap even on a full log. */
-  findEvent<T extends TutorEvent["type"]>(type: T, matches: (e: Extract<TutorEvent, { type: T }>) => boolean): Extract<TutorEvent, { type: T }> | null {
-    type Found = Extract<TutorEvent, { type: T }>;
+  findEvent(type: TutorEvent["type"], matches: (e: TutorEvent) => boolean): TutorEvent | null {
     const marker = `"type":"${type}"`;
-    return this.newestEvent((e) => e.type === type && matches(e as Found), (line) => line.includes(marker)) as Found | null;
+    return this.newestEvent((e) => e.type === type && matches(e), (line) => line.includes(marker));
   }
 
   /** The seq of the last logged event, or 0: the newest line that parses to an event with a seq (a torn line parses to nothing). */
