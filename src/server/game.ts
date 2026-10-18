@@ -537,7 +537,11 @@ export class GameController {
       // KataGo's answer from a game saved before drawings were kept (no `overlay` in its file) is
       // gone with it: the moment waits again, for nobody, so resumeTurn answers it again.
       else if (m.state === "fallback" && saved.overlay === undefined) this.openMoment(last, { ...m, state: "waiting" });
-      else this.restoreMoment(last, m);
+      // As it was (its event is in the log, where a fresh `watch` finds it): the tutor's stays the
+      // tutor's, as after a dropped connection, and KataGo's stays answered, both waiting for the
+      // learner's Continue. One still waiting for a tutor falls back at once: nobody is attached at
+      // boot (resumeTurn settles it), and a tutor who reconnects sees it as fallen back and can comment.
+      else this.openMoment(last, m);
     } else if (m && m.state !== "resolved" && m.moveNumber > game.moves.length) {
       // The tutor's rethink took its move back and the learner hadn't played again: it stays open, with the tutor, as retry left it.
       this.moment = m;
@@ -986,18 +990,6 @@ export class GameController {
     this.settleWaitingMoment();
   }
 
-  /**
-   * After a restart, the open moment as it was saved, its drawing included (its event is already in
-   * the log: a fresh `watch` finds it there). The tutor's moment stays the tutor's, as after a dropped
-   * connection, and KataGo's fallback stays answered; both wait for the learner's Continue. One still
-   * waiting for a tutor falls back at once (resumeTurn settles it: nobody is attached at boot, and a
-   * tutor who reconnects sees it as fallen back and can still comment).
-   */
-  private restoreMoment(record: MoveRecord, saved: TeachingMoment): void {
-    const { deadline: _deadline, ...rest } = saved;
-    this.openMoment(record, rest);
-  }
-
   /** The game pauses on `moment`, about `record` (the last move): it won't open again for that move. */
   private openMoment(record: MoveRecord, moment: TeachingMoment): void {
     this.momentShown.add(record);
@@ -1377,7 +1369,9 @@ export class GameController {
     this.addChat("user", trimmed, momentId);
     this.emit({ type: "user_message", text: trimmed, gameId: this.gameId, ...(momentId && { momentId }), ...(problemId && { problemId }) });
     if (this.tutorAttached) {
-      this.noteQuestion(true); // the tutor got it: on Silent it may answer with one say
+      // The tutor got it: on Silent it may answer with one say. A question on a problem isn't the
+      // game's (Silent's rule and the saved game are the game's; problems are open to the tutor).
+      if (!problemId) this.noteQuestion(true);
     } else {
       this.system("Your tutor isn't connected right now, so nobody can answer chat. KataGo's feedback still works.");
     }
@@ -1443,7 +1437,7 @@ export class GameController {
     this.status = "finished";
     this.moment = null;
     this.overlay = null;
-    if (!this.practice) this.questionOpen = false; // a question about a problem on the board stays open
+    this.questionOpen = false;
     const summary = this.buildSummary();
     this.summary = summary;
     // The game must still be saved and announced if the profile can't be updated.
@@ -1901,8 +1895,7 @@ export class GameController {
       takenBack: this.takenBack,
       assistance: this.assistance,
       ...(this.help && { help: { at: this.help.at, kinds: [...this.help.kinds], ...(this.help.hintAsked && { hintAsked: true as const }) } }),
-      // A question asked on a practice problem isn't the game's (a restart brings the game back, not the problem).
-      ...(this.questionOpen && !this.practice && { questionOpen: true as const }),
+      ...(this.questionOpen && { questionOpen: true as const }),
       ...(this.atLevelRank && { atLevelRank: this.atLevelRank }),
     };
     try {
