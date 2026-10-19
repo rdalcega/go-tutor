@@ -18,6 +18,26 @@ Features to add or change. Newest at the bottom; move an item to "Done" with its
   each bot move (`prefetch`, cached), so the HINT line (or `state` on the learner's turn) should
   show KataGo's best move, its PV and the top candidates for the position to play. The tutor still
   nudges rather than giving the answer.
+- **One lesson per missed point: group a run of mistakes into variants.** When a big point stays
+  open while the learner plays elsewhere, each move elsewhere is a new mistake with the same
+  answer, so one oversight becomes several near-identical problems. In the data on 2026-10-19, 33
+  of 66 game problems were in 14 such runs (game 20261018-125442: moves 57, 59, 63, 65 and 69 all
+  answer A2), and practice served p23, p24 and p25 back to back. When a game's mistakes share an
+  accepted answer and the area around it hasn't changed between them, link them as variants of
+  one lesson: one schedule (a solve or a miss counts for the lesson), one category (the tutor's
+  tag applies to all of them; today the A2 run is tagged both life_and_death and
+  capturing_race), shown once per practice set and once in Review mistakes. Each later review
+  shows a different variant, so the learner practises the idea, not one memorised board. The
+  review and the tutor's view should name the run ("A2 stayed the biggest point from move 57 to
+  69"): not seeing what's urgent elsewhere is a lesson in its own right. Group the existing
+  problems too.
+- **More variety within a practice session.** Besides the runs above: a missed problem comes back
+  every 10 minutes and goes ahead of everything else (p8 was shown 6 times on the evening of
+  2026-10-18); focus problems always come first, so a set is mostly one category (capturing_race
+  is 22 of 66); and Review mistakes plays every one of a game's problems (17 for game
+  20261018-144000). Don't show two problems from the same game or lesson back to back when
+  there's something else, cap the focus category at about half of a set, and after two misses in
+  a session push a problem to a later session. Keep Review mistakes in move order, one per lesson.
 
 ## Done
 
