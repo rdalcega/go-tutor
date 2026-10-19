@@ -459,10 +459,14 @@ variation's numbers, hidden under a drawn stone or mark); `tutor state` lists th
     drawing goes and comes back with `playout_exit` (Done).
   - `playout_back` / `playout_forward` step one move; Back also works while KataGo thinks (its answer
     is dropped) and after two passes. Forward replays the next move of the line; at the end of the
-    line it asks KataGo for the side to play, so on the learner's turn KataGo moves for them (one move
-    per press, no automatic reply). The learner's `play` or `pass` (their turn only, not while KataGo
-    thinks, not after two passes) drops the moves that were ahead, only once the move is legal, and
-    KataGo answers it unless that pass ended it. No branches are kept.
+    line it asks KataGo for the side to play, so on the learner's turn KataGo moves for them. The
+    learner's `play` or `pass` (their turn only, not while KataGo thinks, not after two passes) drops
+    the moves that were ahead, only once the move is legal. No branches are kept.
+  - KataGo's side answers by itself (`autoAnswer`) whenever a move leaves it to play: a Forward, the
+    learner's move, or KataGo's move for them, unless two passes ended it. It replays the line's next
+    move when the line goes on (so the play-out's 2nd move follows the 1st), else asks KataGo; with
+    KataGo not ready, Forward asks later. Back never does: stepping back onto KataGo's turn (back over
+    its move only) is the learner looking at that position, and Forward replays the move from there.
   - KataGo's move: a plain `analyze` of the play-out position (main net, no `humanSLProfile`, 600
     visits), never `botMove`, whatever the learner's level; `playoutMove` takes its best candidate that
     is legal in our rules, or a pass. The attempts' cached analyses are reused when they match; others

@@ -567,8 +567,15 @@ class MockServer implements Transport {
         po.line.length = po.cursor;
         po.line.push(move);
         advance(move);
+        answer();
         this.emit();
       }, 600);
+    };
+    // As on the server: a move that leaves KataGo to play has it answer (stepping back never does).
+    const answer = () => {
+      if (po.game.isOver || po.game.toPlay === p.toPlay) return;
+      if (po.cursor < po.line.length) advance(po.line[po.cursor]!);
+      else reply();
     };
     switch (a.type) {
       case "playout_exit":
@@ -589,8 +596,10 @@ class MockServer implements Transport {
         return null;
       case "playout_forward":
         if (po.thinking) return "KataGo is thinking.";
-        if (po.cursor < po.line.length) advance(po.line[po.cursor]!);
-        else if (po.game.isOver) return "Both sides passed.";
+        if (po.cursor < po.line.length) {
+          advance(po.line[po.cursor]!);
+          answer();
+        } else if (po.game.isOver) return "Both sides passed.";
         else reply();
         return null;
       case "play":
@@ -605,7 +614,7 @@ class MockServer implements Transport {
         }
         advance(gtp);
         po.gen++;
-        if (!po.game.isOver && po.cursor === po.line.length) reply();
+        answer();
         return null;
       }
     }

@@ -27,7 +27,8 @@ function aboutGame(cmd: TutorCommand, gameMomentId: string | undefined): boolean
 
 /**
  * Playing an answered problem out against KataGo. One line, no branches: playing a move after
- * stepping back drops the moves that were ahead.
+ * stepping back drops the moves that were ahead. KataGo's side answers by itself whenever a move
+ * leaves it to play; only stepping back onto its turn waits, so the learner can look at that position.
  */
 interface Playout {
   /** The whole line from the problem position, the learner first, moves ahead of the cursor included. */
@@ -355,7 +356,10 @@ export class PracticeSession {
     this.deps.changed();
   }
 
-  /** One move back. Also while KataGo thinks: its answer, for the position left, is dropped. */
+  /**
+   * One move back. Also while KataGo thinks: its answer, for the position left, is dropped. Stepping
+   * back over KataGo's move never replays it: the learner went back to look at that position.
+   */
   private stepBack(): void {
     const po = this.requirePlayout();
     if (po.cursor === 0) throw new UserError("This is the problem position: there is nothing to step back to.");
@@ -373,13 +377,17 @@ export class PracticeSession {
     po.abort = null;
   }
 
-  /** One move forward: the next move of the line, or at its end KataGo's move for the side to play. */
+  /**
+   * One move forward: the next move of the line, or at its end KataGo's move for the side to play.
+   * A move that leaves KataGo to play has it answer.
+   */
   private stepForward(): void {
     const po = this.requirePlayout();
     if (po.thinking) throw new UserError("KataGo is thinking.");
     if (po.cursor < po.line.length) {
       this.advance(po, po.line[po.cursor]!);
       po.gen++;
+      this.autoAnswer(po);
       return this.deps.changed();
     }
     if (po.game.isOver) throw new UserError("Both sides passed. Step back with ◀ to play on from an earlier move.");
@@ -429,13 +437,27 @@ export class PracticeSession {
     }
     this.advance(po, gtp);
     po.gen++;
-    if (po.game.isOver || po.cursor < po.line.length) return this.deps.changed();
-    void this.requestMove(po);
+    this.autoAnswer(po);
+    this.deps.changed();
   }
 
   private requirePlayout(): Playout {
     if (!this.playout) throw new UserError("Press Play it out first.");
     return this.playout;
+  }
+
+  /**
+   * KataGo's side answers when a move left it to play (not after two passes): the line's next move
+   * when it goes on, else a fresh request. Without KataGo ready, Forward asks for it later.
+   */
+  private autoAnswer(po: Playout): void {
+    if (po.game.isOver || po.game.toPlay === this.problem.toPlay) return;
+    if (po.cursor < po.line.length) {
+      this.advance(po, po.line[po.cursor]!);
+      po.gen++;
+    } else if (!this.deps.engineNotReady()) {
+      void this.requestMove(po);
+    }
   }
 
   /** Play `gtp` (a move of the line, legal at the cursor) and move the cursor past it. */
@@ -478,6 +500,8 @@ export class PracticeSession {
     po.line.push(move);
     this.advance(po, move);
     po.gen++;
+    // KataGo moved for the learner (Forward at the end of the line): its own side answers that.
+    this.autoAnswer(po);
     this.deps.changed();
   }
 

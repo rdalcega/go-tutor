@@ -4,13 +4,6 @@ Features to add or change. Newest at the bottom; move an item to "Done" with its
 
 ## To do
 
-- **Play-out: the opponent always answers automatically.** In a problem's play-out, whenever it's
-  the opponent's turn, KataGo should play its move by itself. Today the opponent's first move (the
-  2nd move of the play-out) waits until the learner presses forward, and so do opponent moves the
-  learner stepped back over when they come back to a position where it's the opponent's turn
-  again. Exception: if the learner has only stepped back over the opponent's move (without also
-  stepping back over their own move or playing a new one), don't replay it: they stepped back to
-  look at that position.
 - **Give the tutor KataGo's view on a hint.** When the learner asks for a hint and a tutor is
   connected, the tutor gets only the board and the move list: KataGo's candidates in `state` are
   for the last move, which is the bot's and has no eval. So the tutor's nudge rests on its own
@@ -38,3 +31,10 @@ Features to add or change. Newest at the bottom; move an item to "Done" with its
   on their behalf. They can also play any move they like and see how KataGo answers. After stepping
   back and playing a different move, the moves that were ahead are thrown away (no branches).
   (5350972)
+- **Play-out: the opponent always answers automatically.** In a problem's play-out, whenever it's
+  the opponent's turn, KataGo should play its move by itself. Today the opponent's first move (the
+  2nd move of the play-out) waits until the learner presses forward, and so do opponent moves the
+  learner stepped back over when they come back to a position where it's the opponent's turn
+  again. Exception: if the learner has only stepped back over the opponent's move (without also
+  stepping back over their own move or playing a new one), don't replay it: they stepped back to
+  look at that position. (commit)

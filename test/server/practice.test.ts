@@ -721,10 +721,10 @@ describe("playing a problem out", () => {
     expect(playout()).toMatchObject({ line: ["E1", "D8", "E8"], cursor: 0 });
   });
 
-  it("steps through the line without asking KataGo, and Done puts the answer's drawing back", async () => {
+  it("steps through the line without asking KataGo, its stored reply answering by itself, and Done puts the answer's drawing back", async () => {
     await solveAndPlayOut();
     const calls = engine.analyzeCalls.length;
-    await act({ type: "playout_forward" });
+    // Forward plays the learner's E1, and KataGo's D8 follows at once.
     await act({ type: "playout_forward" });
     let v = ctl.view();
     expect(v.problem?.playout).toMatchObject({ cursor: 2, line: ["E1", "D8", "E8"] });
@@ -773,7 +773,8 @@ describe("playing a problem out", () => {
     await solveAndPlayOut();
     const calls = engine.analyzeCalls.length;
     await act({ type: "play", point: at("E1") });
-    expect(playout()).toMatchObject({ line: ["E1", "D8", "E8"], cursor: 1, thinking: false });
+    // KataGo's D8, the line's next move, answers it.
+    expect(playout()).toMatchObject({ line: ["E1", "D8", "E8"], cursor: 2, thinking: false });
     expect(engine.analyzeCalls.length).toBe(calls);
   });
 
@@ -796,7 +797,8 @@ describe("playing a problem out", () => {
   it("drops the moves ahead only for a legal move, and refuses moves on KataGo's turn", async () => {
     await solveAndPlayOut();
     await act({ type: "playout_forward" });
-    // White's turn: the learner can't play, and the line stays.
+    await act({ type: "playout_back" });
+    // Back on White's turn: the learner can't play, and the line stays.
     await expect(act({ type: "play", point: at("A9") })).rejects.toThrow(/KataGo's move/);
     await act({ type: "playout_back" });
     await expect(act({ type: "play", point: at("C1") })).rejects.toThrow(/already taken/);
@@ -808,7 +810,7 @@ describe("playing a problem out", () => {
     expect(playout()).toMatchObject({ line: ["A9", "pass"], cursor: 2 });
   });
 
-  it("has KataGo move for the learner when they step forward at the end of the line, one move per press", async () => {
+  it("has KataGo move for the learner when they step forward at the end of the line, and answer that move", async () => {
     engine.lines.set("A9", { best: "B9", pv: ["B9"] });
     engine.lines.set("A9 B9", { best: "C9", pv: ["C9"] });
     engine.lines.set("A9 B9 C9", { best: "D9", pv: ["D9"] });
@@ -818,12 +820,58 @@ describe("playing a problem out", () => {
     expect(playout()).toMatchObject({ line: ["A9", "B9"], cursor: 2 });
     await act({ type: "playout_forward" });
     await flush();
-    expect(playout()).toMatchObject({ line: ["A9", "B9", "C9"], cursor: 3, thinking: false });
+    // C9 for the learner, then White's D9.
+    expect(playout()).toMatchObject({ line: ["A9", "B9", "C9", "D9"], cursor: 4, thinking: false });
     expect(stone("C9")).toBe("B");
-    // KataGo's turn: Forward asks it for White's move.
+    expect(stone("D9")).toBe("W");
+    expect(engine.analyzeCalls.slice(-2).map((c) => c.pos.moves.length)).toEqual([2, 3]);
+  });
+
+  it("answers by itself whenever KataGo is to play, except where the learner stepped back to look", async () => {
+    engine.lines.set("D1", { best: "F1", pv: ["F1"] });
+    await solveAndPlayOut();
+    const calls = engine.analyzeCalls.length;
+    // The 2nd move of the play-out comes by itself.
+    await act({ type: "playout_forward" });
+    expect(playout()).toMatchObject({ cursor: 2, thinking: false });
+    expect(stone("D8")).toBe("W");
+    // Stepping back over KataGo's move only: it waits there, and Forward replays it.
+    await act({ type: "playout_back" });
+    await flush();
+    expect(playout()).toMatchObject({ cursor: 1, thinking: false });
+    expect(stone("D8")).toBeNull();
+    await act({ type: "playout_forward" });
+    expect(playout()?.cursor).toBe(2);
+    // Back over the learner's move as well: coming forward again, KataGo answers.
+    await act({ type: "playout_back" });
+    await act({ type: "playout_back" });
+    expect(playout()?.cursor).toBe(0);
+    await act({ type: "playout_forward" });
+    expect(playout()).toMatchObject({ line: ["E1", "D8", "E8"], cursor: 2 });
+    expect(engine.analyzeCalls.length).toBe(calls);
+    // A new move after stepping back: KataGo answers it, from a fresh search.
+    await act({ type: "playout_back" });
+    await act({ type: "playout_back" });
+    await act({ type: "play", point: at("D1") });
+    expect(playout()).toMatchObject({ line: ["D1"], cursor: 1, thinking: true });
+    await flush();
+    expect(playout()).toMatchObject({ line: ["D1", "F1"], cursor: 2, thinking: false });
+    expect(engine.analyzeCalls.length).toBe(calls + 1);
+  });
+
+  it("leaves KataGo's answer to Forward when KataGo isn't ready", async () => {
+    engine.lines.set("E1 D8 E8", { best: "F8", pv: ["F8"] });
+    await solveAndPlayOut();
+    await act({ type: "playout_forward" });
+    ctl.setEngineState("starting");
+    // The learner's E8 is the end of the line: nobody can answer it yet.
     await act({ type: "playout_forward" });
     await flush();
-    expect(playout()).toMatchObject({ line: ["A9", "B9", "C9", "D9"], cursor: 4 });
+    expect(playout()).toMatchObject({ line: ["E1", "D8", "E8"], cursor: 3, thinking: false });
+    ctl.setEngineState("ready");
+    await act({ type: "playout_forward" });
+    await flush();
+    expect(playout()).toMatchObject({ line: ["E1", "D8", "E8", "F8"], cursor: 4 });
   });
 
   it("emits nothing to the tutor and records nothing", async () => {
@@ -834,11 +882,10 @@ describe("playing a problem out", () => {
     const before = { events: events.length, problems: JSON.stringify(store.loadProblems()), profile: JSON.stringify(store.loadProfile()), version: ctl.view().profileVersion };
     await act({ type: "playout_forward" });
     await act({ type: "playout_back" });
+    await act({ type: "playout_back" });
     await act({ type: "play", point: at("A9") });
     await flush();
-    await act({ type: "playout_forward" }); // KataGo for the learner
-    await flush();
-    await act({ type: "playout_forward" }); // KataGo for itself
+    await act({ type: "playout_forward" }); // KataGo for the learner, then for itself
     await flush();
     await act({ type: "pass" });
     await flush();
@@ -901,7 +948,7 @@ describe("playing a problem out", () => {
     await act({ type: "playout_back" });
     expect(ctl.view().allowed).toContain("play");
     await act({ type: "play", point: at("A9") });
-    expect(playout()).toMatchObject({ line: ["A9", "pass"], cursor: 1 });
+    expect(playout()).toMatchObject({ line: ["A9", "pass"], cursor: 2 });
   });
 
   it("ends after two passes, when only Back is left", async () => {
