@@ -4,6 +4,14 @@ Features to add or change. Newest at the bottom; move an item to "Done" with its
 
 ## To do
 
+- **Play-out: the opponent always answers automatically.** In a problem's play-out, whenever it's
+  the opponent's turn, KataGo should play its move by itself. Today the opponent's first move (the
+  2nd move of the play-out) waits until the learner presses forward, and so do opponent moves the
+  learner stepped back over when they come back to a position where it's the opponent's turn
+  again. Exception: if the learner has only stepped back over the opponent's move (without also
+  stepping back over their own move or playing a new one), don't replay it: they stepped back to
+  look at that position.
+
 ## Done
 
 - **Review a game's mistakes as practice.** At the end of a game, add a button option for review
