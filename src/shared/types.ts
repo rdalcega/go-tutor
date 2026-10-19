@@ -268,6 +268,12 @@ export interface GameView {
 }
 
 /**
+ * How long the tutor's `state` waits for the analysis of the position the learner is to play
+ * (prefetched after the bot's move, so usually ready); `watch` allows a second more for the state under an event.
+ */
+export const TO_PLAY_WAIT_MS = 2_000;
+
+/**
  * KataGo's view of the position the learner is to play (the cached analysis prefetched after the
  * bot's move), from the learner's perspective; `pending` when it was still running after a short wait.
  */

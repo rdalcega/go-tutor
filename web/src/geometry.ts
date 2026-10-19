@@ -302,7 +302,7 @@ export function playoutText(p: ProblemView): string {
 /** The Forward button's tooltip: the next move of the line, or at its end KataGo moving for the side to play. */
 export function forwardTitle(p: ProblemView, toPlay: Color): string {
   const po = p.playout;
-  if (po && po.cursor >= po.line.length) return toPlay === p.toPlay ? "KataGo plays your move (→)" : "KataGo's move (→)";
+  if (po && po.cursor >= po.line.length) return toPlay === p.toPlay ? "KataGo plays your move and answers it (→)" : "KataGo's move (→)";
   return "Next move (→)";
 }
 

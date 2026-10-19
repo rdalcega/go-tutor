@@ -14,7 +14,7 @@
 
 import { toAscii } from "../engine/ascii.ts";
 import { movePoint } from "../shared/coords.ts";
-import type { GameView, TutorEvent } from "../shared/types.ts";
+import { TO_PLAY_WAIT_MS, type GameView, type TutorEvent } from "../shared/types.ts";
 import { Client, ServerError } from "./client.ts";
 import { formatEvent, formatState } from "./format.ts";
 import { reviewText } from "./queries.ts";
@@ -35,7 +35,7 @@ export interface WatchOptions {
   /** Initial and maximum reconnect delays. */
   minBackoffMs?: number;
   maxBackoffMs?: number;
-  /** How long the state or review fetched for an event may take before the bare line goes out. Default 3 s. */
+  /** How long the state or review fetched for an event may take before the bare line goes out. Default 3 s: the server's wait for the analysis to play, and a second more. */
   contextTimeoutMs?: number;
   now?: () => number;
 }
@@ -73,7 +73,7 @@ export async function watch(opts: WatchOptions): Promise<void> {
   const sleep = opts.sleep ?? defaultSleep;
   const minBackoff = opts.minBackoffMs ?? 500;
   const maxBackoff = opts.maxBackoffMs ?? 10_000;
-  const contextTimeoutMs = opts.contextTimeoutMs ?? 3_000;
+  const contextTimeoutMs = opts.contextTimeoutMs ?? TO_PLAY_WAIT_MS + 1_000;
   const now = opts.now ?? Date.now;
   // The text stream for the tutor; --all and --json print every event, bare.
   const tutorStream = !opts.all && !opts.json;

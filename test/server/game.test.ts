@@ -819,6 +819,20 @@ describe("GameController", () => {
     expect(clock.pendingTimers).toBe(0);
   });
 
+  it("drops the analysis of the game's position when a practice problem takes the board while it waits", async () => {
+    setup({ tutor: true });
+    engine.hold = true;
+    await startGame();
+    const waiting = ctl.tutorView();
+    await ctl.handleAction({ type: "next_problem" });
+    expect(ctl.view().mode).toBe("problem");
+    engine.releaseAll();
+    await flush();
+    const v = await waiting;
+    expect(v.mode).toBe("problem");
+    expect(v.toPlayAnalysis).toBeUndefined();
+  });
+
   it("tells the user when no tutor is connected for chat", async () => {
     await startGame();
     await ctl.handleAction({ type: "chat", text: "hello" });

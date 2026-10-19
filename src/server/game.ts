@@ -16,6 +16,7 @@ import { colorName, formatScore, judgeModeChangedText, plural, round1, takenBack
 import { playedThreshold, thresholdFor } from "../shared/threshold.ts";
 import {
   ASSIST_KINDS,
+  TO_PLAY_WAIT_MS,
   isBoardSize,
   type AssistCounts,
   type AssistKind,
@@ -124,11 +125,6 @@ const HANDICAP_KOMI = 0.5;
 const ANALYSIS_CACHE_SIZE = 16;
 /** The at-level reference move's query (one network evaluation): ahead of the live game's searches, behind the bot. */
 const REFERENCE_PRIORITY = 5;
-/**
- * How long the tutor's `state` waits for the analysis of the position the learner is to play
- * (prefetched after the bot's move, so usually ready); under `watch`'s 3 s for the state under an event.
- */
-const TO_PLAY_WAIT_MS = 2_000;
 
 const NO_GAME_TEXT = "No game in progress. Start a new game first.";
 
@@ -424,19 +420,22 @@ export class GameController {
 
   private async analysisToPlay(): Promise<ToPlayAnalysis | null> {
     const { game, settings } = this;
-    if (this.practice || !game || !settings || this.result || game.toPlay !== settings.humanColor || this.engineState !== "ready") return null;
+    if (this.practice || !game || !settings || this.result || game.isOver || game.toPlay !== settings.humanColor || this.engineState !== "ready") return null;
     const gen = this.gen;
     const last = game.lastMove;
     const moves = game.moves.map((r) => r.move);
     const rank = this.judgeMode === "at_level" ? this.atLevelRank : null;
-    const reference = rank ? this.referenceMoveOf(moves, rank).catch(() => null) : null;
+    const reference = rank ? this.referenceMoveOf(moves, rank).catch((err: unknown) => {
+          this.log(`the ${rank} move of the position to play failed: ${(err as Error).message}`);
+          return null;
+        }) : null;
     const work = Promise.all([this.analysisOf(moves), reference]);
     let timer: unknown;
     const timeout = new Promise<"pending">((resolve) => (timer = this.clock.setTimeout(() => resolve("pending"), TO_PLAY_WAIT_MS)));
     try {
       const done = await Promise.race([work, timeout]);
-      // The position moved on while it waited: the view is of another one now.
-      if (!this.isCurrent(gen) || this.game !== game || game.lastMove !== last) return null;
+      // The position moved on while it waited (or a problem took the board): the view is of another one now.
+      if (!this.isCurrent(gen) || this.game !== game || game.lastMove !== last || this.practice) return null;
       if (done === "pending") return { pending: true };
       const [analysis, refMove] = done;
       const best = analysis.moveInfos[0];

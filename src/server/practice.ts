@@ -341,7 +341,7 @@ export class PracticeSession {
     this.answerOverlay = this.overlay;
     this.overlay = null;
     this.deps.system(
-      "Playing it out: KataGo answers at full strength, and nothing here is judged. Play any move, or step through the moves with ◀ and ▶ (▶ at the end of the line lets KataGo move for you).",
+      "Playing it out: KataGo answers at full strength, and nothing here is judged. Play any move, or step through the moves with ◀ and ▶ (▶ at the end of the line lets KataGo move for you); KataGo answers every move by itself.",
     );
   }
 

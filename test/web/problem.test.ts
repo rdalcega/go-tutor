@@ -145,6 +145,6 @@ describe("play-out card", () => {
     expect(playoutText(playing(2, 3))).toBe("Move 2 of 3 · nothing here is judged");
     expect(forwardTitle(playing(2, 3), "B")).toBe("Next move (→)");
     expect(forwardTitle(playing(3, 3), "W")).toBe("KataGo's move (→)");
-    expect(forwardTitle(playing(3, 3), "B")).toBe("KataGo plays your move (→)");
+    expect(forwardTitle(playing(3, 3), "B")).toBe("KataGo plays your move and answers it (→)");
   });
 });
