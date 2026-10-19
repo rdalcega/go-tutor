@@ -4,7 +4,6 @@ Features to add or change. Newest at the bottom; move an item to "Done" with its
 
 ## To do
 
-
 ## Done
 
 - **Review a game's mistakes as practice.** At the end of a game, add a button option for review
@@ -30,12 +29,11 @@ Features to add or change. Newest at the bottom; move an item to "Done" with its
   learner stepped back over when they come back to a position where it's the opponent's turn
   again. Exception: if the learner has only stepped back over the opponent's move (without also
   stepping back over their own move or playing a new one), don't replay it: they stepped back to
-  look at that position. (commit)
+  look at that position. (dc4cdc1)
 - **Give the tutor KataGo's view on a hint.** When the learner asks for a hint and a tutor is
   connected, the tutor gets only the board and the move list: KataGo's candidates in `state` are
   for the last move, which is the bot's and has no eval. So the tutor's nudge rests on its own
   reading of the position and can point at the wrong area. The position is already analyzed after
   each bot move (`prefetch`, cached), so the HINT line (or `state` on the learner's turn) should
   show KataGo's best move, its PV and the top candidates for the position to play. The tutor still
-  nudges rather than giving the answer.
-  (commit)
+  nudges rather than giving the answer. (0242b67)
