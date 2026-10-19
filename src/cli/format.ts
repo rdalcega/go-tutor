@@ -21,6 +21,7 @@ import type {
   GenerationStatus,
   JudgeMode,
   Move,
+  MoveEval,
   MoveRecord,
   Overlay,
   ProblemListItem,
@@ -32,6 +33,7 @@ import type {
   SavedGame,
   TakenBackMove,
   TeachingMoment,
+  ToPlayAnalysis,
   TutorCommand,
   TutorEvent,
   TutorLevel,
@@ -404,6 +406,21 @@ export function commandJson(command: TutorCommand, v: GameView): string {
   return JSON.stringify(command.type === "resume" ? { ...v, stillPaused: awaitingLearner(v) } : v);
 }
 
+/** KataGo's view of the position the learner is to play (the tutor's state only): for nudging, not for telling. */
+function toPlayLines(a: ToPlayAnalysis): string[] {
+  const head = "to play (KataGo, the learner doesn't see it)";
+  if (a.pending) return [`${head}: analysis still running; state again in a few seconds has it`];
+  const reference = a.reference ? `; ${a.reference.rank} move ${a.reference.move}` : "";
+  return [
+    `${head}: lead ${num(a.lead)}, winrate ${Math.round(a.winrate * 100)}%, best ${a.bestMove} (pv ${pv(a.bestPv)})${reference}`,
+    candidatesLine(a.candidates),
+  ];
+}
+
+function candidatesLine(candidates: MoveEval["candidates"]): string {
+  return `candidates: ${candidates.map((c) => `${c.move} ${num(c.lead)}`).join(", ")}`;
+}
+
 /** Moves `state --brief` lists in full; earlier ones show only their mistakes. */
 const BRIEF_MOVES = 12;
 
@@ -450,9 +467,10 @@ export function formatState(v: GameView, now = Date.now(), chatTail = 8, brief =
         `winrate ${Math.round(e.winrateBefore * 100)}% -> ${Math.round(e.winrateAfter * 100)}%, best ${e.bestMove} (pv ${pv(e.bestPv)})${atLevelText(last)}`,
     );
     if (e.candidates.length > 0) {
-      out.push(`candidates: ${e.candidates.map((c) => `${c.move} ${num(c.lead)}`).join(", ")}`);
+      out.push(candidatesLine(e.candidates));
     }
   }
+  if (v.toPlayAnalysis) out.push(...toPlayLines(v.toPlayAnalysis));
   if (v.moment || !brief) out.push(v.moment ? momentText(v.moment, now) : "moment: none");
   if (v.overlay || !brief) out.push(`overlay: ${v.overlay ? overlayText(v.overlay, size) : "none"}`);
   if (brief) return out.join("\n");

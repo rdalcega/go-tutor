@@ -126,7 +126,10 @@ export function createApp({ controller, bridge, store, distDir = join(REPO_ROOT,
         return sendJson(res, 415, { ok: false, error: "POST bodies must be sent with content-type: application/json." });
       }
     }
-    if (path === "/api/state" && method === "GET") return sendJson(res, 200, controller.view());
+    if (path === "/api/state" && method === "GET") {
+      // ?tutor=1 (the tutor CLI): with KataGo's analysis of the position the learner is to play.
+      return sendJson(res, 200, url.searchParams.get("tutor") === "1" ? await controller.tutorView() : controller.view());
+    }
     if (path === "/api/events" && method === "GET") return bridge.openViewStream(req, res);
     if (path === "/api/tutor/events" && method === "GET") {
       const raw = url.searchParams.get("since");

@@ -89,9 +89,9 @@ export async function watch(opts: WatchOptions): Promise<void> {
 
   /** Games the stream has seen end: a question about one is about the review, not a board. */
   const ended = new Set<string>();
-  /** The position of the last state printed, so a question on an unchanged board doesn't reprint it. */
+  /** The position of the last state printed, so a question on an unchanged board doesn't reprint it (unless KataGo's analysis of it has come in since). */
   let lastBoard: string | undefined;
-  const boardKey = (v: GameView): string => JSON.stringify([v.mode, v.gameId, v.problem?.id, v.moves.length, v.toPlay, v.status, v.moment?.id, v.moment?.state]);
+  const boardKey = (v: GameView): string => JSON.stringify([v.mode, v.gameId, v.problem?.id, v.moves.length, v.toPlay, v.status, v.moment?.id, v.moment?.state, v.toPlayAnalysis ? (v.toPlayAnalysis.pending ? "pending" : "ready") : null]);
 
   /**
    * The state (or review) to print under an event: null when it has none, false when it should but

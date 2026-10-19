@@ -304,7 +304,19 @@ class World {
       mistakeThreshold: 4,
       ...(this.problem && { problem: this.problem }),
       ...(this.summary && { summary: this.summary }),
+      // The tutor's state on the learner's turn: KataGo's analysis of the position to play.
+      ...(!problemMode && !this.result && this.game.toPlay === SETTINGS.humanColor && { toPlayAnalysis: this.toPlayAnalysis() }),
     };
+  }
+
+  /** KataGo's analysis of the position to play, from its own generator so the scripted session stays the same. */
+  private toPlayAnalysis(): GameView["toPlayAnalysis"] {
+    const random = rng(1000 + this.game.moves.length);
+    const point = () => toGtp({ x: Math.floor(random() * 9), y: Math.floor(random() * 9) }, 9);
+    const line = () => Array.from({ length: 6 }, point);
+    const best = line();
+    const candidates = Array.from({ length: 5 }, (_, i) => ({ move: i === 0 ? best[0]! : point(), lead: 2 - i * 0.7, winrate: 0.6 - i * 0.03, visits: 400 - i * 60, pv: line() }));
+    return { lead: 2, winrate: 0.6, bestMove: best[0]!, bestPv: best, candidates };
   }
 
   saved(): SavedGame {

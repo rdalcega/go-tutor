@@ -260,7 +260,30 @@ export interface GameView {
   reviewProblems?: number;
   /** Problem generation: the batch in progress and the newest finished one. */
   generation?: GenerationStatus;
+  /**
+   * Tutor only (GET /api/state?tutor=1, what `tutor state` and `watch` fetch; never in the
+   * learner's view): KataGo's analysis of the position the learner is to play in a game.
+   */
+  toPlayAnalysis?: ToPlayAnalysis;
 }
+
+/**
+ * KataGo's view of the position the learner is to play (the cached analysis prefetched after the
+ * bot's move), from the learner's perspective; `pending` when it was still running after a short wait.
+ */
+export type ToPlayAnalysis =
+  | { pending: true }
+  | {
+      pending?: undefined;
+      lead: number;
+      winrate: number;
+      bestMove: Gtp;
+      bestPv: Gtp[];
+      /** Up to 5 candidates, best first, as in `MoveEval.candidates`. */
+      candidates: MoveEval["candidates"];
+      /** On at_level judging: the human-SL net's most likely move one rank above the learner. */
+      reference?: { rank: string; move: Gtp };
+    };
 
 /** POST /api/action and POST /api/tutor. */
 export interface ActionResponse {

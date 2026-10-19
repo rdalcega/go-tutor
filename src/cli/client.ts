@@ -45,8 +45,9 @@ export class Client {
     return body as T;
   }
 
-  async state(signal?: AbortSignal): Promise<GameView> {
-    const view = await this.getJson<GameView>("/api/state", signal);
+  /** The tutor's view: on the learner's turn in a game, with KataGo's analysis of the position to play (`tutor` false: the learner's view, no KataGo query). */
+  async state(signal?: AbortSignal, tutor = true): Promise<GameView> {
+    const view = await this.getJson<GameView>(tutor ? "/api/state?tutor=1" : "/api/state", signal);
     if (!view) throw new ServerError(`GET /api/state returned 404 at ${this.base}; is TUTOR_SERVER pointing at the Go Tutor server?`, 404);
     return view;
   }

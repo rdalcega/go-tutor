@@ -279,14 +279,13 @@ export function moveEvalFrom(before: Analysis, after: Analysis, played?: Gtp): M
     winrateAfter,
     bestMove: best?.move ?? "pass",
     bestPv: best?.pv ?? [],
-    candidates: before.moveInfos.slice(0, 5).map((m) => ({
-      move: m.move,
-      lead: m.scoreLead,
-      winrate: m.winrate,
-      visits: m.visits,
-      pv: m.pv,
-    })),
+    candidates: candidatesOf(before),
   };
+}
+
+/** KataGo's top 5 candidates in a position, as `MoveEval.candidates` (side to move's perspective). */
+export function candidatesOf(analysis: Pick<Analysis, "moveInfos">): MoveEval["candidates"] {
+  return analysis.moveInfos.slice(0, 5).map((m) => ({ move: m.move, lead: m.scoreLead, winrate: m.winrate, visits: m.visits, pv: m.pv }));
 }
 
 /** The human policy's most likely move, pass included (entries of -1 are illegal); pass when no move has any probability. */

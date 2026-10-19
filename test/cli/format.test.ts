@@ -418,6 +418,23 @@ describe("formatState", () => {
     expect(commandOutput({ type: "show", moves: ["D5"] }, v)).not.toContain("not drawn");
   });
 
+  it("shows KataGo's analysis of the position the learner is to play, or that it is still running", () => {
+    const candidates = [
+      { move: "D5", lead: 1.24, winrate: 0.58, visits: 300, pv: ["D5", "E4"] },
+      { move: "E4", lead: 0.5, winrate: 0.55, visits: 80, pv: ["E4"] },
+    ];
+    const toPlay = { lead: 1.24, winrate: 0.58, bestMove: "D5", bestPv: ["D5", "E4", "C6"], candidates };
+    const lines = formatState(view({ toPlayAnalysis: toPlay }), 10_000, 0, true).split("\n");
+    expect(lines).toContain("to play (KataGo, the learner doesn't see it): lead 1.2, winrate 58%, best D5 (pv D5 E4 C6)");
+    expect(lines).toContain("candidates: D5 1.2, E4 0.5");
+    const atLevel = formatState(view({ toPlayAnalysis: { ...toPlay, reference: { rank: "17k", move: "E4" } } }), 10_000, 0, true);
+    expect(atLevel).toContain("best D5 (pv D5 E4 C6); 17k move E4");
+    expect(formatState(view({ toPlayAnalysis: { pending: true } }), 10_000, 0, true)).toContain(
+      "to play (KataGo, the learner doesn't see it): analysis still running; state again in a few seconds has it",
+    );
+    expect(formatState(view(), 10_000)).not.toContain("to play (KataGo");
+  });
+
   it("handles an idle server", () => {
     const text = formatState(view({ gameId: null, mode: "idle", settings: null, status: "playing", board: [], moves: [], moment: null, overlay: null, chat: [] }));
     expect(text).toContain("no game mode=idle");

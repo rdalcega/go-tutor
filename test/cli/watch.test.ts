@@ -165,7 +165,7 @@ describe("watch", () => {
           streamed = true;
           return sseResponse(events.map((e) => (Array.isArray(e) ? e.map(ev).join("") : ev(e))));
         }
-        if (path === "/api/state") return opts.failState ? new Response("boom", { status: 500 }) : Response.json(opts.view ?? view);
+        if (path === "/api/state?tutor=1") return opts.failState ? new Response("boom", { status: 500 }) : Response.json(opts.view ?? view);
         if (path === "/api/game/g1") return Response.json(game);
         return new Response("", { status: 404 });
       }) as unknown as typeof fetch;
@@ -197,7 +197,7 @@ describe("watch", () => {
       // A question about the problem doesn't fetch the state at all.
       const aboutProblem = await run([{ ...user(2), problemId: "p4" }], { view: problemView });
       expect(aboutProblem.out).toEqual(['USER "why?" (problem p4)']);
-      expect(aboutProblem.paths).not.toContain("/api/state");
+      expect(aboutProblem.paths).not.toContain("/api/state?tutor=1");
       expect([...ended.err, ...underProblem.err].filter((l) => /moved on|couldn.t fetch/.test(l))).toEqual([]);
       // A state that can't be fetched: the tutor is told to run it.
       expect((await run([user(2)], { failState: true })).out).toEqual(['USER "why?" game=g1 level=silent — run state for the board']);
@@ -211,7 +211,7 @@ describe("watch", () => {
       expect(review.out[1]).toBe('USER "why?" game=g1 level=silent');
       // A chat line with no game fetches nothing.
       const noGame = await run([{ ...user(2), gameId: null }]);
-      expect(noGame.paths).not.toContain("/api/state");
+      expect(noGame.paths).not.toContain("/api/state?tutor=1");
     });
 
     it("says the board hasn't changed instead of reprinting it for a follow-up question", async () => {
@@ -265,14 +265,14 @@ describe("watch", () => {
       expect(state).toContain("moves (last 12;");
       expect(state).toContain("earlier mistakes: 3 C9 -7");
       expect(state).not.toMatch(/chat|overlay: none|tutor=attached|mistake threshold/);
-      expect(paths).toContain("/api/state");
+      expect(paths).toContain("/api/state?tutor=1");
     });
 
     it("attaches nothing to a moment that is no longer waiting", async () => {
       const replayed = { ...moment, moment: { ...moment.moment, state: "tutor" } };
       const { out, paths } = await run([replayed]);
       expect(out[0]).toMatch(/\(replayed; now tutor\)$/);
-      expect(paths).not.toContain("/api/state");
+      expect(paths).not.toContain("/api/state?tutor=1");
     });
 
     it("says to run state when the state can't be fetched", async () => {
@@ -292,6 +292,14 @@ describe("watch", () => {
       const hint = (b: string) => ({ seq: 2, ts: 0, type: "hint_request", gameId: "g1", size: 9, board: b, toPlay: "B" });
       expect((await run([hint(board)])).out[0]).toMatch(/state below; answer with say\/show\/mark\ngame g1 /);
       expect((await run([hint(board.replace("+", "X"))])).out[0]).toMatch(/run: state, then say\/show\/mark$/);
+    });
+
+    it("prints KataGo's analysis of the position to play under a hint", async () => {
+      const hint = { seq: 2, ts: 0, type: "hint_request", gameId: "g1", size: 9, board: toAscii(emptyBoard() as Board), toPlay: "B" };
+      const candidates = [{ move: "E5", lead: 0.5, winrate: 0.52, visits: 300, pv: ["E5", "D4"] }];
+      const toPlayAnalysis = { lead: 0.5, winrate: 0.52, bestMove: "E5", bestPv: ["E5", "D4"], candidates };
+      const { out } = await run([hint], { view: { ...view, status: "playing", moment: null, toPlayAnalysis } });
+      expect(out[0]).toContain("\nto play (KataGo, the learner doesn't see it): lead 0.5, winrate 52%, best E5 (pv E5 D4)\ncandidates: E5 0.5");
     });
 
     it("prints what arrives together in one write: a GAME_END, its RATING, then the brief review", async () => {

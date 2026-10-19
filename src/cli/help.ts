@@ -28,7 +28,10 @@ SESSION FLOW
                  A drawing you made stays up after resume: the game stays
                  paused until the learner presses Continue when ready. If you don't answer in time
                  a FALLBACK line comes with your next event: KataGo's answer is already shown.
-  4. on HINT:    read the state below the line, then say/show/mark. Don't give the answer outright unless asked. (The
+  4. on HINT:    read the state below the line: its "to play (KataGo ...)" lines are KataGo's best move,
+                 PV and candidates for the position to play (on at_level also the reference rank's
+                 move), which the learner doesn't see. Use them to aim a nudge: mark the area and ask
+                 a question. Don't give the answer outright unless asked. (The
                  learner presses Hint next to the chat input; anything they typed comes as the question.
                  Your answer marks their next move as helped, so it doesn't count for the rank estimate.)
   5. on USER:    answer with say (pass --moment <id> when the line names one).
@@ -131,6 +134,8 @@ COMMANDS
   state
       The current board as ASCII (X black, O white, + star point, (X) last move), the move list with the
       human's point loss per move (! = mistake), KataGo's best move and candidates for the last move,
+      on the learner's turn in a game KataGo's best move, PV and candidates for the position to play
+      ("to play (KataGo ...)", hidden from the learner; "still running" when it wasn't ready within 2 s),
       the tutor level, the mistake threshold on this board, the teaching moment, the overlay currently
       drawn, and the last chat lines.
       Example: npm run -s tutor -- state

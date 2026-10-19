@@ -777,6 +777,48 @@ describe("GameController", () => {
     expect(events.find((e) => e.type === "move")).toMatchObject({ by: "human", hintPending: true });
   });
 
+  it("gives the tutor KataGo's cached analysis of the position the learner is to play, never the learner", async () => {
+    setup({ tutor: true });
+    engine.candidates.set("", [{ move: "D4", scoreLead: -0.4, visits: 120 }]);
+    await startGame();
+    const calls = engine.analyzeCalls.length;
+    await ctl.handleAction({ type: "ask_tutor" });
+    const v = await ctl.tutorView();
+    expect(v.toPlayAnalysis).toEqual({
+      lead: 0,
+      winrate: 0.5,
+      bestMove: "E5",
+      bestPv: ["E5", "D4", "D5"],
+      candidates: [
+        { move: "E5", lead: 0, winrate: 0.5, visits: 300, pv: ["E5", "D4", "D5"] },
+        { move: "D4", lead: -0.4, winrate: 0.5, visits: 120, pv: ["D4"] },
+      ],
+    });
+    expect(engine.analyzeCalls).toHaveLength(calls); // the prefetched analysis, no new query
+    expect(ctl.view().toPlayAnalysis).toBeUndefined();
+    // Not while the bot is to move (a moment is open on the learner's mistake).
+    engine.lossAfter(["C3"], 6);
+    ctl.play(C3);
+    await flush();
+    expect(ctl.view().moment?.state).toBe("waiting");
+    expect((await ctl.tutorView()).toPlayAnalysis).toBeUndefined();
+  });
+
+  it("says the analysis of the position to play is pending when it isn't ready after a short wait, without asking twice", async () => {
+    setup({ tutor: true });
+    engine.hold = true;
+    await startGame();
+    const calls = engine.analyzeCalls.length;
+    const waiting = ctl.tutorView();
+    clock.advance(2_000);
+    expect((await waiting).toPlayAnalysis).toEqual({ pending: true });
+    engine.releaseAll();
+    await flush();
+    expect((await ctl.tutorView()).toPlayAnalysis).toMatchObject({ bestMove: "E5" });
+    expect(engine.analyzeCalls).toHaveLength(calls);
+    expect(clock.pendingTimers).toBe(0);
+  });
+
   it("tells the user when no tutor is connected for chat", async () => {
     await startGame();
     await ctl.handleAction({ type: "chat", text: "hello" });
@@ -1953,6 +1995,20 @@ describe("GameController judging at level", () => {
     const end = events.find((e) => e.type === "game_end");
     if (end?.type !== "game_end") throw new Error("expected game_end");
     expect(end.summary.mistakes.map((m) => [m.moveNumber, m.pointLoss, m.bestMove])).toEqual([[1, 6, "E5"]]);
+  });
+
+  it("gives the tutor the reference move for the position to play, and judging the move then reuses it", async () => {
+    await atLevelGame();
+    engine.humanPolicy = policyOn("D4");
+    expect((await ctl.tutorView()).toPlayAnalysis).toMatchObject({ bestMove: "E5", reference: { rank: "19k", move: "D4" } });
+    engine.lossAfter(["C3"], 1);
+    ctl.play(C3);
+    await flush();
+    expect(ctl.view().moves[0]).toMatchObject({ eval: { atLevel: { move: "D4" } } });
+    expect(engine.analyzeCalls.filter((c) => c.opts?.overrideSettings?.humanSLProfile)).toHaveLength(1);
+    // On optimal judging there is no reference.
+    await ctl.handleAction({ type: "set_judge_mode", mode: "optimal" });
+    expect((await ctl.tutorView()).toPlayAnalysis).not.toHaveProperty("reference");
   });
 
   it("pauses for a move that loses the threshold against the reference move, and the fallback shows that move's line", async () => {

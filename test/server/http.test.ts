@@ -201,6 +201,10 @@ describe("HTTP server", () => {
     const created = await post("/api/action", { type: "new_game" });
     expect(created.status).toBe(200);
     expect(created.body.view?.settings?.size).toBe(9);
+    // Only the tutor's state carries KataGo's analysis of the position the learner is to play.
+    const tutorState = (await (await fetch(`${base}/api/state?tutor=1`)).json()) as GameView;
+    expect(tutorState.toPlayAnalysis).toMatchObject({ bestMove: "E5" });
+    expect(((await (await fetch(`${base}/api/state`)).json()) as GameView).toPlayAnalysis).toBeUndefined();
 
     const bad = await post("/api/action", { type: "play", point: { x: 99, y: 0 } });
     expect(bad).toEqual({ status: 400, body: { ok: false, error: "That point is off the board." } });

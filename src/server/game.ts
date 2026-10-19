@@ -41,6 +41,7 @@ import {
   type SavedGame,
   type TakenBackMove,
   type TeachingMoment,
+  type ToPlayAnalysis,
   type TutorCommand,
   type TutorLevel,
 } from "../shared/types.ts";
@@ -58,7 +59,7 @@ import {
 } from "./common.ts";
 import { estimateRank, rankSamples } from "./estimate.ts";
 import { ProblemGenerator } from "./generate.ts";
-import { atLevelEvalFrom, humanPolicyOptions, moveEvalFrom, needsReferenceAnalysis, positionOf, topHumanMove, type Analysis, type Engine, type Position } from "./katago.ts";
+import { atLevelEvalFrom, candidatesOf, humanPolicyOptions, moveEvalFrom, needsReferenceAnalysis, positionOf, topHumanMove, type Analysis, type Engine, type Position } from "./katago.ts";
 import { migrateRatingModel } from "./migrate.ts";
 import { PracticeSession, type PracticeDeps } from "./practice.ts";
 import { gameSource, generateProblems, pickNextProblem, recategorize, recentFromGame, resultOf, schedule, type StoredProblem } from "./problems.ts";
@@ -123,6 +124,11 @@ const HANDICAP_KOMI = 0.5;
 const ANALYSIS_CACHE_SIZE = 16;
 /** The at-level reference move's query (one network evaluation): ahead of the live game's searches, behind the bot. */
 const REFERENCE_PRIORITY = 5;
+/**
+ * How long the tutor's `state` waits for the analysis of the position the learner is to play
+ * (prefetched after the bot's move, so usually ready); under `watch`'s 3 s for the state under an event.
+ */
+const TO_PLAY_WAIT_MS = 2_000;
 
 const NO_GAME_TEXT = "No game in progress. Start a new game first.";
 
@@ -269,6 +275,8 @@ export class GameController {
   private readonly momentShown = new WeakSet<MoveRecord>();
   /** Analyses by position (moves as a GTP list), least recently used first. */
   private readonly analyses = new Map<string, Promise<Analysis>>();
+  /** The latest at-level reference move asked for (position and rank), shared by the tutor's `state` and the move's judging. */
+  private referenceMove: { key: string; move: Promise<Gtp> } | null = null;
   private nextChatId = 1;
   /** A save is scheduled for the end of this tick. */
   private saveQueued = false;
@@ -402,6 +410,51 @@ export class GameController {
       ...(finished?.summary && { summary: finished.summary }),
       ...(finished && { reviewProblems: this.reviewProblems }),
     };
+  }
+
+  /**
+   * The view for the tutor (GET /api/state?tutor=1): on the learner's turn in a game, with KataGo's
+   * analysis of the position to play, which the learner's own view never carries. It takes the
+   * cached analysis (prefetched after the bot's move), waiting up to TO_PLAY_WAIT_MS for it.
+   */
+  async tutorView(): Promise<GameView> {
+    const analysis = await this.analysisToPlay();
+    return analysis ? { ...this.view(), toPlayAnalysis: analysis } : this.view();
+  }
+
+  private async analysisToPlay(): Promise<ToPlayAnalysis | null> {
+    const { game, settings } = this;
+    if (this.practice || !game || !settings || this.result || game.toPlay !== settings.humanColor || this.engineState !== "ready") return null;
+    const gen = this.gen;
+    const last = game.lastMove;
+    const moves = game.moves.map((r) => r.move);
+    const rank = this.judgeMode === "at_level" ? this.atLevelRank : null;
+    const reference = rank ? this.referenceMoveOf(moves, rank).catch(() => null) : null;
+    const work = Promise.all([this.analysisOf(moves), reference]);
+    let timer: unknown;
+    const timeout = new Promise<"pending">((resolve) => (timer = this.clock.setTimeout(() => resolve("pending"), TO_PLAY_WAIT_MS)));
+    try {
+      const done = await Promise.race([work, timeout]);
+      // The position moved on while it waited: the view is of another one now.
+      if (!this.isCurrent(gen) || this.game !== game || game.lastMove !== last) return null;
+      if (done === "pending") return { pending: true };
+      const [analysis, refMove] = done;
+      const best = analysis.moveInfos[0];
+      if (!best) return null;
+      return {
+        lead: analysis.rootInfo.scoreLead,
+        winrate: analysis.rootInfo.winrate,
+        bestMove: best.move,
+        bestPv: best.pv,
+        candidates: candidatesOf(analysis),
+        ...(rank && refMove && { reference: { rank, move: refMove } }),
+      };
+    } catch (err) {
+      this.log(`analysis of the position to play failed: ${(err as Error).message}`);
+      return null;
+    } finally {
+      this.clock.clearTimeout(timer);
+    }
   }
 
   /** The mistake threshold in points on the current game's board (the profile's 9×9 threshold, scaled; 9×9 when no game). */
@@ -845,6 +898,7 @@ export class GameController {
   private resetGameState(): void {
     this.invalidatePending();
     this.analyses.clear();
+    this.referenceMove = null;
     this.game = null;
     this.atLevelRank = null;
     this.atLevelFailureNoted = false;
@@ -2151,8 +2205,7 @@ export class GameController {
   private async referenceFor(moves: Move[], before: Promise<Analysis>, played: Gtp, color: Color, rank: string): Promise<{ move: Gtp; after?: Analysis } | Error> {
     try {
       const size = this.game!.size;
-      const policy = await this.engine.analyze(this.position(moves), humanPolicyOptions(rank, { priority: REFERENCE_PRIORITY }));
-      const move = topHumanMove(policy, size);
+      const move = await this.referenceMoveOf(moves, rank);
       if (!needsReferenceAnalysis(await before, played, move)) return { move };
       // Not cached: nobody plays the reference move, and the cache is for the game's real positions.
       const position = this.position([...moves, gtpMove(move, color, size)]);
@@ -2161,6 +2214,24 @@ export class GameController {
     } catch (err) {
       return err as Error;
     }
+  }
+
+  /**
+   * The human-SL net's most likely move at `rank` after `moves` (one network evaluation, no
+   * search). The latest one is kept, so a tutor's `state` on the learner's turn and the judging of
+   * the move they then play ask KataGo once.
+   */
+  private referenceMoveOf(moves: Move[], rank: string): Promise<Gtp> {
+    const pos = this.position(moves);
+    const key = `${rank} ${pos.moves.map((m) => m[1]).join(" ")}`;
+    if (this.referenceMove?.key === key) return this.referenceMove.move;
+    const move = this.engine.analyze(pos, humanPolicyOptions(rank, { priority: REFERENCE_PRIORITY })).then((policy) => topHumanMove(policy, pos.size));
+    const entry = { key, move };
+    this.referenceMove = entry;
+    move.catch(() => {
+      if (this.referenceMove === entry) this.referenceMove = null;
+    });
+    return move;
   }
 
   /** Analyze the current position in the background, so the next human move's "before" is ready. */

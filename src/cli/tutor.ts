@@ -26,7 +26,7 @@ async function waitForServer(client: Client): Promise<void> {
   const until = Date.now() + 100_000;
   for (;;) {
     try {
-      await client.state();
+      await client.state(undefined, false); // only whether it answers: no analysis wanted
       return;
     } catch (e) {
       // Not reachable yet, or answering 5xx while it starts.

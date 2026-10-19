@@ -183,7 +183,8 @@ whether it opens a teaching moment. The `set_judge_mode` action changes it like 
   game's reference rank: one rank above the learner's displayed rank when the game started
   (`atLevelRankFor`, 20k … 9d; `SavedGame.atLevelRank`, `GameView.atLevelRank`, on `game_start`).
   Evaluating such a move also asks KataGo for that policy (one query, `maxVisits` 1,
-  `humanSLProfile` set, so no search and the cached analyses stay as they are). Both moves are then
+  `humanSLProfile` set, so no search and the cached analyses stay as they are; the latest one is
+  kept, so the tutor's `state` on the learner's turn and the judging of their move share it). Both moves are then
   valued by the main net: within the "before" search when both have `TRUSTED_CANDIDATE_VISITS`,
   otherwise from the root leads after each move (one more analysis, of the position after the
   reference move, run alongside the move's own and kept out of the analysis cache). `MoveEval.atLevel` holds the rank, the move, its line, and `loss` (negative when
@@ -241,6 +242,12 @@ With no tutor attached, the server adds a system reply saying the tutor isn't co
   hint events carry the board `size`, so `tutor watch` names points in GTP without a lookup. For an
   older logged event without `size`, `watch` uses the size from that game's `game_start` if it saw
   one, else prints the move as `(coords unavailable)`; it never fails on an event it can't read.
+  `GET /api/state?tutor=1` (what the tutor CLI fetches, `state` and the state under `watch`'s
+  events) adds `toPlayAnalysis` on the learner's turn in a game: KataGo's lead, best move, PV and
+  top 5 candidates for the position to play, from the cached analysis that `prefetch` started after
+  the bot's move, and on at_level the reference move (asked for then, and kept for judging the
+  learner's move), so the tutor's hint can aim at the right area. It waits up to 2 s for it (under `watch`'s 3 s), then gives `{ pending: true }`. The
+  learner's view (plain `GET /api/state`, the SSE frames) never carries it.
   `GET /api/game/:id` (or `last`) returns a saved game
   (`games/<id>.json`: settings, moves with evals and PVs, result, summary with categories and rating
   change, chat, tags, heuristics). `GET /api/profile` returns `ProfileResponse`: `{ profile, focus }`.
