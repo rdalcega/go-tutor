@@ -31,6 +31,7 @@ import {
   nextBotText,
   positionBefore,
   generationFact,
+  lessonLine,
   nextProblemLabel,
   playoutText,
   problemHeading,
@@ -93,6 +94,7 @@ const el = {
   problemTitle: $("problem-title"),
   problemAttempts: $("problem-attempts"),
   problemText: $("problem-text"),
+  problemLesson: $("problem-lesson"),
   problemResult: $("problem-result"),
   nextProblem: $<HTMLButtonElement>("next-problem"),
   leaveProblem: $<HTMLButtonElement>("leave-problem"),
@@ -487,6 +489,10 @@ function renderProblem(v: GameView | null): void {
   el.problemTitle.textContent = problemHeading(p, v.board.length);
   el.problemAttempts.textContent = attemptsLeftText(p);
   el.problemText.textContent = p.prompt;
+  const lesson = lessonLine(p);
+  el.problemLesson.hidden = !lesson;
+  el.problemLesson.textContent = lesson?.text ?? "";
+  el.problemLesson.title = lesson?.title ?? "";
   // Playing out, the play-out's controls take the place of the attempt's verdict.
   const po = p.playout;
   el.playout.hidden = !po;

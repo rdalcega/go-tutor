@@ -11,6 +11,7 @@ import type {
   GameView,
   GeneratedProblemInfo,
   GenerationStatus,
+  LessonInfo,
   MistakeCategory,
   MoveEval,
   MoveRecord,
@@ -63,6 +64,8 @@ interface MockProblem {
   generated?: GeneratedProblemInfo;
   /** The last moves before the position, oldest first (labeled −5 … −1 on the board). */
   recent?: readonly [Color, string][];
+  /** One variant of a lesson (a run of mistakes that missed the same point). */
+  lesson?: LessonInfo;
 }
 
 const MOCK_PROBLEMS: readonly MockProblem[] = [
@@ -83,6 +86,7 @@ const MOCK_PROBLEMS: readonly MockProblem[] = [
       ". O X . . . X O .",
     ],
     answers: ["E1"],
+    lesson: { id: "p1", variant: 1, variants: 3, gameId: "g1", answer: "E1", fromMove: 14, toMove: 20 },
     recent: [
       ["W", "H2"],
       ["B", "G1"],
@@ -658,6 +662,7 @@ class MockServer implements Transport {
         box: 1,
         ...(def.recent && { recentMoves: def.recent.map(([color, gtp], i) => ({ color, point: fromGtp(gtp, board.length)!, ago: def.recent!.length - i })) }),
         ...(this.review && { review: { ...this.review } }),
+        ...(def.lesson && { lesson: { ...def.lesson } }),
       },
     };
     this.msg("system", `${this.review ? `Review ${this.review.index}/${this.review.total}` : "Practice problem"}: ${def.prompt}`);

@@ -22,6 +22,8 @@ Setup takes few calls when the independent ones go out together (several tool ca
    If the chat says KataGo couldn't start, follow its instructions (usually `npm run setup:katago`).
    The first start on data from before the move-quality rating re-estimates the rank once from the
    saved games (a chat line says so, e.g. "Your rank was re-estimated … 19k (was 17k)"); mention it.
+   The first start after lessons existed also groups, once, the runs of the same missed point in the
+   saved games and problems (see GAME_END), which lowers the mistake tallies; nothing to say about it.
 3. In one message: `npm run -s tutor -- summary --wait` (it waits up to 100 s for the server, so
    don't poll; if it still can't reach it, run it once more; see step 5) and `tabs_context_mcp` (createIfEmpty). Then, in one message, the watch of step 4
    and `tabs_create_mcp`; then `navigate` the new tab to http://localhost:4747 together with your
@@ -44,6 +46,9 @@ Setup takes few calls when the independent ones go out together (several tool ca
      the focus category are due, at the start of a session as a warm-up (2–4 problems, then a game),
      or after a game that left fresh problems from its mistakes. Otherwise play a game and watch for
      the focus category during it. Never more than a short set of problems in a row.
+   - Practice picks lessons, not problems, and keeps a set varied by itself: no two problems from the
+     same game or lesson in a row while something else is due, the focus category at most about half
+     of a set, and a lesson missed twice in one session waits until the next day.
    - Tell the learner the plan in one or two sentences with `say`, connecting it to their recent games
      ("Your last two games lost groups that had only one eye; this game, check your groups' eyes
      before attacking"). Then `npm run -s tutor -- new-game`, or `problem` for the next due problem
@@ -156,7 +161,11 @@ help; wins and losses only nudge it.
 1. Read the review printed under the lines (what `review last` prints): mistakes worst first with
    KataGo's PV and a category (`heuristic` = the server's guess), including first tries that were
    taken back ("first try #1, taken back by the tutor"), the help and which moves had it, the
-   win-rate swings, and the board before each of the 3 worst mistakes.
+   win-rate swings, and the board before each of the 3 worst mistakes. A **run** line names mistakes
+   that all missed one point while the learner played elsewhere (`run A2 stayed the biggest point
+   from move 57 to 69 (5 mistakes, one lesson): moves …`; its moves are marked `(run A2)` in the list).
+   It is one oversight and one lesson: discuss it once, and the lesson is not seeing what's urgent
+   elsewhere. The profile counts it once.
 2. Say the result and, once the RATING line is in, the rank estimate in one friendly line ("Your
    moves looked like a 17k's"), then pick the **one or two** most instructive mistakes (big swings,
    the focus category, or a pattern from earlier games), not all of them. A first try that was taken
@@ -170,11 +179,13 @@ help; wins and losses only nudge it.
 4. `tag <gameId> <move#> <category> [note]` each mistake you discussed, and any heuristic category
    that looks wrong: `life_and_death`, `capturing_race`, `opening`, `direction`, `shape`, `endgame`,
    `tactics`, `other`. For a taken-back first try add `--taken-back <n>` (n from review's "first
-   try #n"). Tags replace the heuristic in the profile and steer the next focus.
+   try #n"). Tags replace the heuristic in the profile and steer the next focus. Tagging any move
+   of a run tags the whole run (its moves and problems), so tag it once.
 5. Offer another game, or a review of this game's mistakes first: they are now practice problems
    (a chat line says so), and re-solving one right after discussing it locks the lesson in. The
-   learner's Review mistakes button (or your `problem --game <gameId>`) runs them in move order, each
-   once; their Next goes on through the review, and after the last it ends and they're back on the board.
+   learner's Review mistakes button (or your `problem --game <gameId>`) runs them in move order, one
+   per lesson (a run is one lesson); their Next goes on through the review, and after the last it ends
+   and they're back on the board.
 
 **PROBLEM_START `<id>` ... answers ...** — a practice problem is on the board (you started it with
 `problem`, or the learner pressed Practice or Review mistakes; `review g12 2/4` on the line means the
@@ -183,6 +194,10 @@ mid-review). It comes together with their first attempt (or a
 question about it), with the position in the state under the lines. The line shows the accepted
 answers; the learner can't see them. Never give the answer or a strong hint before the first attempt.
 The board labels the last moves before the position −1 (the last) to −5; the state's `last moves` line lists them.
+A line with `lesson 2/5: A2 stayed the biggest point from move 57 to 69 …` is one variant of a
+lesson, a run of the learner's mistakes: the variants share one schedule and category, and each time
+the lesson comes back the learner gets another of its positions. Connect it to the run ("the same
+open point as moves 57 to 69"): the idea is the point that stayed biggest, not one memorised board.
 
 **PROBLEM `<id>` attempt N `<move>` ...** — KataGo has judged an attempt.
 - **correct**: celebrate briefly and specifically, and say *why* it works in one or two sentences

@@ -3,6 +3,7 @@
 import { beforeEach, describe, expect, it } from "vitest";
 import type { TutorEventInput } from "../../src/server/common.ts";
 import { GameController } from "../../src/server/game.ts";
+import { LATER_SESSION_MS } from "../../src/server/lessons.ts";
 import { playoutMove } from "../../src/server/practice.ts";
 import { BOX_INTERVALS, DEEP_VISITS, gameSource, problemGame } from "../../src/server/problems.ts";
 import type { Store } from "../../src/server/store.ts";
@@ -186,13 +187,17 @@ describe("problem mode", () => {
     const problems = store.loadProblems();
     problems.find((p) => p.id === LIVE)!.box = 3;
     store.saveProblems(problems);
-    for (const leave of [{ type: "leave_problem" }, { type: "next_problem" }] as const) {
+    // The second miss in one session puts the problem off to a later day.
+    for (const [leave, wait] of [
+      [{ type: "leave_problem" }, BOX_INTERVALS[1]!],
+      [{ type: "next_problem" }, LATER_SESSION_MS],
+    ] as const) {
       await startLive();
       await ctl.handleAction({ type: "play", point: at("D1") });
       await flush();
       clock.advance(1000);
       await ctl.handleAction(leave);
-      expect(stored(LIVE)).toMatchObject({ box: 1, lastResult: "failed", due: clock.now() + BOX_INTERVALS[1]! });
+      expect(stored(LIVE)).toMatchObject({ box: 1, lastResult: "failed", due: clock.now() + wait });
     }
     expect(stored(LIVE).seen).toBe(2);
     expect(store.loadProfile().practiced.life_and_death).toBe(0);
@@ -671,6 +676,82 @@ describe("reviewing a game's mistakes", () => {
     await expect(ctl.handleTutor({ type: "start_problem", gameId })).rejects.toThrow(/still going/);
     expect(ctl.view()).not.toHaveProperty("reviewProblems");
     expect(ctl.view().allowed).not.toContain("review_game");
+  });
+});
+
+describe("lessons in practice", () => {
+  // Game g7's moves 3 and 5 missed the same point: p1 and p2 are one lesson. p3 (g7 move 9) and
+  // p4 (another game) stand alone.
+  const lesson = { id: "p1", answer: "E1" };
+  const fromGame = (id: string, gameId: string, moveNumber: number, more: Partial<ReturnType<typeof liveProblem>> = {}) =>
+    liveProblem({ id, kind: "game", hash: id, source: { gameId, moveNumber, played: "D1" }, ...more });
+  const fail = async () => {
+    for (const gtp of ["D1", "F1"]) {
+      await ctl.handleAction({ type: "play", point: at(gtp) });
+      await flush();
+    }
+  };
+  beforeEach(() => {
+    setup();
+    engine.lossAfter(["D1"], 19);
+    engine.lossAfter(["F1"], 19);
+    seedProblems(store, [fromGame("p1", "g7", 3, { lesson }), fromGame("p2", "g7", 5, { lesson }), fromGame("p4", "g8", 2)]);
+  });
+
+  it("shows a lesson once per set, its other variant next time, and counts a miss for the whole lesson", async () => {
+    await ctl.handleAction({ type: "next_problem" });
+    expect(ctl.view().problem).toMatchObject({ id: "p1", lesson: { id: "p1", variant: 1, variants: 2, gameId: "g7", fromMove: 3, toMove: 5 } });
+    // The lesson's point is the answer: the browser gets it only once the problem is over; the tutor at once.
+    expect(ctl.view().problem?.lesson).not.toHaveProperty("answer");
+    expect(ofType("problem_start").at(-1)).toMatchObject({ problemId: "p1", lesson: { variant: 1, variants: 2, answer: "E1" } });
+    // Skipped: the lesson's other variant is due too, but the set moves on to another lesson.
+    await ctl.handleAction({ type: "next_problem" });
+    expect(ctl.view().problem?.id).toBe("p4");
+    expect(ctl.view().problem).not.toHaveProperty("lesson");
+    // Back to the lesson: missed, so every variant waits ten minutes.
+    await ctl.handleAction({ type: "next_problem" });
+    expect(ctl.view().problem?.id).toBe("p1");
+    await fail();
+    expect(stored("p2")).toMatchObject({ box: 1, lastResult: "failed", due: clock.now() + BOX_INTERVALS[1]!, seen: 0 });
+    // Due again: the variant not seen yet. A second miss in the session puts the lesson off a day.
+    clock.advance(BOX_INTERVALS[1]!);
+    await ctl.handleAction({ type: "next_problem" });
+    await ctl.handleAction({ type: "next_problem" });
+    expect(ctl.view().problem).toMatchObject({ id: "p2", lesson: { variant: 2, variants: 2 } });
+    await fail();
+    expect(stored("p1").due).toBe(clock.now() + LATER_SESSION_MS);
+    expect(stored("p2").due).toBe(clock.now() + LATER_SESSION_MS);
+  });
+
+  it("starts a new set when the learner goes back to playing", async () => {
+    await ctl.handleAction({ type: "next_problem" });
+    expect(ctl.view().problem?.id).toBe("p1");
+    await ctl.handleAction({ type: "leave_problem" });
+    // A new set: nothing was shown in it yet, so the first lesson again.
+    await ctl.handleAction({ type: "next_problem" });
+    expect(ctl.view().problem?.id).toBe("p1");
+    // A problem by id is exactly that one, even the lesson's other variant right after it.
+    await ctl.handleTutor({ type: "start_problem", problemId: "p2" });
+    expect(ctl.view().problem).toMatchObject({ id: "p2", lesson: { variant: 2 } });
+  });
+
+  it("reviews a game one problem per lesson, a different variant each time", async () => {
+    seedProblems(store, [...store.loadProblems(), fromGame("p3", "g7", 9)]);
+    await ctl.handleAction({ type: "review_game", gameId: "g7" });
+    expect(ctl.view().problem).toMatchObject({ id: "p1", review: { index: 1, total: 2 }, lesson: { variant: 1 } });
+    await ctl.handleAction({ type: "play", point: at("E1") });
+    await flush();
+    await ctl.handleAction({ type: "next_problem" });
+    expect(ctl.view().problem).toMatchObject({ id: "p3", review: { index: 2, total: 2 } });
+    await ctl.handleAction({ type: "next_problem" });
+    expect(ctl.view().chat.at(-1)?.text).toBe("Review done: you solved 1 of 2. Practice brings back the ones you missed.");
+    // The next review of the game shows the lesson's other variant.
+    await ctl.handleAction({ type: "review_game", gameId: "g7" });
+    expect(ctl.view().problem).toMatchObject({ id: "p2", review: { index: 1, total: 2 } });
+    await ctl.handleAction({ type: "play", point: at("E1") });
+    await flush();
+    // The solve counts for the lesson: both variants moved up together.
+    expect([stored("p1").box, stored("p2").box]).toEqual([3, 3]);
   });
 });
 

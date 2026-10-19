@@ -28,6 +28,7 @@ import type {
 import { RECENT_MOVES } from "../shared/types.ts";
 import { nextNumber } from "./common.ts";
 import { BACKGROUND_PRIORITY, TRUSTED_CANDIDATE_VISITS, type Analysis, type AnalyzeOptions, type Position } from "./katago.ts";
+import { lessonInfo, linkGameLessons } from "./lessons.ts";
 import { mistakeKey } from "./profile.ts";
 
 export { BOX_INTERVALS, MAX_BOX, freshSchedule, resultOf, schedule, type ProblemResult } from "../shared/schedule.ts";
@@ -93,6 +94,13 @@ export interface StoredProblem {
   solves: number;
   lastResult?: "first_try" | "solved" | "failed";
   lastSeen?: number;
+  /**
+   * One variant of a lesson (lessons.ts): a run of the game's mistakes that all missed `answer`.
+   * `id` is the first variant's problem id. The variants share box, due, lastResult, missedAt and category.
+   */
+  lesson?: { id: string; answer: Gtp };
+  /** When the problem (its lesson) was last missed, oldest first, the last few: a second miss in one session pushes it to a later day. */
+  missedAt?: number[];
 }
 
 /** A stone played before a problem's position. */
@@ -372,7 +380,8 @@ export interface ProblemMaker {
  * best as the answers. A mistake whose stored candidates are thin is analyzed again, deeper,
  * first. So is one where a ko ban applied: the problem position has no move history, so the
  * immediate recapture is legal there and the game's candidates (a ko threat, say) no longer
- * answer it; without that analysis there is no problem.
+ * answer it; without that analysis there is no problem. The problems of a run of mistakes that
+ * missed one point (GameSummary.runs) are linked into one lesson (lessons.ts `linkGameLessons`).
  */
 export async function generateProblems(
   game: { gameId: string; settings: GameSettings; moves: readonly MoveRecord[]; summary: GameSummary; takenBack?: readonly TakenBackMove[] },
@@ -443,7 +452,10 @@ export async function generateProblems(
         const problem = problemFromMistake(s, nextProblemId([...problems, ...fresh]), now);
         if (problem) fresh.push(problem);
       }
-      return addProblems(problems, fresh);
+      const added = addProblems(problems, fresh);
+      // A run of mistakes that missed one point is one lesson: its problems become its variants.
+      linkGameLessons(problems, gameId, current.runs ?? []);
+      return added;
     });
   } catch (err) {
     maker.log(`saving practice problems from ${gameId} failed: ${(err as Error).message}`);
@@ -458,48 +470,36 @@ export async function generateProblems(
 // Leitner boxes: src/shared/schedule.ts (BOX_INTERVALS, MAX_BOX, resultOf, schedule).
 
 /**
- * Selection order: problems in the focus category first (the learner's own before generated ones),
- * then the learner's own problems, then generated ones; within a group, lower boxes and older due
- * times first.
+ * Listing order: problems in the focus category first (the learner's own before generated ones),
+ * then the learner's own problems, then generated ones; within a group, the longest overdue first.
+ * next_problem picks lessons in the same order, keeping a set varied (lessons.ts).
  */
-function rank(p: StoredProblem, focus: MistakeCategory | undefined): [number, number, number, number] {
+export function rank(p: StoredProblem, focus: MistakeCategory | undefined): [number, number, number, number] {
   const group = p.category === focus ? (p.kind === "game" ? 0 : 1) : p.kind === "game" ? 2 : 3;
-  return [group, p.box, p.due, p.createdAt];
+  return [group, p.due, p.box, p.createdAt];
 }
 
-function compareRank(a: [number, number, number, number], b: [number, number, number, number]): number {
+export function compareRank(a: readonly number[], b: readonly number[]): number {
   for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return a[i]! - b[i]!;
   return 0;
 }
 
-/** Problems in selection order: due ones first (by rank), then the rest by due time. */
+/** Problems in listing order: due ones first (by rank), then the rest by due time. */
 export function orderProblems(problems: readonly StoredProblem[], now: number, focus?: MistakeCategory): StoredProblem[] {
   const due = problems.filter((p) => p.due <= now).sort((a, b) => compareRank(rank(a, focus), rank(b, focus)) || a.id.localeCompare(b.id));
   const later = problems.filter((p) => p.due > now).sort((a, b) => a.due - b.due || compareRank(rank(a, focus), rank(b, focus)) || a.id.localeCompare(b.id));
   return [...due, ...later];
 }
 
-/**
- * The problem next_problem shows: the first due one in selection order. When nothing is due, the
- * one due soonest (an early review), so practice never dead-ends. `exclude` (the problem just
- * shown) is skipped while there is anything else.
- */
-export function pickNextProblem(
-  problems: readonly StoredProblem[],
-  opts: { now: number; focus?: MistakeCategory; exclude?: string },
-): { problem: StoredProblem; early: boolean } | null {
-  const pool = problems.length > 1 ? problems.filter((p) => p.id !== opts.exclude) : problems;
-  const first = orderProblems(pool, opts.now, opts.focus)[0];
-  return first ? { problem: first, early: first.due > opts.now } : null;
-}
-
 // ---------------------------------------------------------------------------
 // Listing
 // ---------------------------------------------------------------------------
 
-export function listItem(p: StoredProblem, now: number): ProblemListItem {
+/** One problem as GET /api/problems lists it; `problems` (all of them) holds its lesson's other variants. */
+export function listItem(p: StoredProblem, now: number, problems: readonly StoredProblem[] = [p]): ProblemListItem {
   const source = gameSource(p);
   const generated = generatedInfo(p);
+  const lesson = lessonInfo(problems, p);
   return {
     id: p.id,
     kind: p.kind,
@@ -517,18 +517,21 @@ export function listItem(p: StoredProblem, now: number): ProblemListItem {
     ...(source && { source: { gameId: source.gameId, moveNumber: source.moveNumber } }),
     ...(p.difficulty !== undefined && { difficulty: p.difficulty }),
     ...(generated && { generated }),
+    ...(lesson && { lesson }),
   };
 }
 
-/** GET /api/problems. */
+/** GET /api/problems: every problem (each variant of a lesson too), counted per problem. */
 export function problemsResponse(problems: readonly StoredProblem[], now: number, focus: FocusRecommendation, generation?: GenerationStatus): ProblemsResponse {
   const ordered = orderProblems(problems, now, focus.category);
-  const due = ordered.filter((p) => p.due <= now);
+  // Due counts are lessons: one result reschedules every variant of a lesson.
+  const lessons = new Set<string>();
+  const due = ordered.filter((p) => p.due <= now && !lessons.has(p.lesson?.id ?? p.id) && lessons.add(p.lesson?.id ?? p.id));
   const byBox = Array.from({ length: MAX_BOX }, (_, i) => problems.filter((p) => p.box === i + 1).length);
   const dueByCategory: Partial<Record<MistakeCategory, number>> = {};
   for (const p of due) dueByCategory[p.category] = (dueByCategory[p.category] ?? 0) + 1;
   return {
-    problems: ordered.map((p) => listItem(p, now)),
+    problems: ordered.map((p) => listItem(p, now, problems)),
     counts: {
       total: problems.length,
       due: due.length,

@@ -195,6 +195,10 @@ describe("formatEvent", () => {
       ...end,
       summary: { ...end.summary, mistakes: [...end.summary.mistakes, ...firsts], assistance: { hints: 2, takeBacks: 1, rethinks: 0 }, rating: { before: 10, after: 10, rated: true, pending: true, nextBotRank: "20k", nextHandicap: 0 } },
     };
+    const runs = { ...end, summary: { ...end.summary, runs: [{ answer: "D5", mistakes: [{ moveNumber: 14 }, { moveNumber: 20 }], lead: { moveNumber: 14 } }] } };
+    expect(formatEvent(runs, ctx)).toBe(
+      "GAME_END g12 W+3.5 — 2 mistakes in 1 lesson, worst move 14 (6.2), total loss 15 over 61 moves — run: review g12",
+    );
     expect(formatEvent(pending, ctx)).toBe(
       "GAME_END g12 W+3.5 — 3 mistakes (1 taken back), worst move 14 (6.2), total loss 15 over 61 moves, help: 2 hints, 1 take-back, rank estimate running (a RATING line follows) — run: review g12",
     );
@@ -230,6 +234,11 @@ describe("formatEvent", () => {
     // A problem in a review of one game's mistakes.
     expect(formatEvent({ ...start, review: { gameId: "g12", index: 2, total: 4 } }, ctx)).toContain(
       "PROBLEM_START p4 life_and_death B to play (from g12 move 14, box 2, review g12 2/4) answers D5,E5",
+    );
+    // One variant of a lesson.
+    const lesson = { id: "p3", variant: 2, variants: 5, gameId: "g12", answer: "A2", fromMove: 57, toMove: 69 };
+    expect(formatEvent({ ...start, lesson }, ctx)).toContain(
+      "answers D5,E5 — lesson 2/5: A2 stayed the biggest point from move 57 to 69 (5 mistakes, one lesson) — \"Black to play. Live.\"",
     );
     // An old starter problem in the log.
     expect(formatEvent({ ...rest, problemId: "b-net" }, ctx)).toContain("PROBLEM_START b-net life_and_death B to play (built-in, box 2)");
@@ -398,6 +407,10 @@ describe("formatState", () => {
     expect(problemLines({ ...problem, recentMoves }, 9).at(-1)).toBe("last moves (labeled on the board): -1 W D4, -2 B C3");
     expect(problemLines({ ...problem, review: { gameId: "g12", index: 1, total: 3 } })[0]).toBe(
       "problem p4 life_and_death (from g12 move 14, box 1, review g12 1/3) B to play, attempt 2 of 2: Black to play. Live.",
+    );
+    const lesson = { id: "p3", variant: 2, variants: 5, gameId: "g12", answer: "A2", fromMove: 57, toMove: 69 };
+    expect(problemLines({ ...problem, lesson })[0]).toBe(
+      "problem p4 life_and_death (from g12 move 14, box 1, lesson 2/5 (A2 stayed open)) B to play, attempt 2 of 2: Black to play. Live.",
     );
     const v = view({ gameId: null, mode: "problem", status: "finished", moves: [], moment: null, problem: shown });
     expect(formatState(v)).toContain("problem p4 life_and_death (from g12 move 14, box 1) B to play, answer shown: Black to play. Live.");
@@ -681,6 +694,32 @@ describe("summary and review", () => {
     expect(lines[9]).toBe("board before move 3 (B played C3, best D5):");
     expect(text).toContain("(O)"); // the board before move 3 ends with White's C7
     expect(lines.slice(-2)).toEqual(["moves (human loss in pts, ! = mistake):", "1 B E5 -0.3 | 2 W C7 | 3 B C3 -6.2!"]);
+  });
+
+  it("names each run of mistakes that missed one point once, marks its members and shows one board for it", () => {
+    const text = formatReview({
+      id: "g12",
+      settings,
+      moves: view().moves,
+      result: { winner: "W", margin: -3.5, reason: "score" },
+      summary: {
+        moves: 3,
+        totalPointLoss: 10.5,
+        mistakes: [
+          { moveNumber: 3, move: "C3", pointLoss: 6.2, bestMove: "D5", category: "direction", categorySource: "heuristic" },
+          { moveNumber: 1, move: "E5", pointLoss: 4, bestMove: "D5", category: "direction", categorySource: "heuristic" },
+        ],
+        runs: [{ answer: "D5", mistakes: [{ moveNumber: 1 }, { moveNumber: 3 }], lead: { moveNumber: 3 } }],
+      },
+    });
+    const lines = text.split("\n");
+    expect(lines.slice(1, 5)).toEqual([
+      "mistakes (2, worst first, total loss 10.5):",
+      "  move 3 B C3 -6.2 best D5 [direction, heuristic] (run D5) pv D5 E4 C6",
+      "  move 1 B E5 -4 best D5 [direction, heuristic] (run D5) pv D5 E4 C6",
+      "  run D5 stayed the biggest point from move 1 to 3 (2 mistakes, one lesson): moves 1, 3; discuss it once, tagging one move tags the run",
+    ]);
+    expect(lines.filter((l) => l.startsWith("board before"))).toEqual(["board before move 3 (B played C3, best D5):"]);
   });
 
   it("reviews with the threshold the game was played with on its board", () => {

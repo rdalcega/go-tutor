@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { ProblemView } from "../../src/shared/types.ts";
 import { categoryLabel } from "../../src/shared/text.ts";
-import { attemptsLeftText, forwardTitle, generationFact, nextProblemLabel, playoutText, problemHeading, problemResult, recentMoveLabels } from "../../web/src/geometry.ts";
+import { attemptsLeftText, forwardTitle, generationFact, lessonLine, nextProblemLabel, playoutText, problemHeading, problemResult, recentMoveLabels } from "../../web/src/geometry.ts";
 
 const base: ProblemView = {
   id: "p4",
@@ -32,6 +32,16 @@ describe("problem card helpers", () => {
     expect(nextProblemLabel(base)).toBe("Next problem");
     expect(nextProblemLabel(review)).toBe("Next mistake");
     expect(nextProblemLabel({ ...review, review: { gameId: "g1", index: 4, total: 4 } })).toBe("Finish review");
+  });
+
+  it("names a lesson's variant, and its point only once the problem is answered", () => {
+    expect(lessonLine(base)).toBeNull();
+    const lesson = { id: "p3", variant: 2, variants: 5, gameId: "g1", answer: "A2", fromMove: 57, toMove: 69 };
+    expect(lessonLine({ ...base, lesson })?.text).toBe("Variant 2 of 5 · Moves 57 to 69 all missed the same point");
+    expect(lessonLine({ ...base, lesson, revealed: true })?.text).toBe("Variant 2 of 5 · A2 stayed the biggest point through moves 57 to 69");
+    const tries = { ...lesson, variants: 3, fromMove: 12, toMove: 12 };
+    expect(lessonLine({ ...base, lesson: tries })?.text).toBe("Variant 2 of 3 · 3 tries at move 12 all missed the same point");
+    expect(lessonLine({ ...base, lesson })?.title).toMatch(/^One lesson/);
   });
 
   it("shows problem generation in the progress card: the batch in progress, else the mastery count", () => {

@@ -194,21 +194,24 @@ COMMANDS
 
   problem [id] [--game <gameId|last>]
       Put a practice problem on the learner's board (problem mode; any game waits underneath). With
-      no id, the next due one: the recommended focus category first, then problems from the learner's
-      own mistakes, then generated ones. The learner gets 2 attempts; KataGo judges each move
+      no id, the next due lesson: the recommended focus category first, then problems from the learner's
+      own mistakes, then generated ones, keeping a set varied (no two from the same game or lesson in a
+      row while something else is due, the focus at most about half of the set); a lesson (a run of
+      mistakes that missed one point) shows its least recently seen variant. The learner gets 2 attempts; KataGo judges each move
       (within 1 point of its best counts as correct) and shows its line when the problem is over.
       In problem mode, show and mark draw on the problem position (show starts with the learner's
       color); the learner presses Next problem or Back to playing, or you run new-game.
       --game: review a finished game's mistakes instead (the learner's Review mistakes button): its
-      problems in move order, each once, due or not; Next goes through them, and after the last (or
+      problems in move order, one per lesson, due or not; Next goes through them, and after the last (or
       Back to playing) the review ends. Results are scheduled like any attempt.
       Example: npm run -s tutor -- problem p4
       Example: npm run -s tutor -- problem --game last
 
   problems
-      Every practice problem in the order "problem" picks them: id, category, source game and move
+      Every practice problem, due first, roughly in the order "problem" picks lessons: id, category, source game and move
       (or "generated 13x13, difficulty 14k, batch1"), Leitner box (1-5; first-try solves move up,
-      failures go back to 1), when it is due, results so far, and the accepted answers.
+      failures go back to 1), when it is due, results so far, the accepted answers, and the lesson
+      it is a variant of ([lesson p23 2/5: A2, moves 57-69]; variants share one schedule).
       Example: npm run -s tutor -- problems
 
   generate [--status | --now]
@@ -220,7 +223,8 @@ COMMANDS
       Example: npm run -s tutor -- generate --status
 
   tag <gameId> <move#> <category> [note] [--taken-back [n]]
-      Record why a mistake happened; feeds the learner profile. Categories:
+      Record why a mistake happened; feeds the learner profile. A move in a run (review's "run" line)
+      tags the whole run and its problems. Categories:
       ${MISTAKE_CATEGORIES.join(", ")}.
       --taken-back n tags a try at that move that was taken back, not the move that stayed on the
       board: n is the number review prints ("first try #2, taken back"). Plain --taken-back works
@@ -242,7 +246,8 @@ COMMANDS
       Compact post-game review (default last): result, rank estimate and rating change, the help the
       learner had (hints, take-backs, rethinks, and which moves had help), each mistake (move, played,
       best, loss, category, KataGo's PV; taken-back first tries included and marked), the win-rate
-      swings, the board before each of the 3 worst mistakes, and the move list (* = played with help).
+      swings, runs of mistakes that missed the same point (one lesson each, discussed once), the
+      board before each of the 3 worst mistakes (one per run), and the move list (* = played with help).
       Categories marked "heuristic" are the server's guess; tag to correct.
       Example: npm run -s tutor -- review last
 

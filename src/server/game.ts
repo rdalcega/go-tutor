@@ -12,7 +12,7 @@ import { allowedActions, hintBlocked, retryBlocked, takeBackBlocked, type Action
 import { gtpLine, gtpMove, moveGtp, movePoint, samePoint, tryFromGtp } from "../shared/coords.ts";
 import { atLevelOf, judgedLoss } from "../shared/judge.ts";
 import { atLevelRankFor, normalizeBotRank } from "../shared/rank.ts";
-import { colorName, formatScore, judgeModeChangedText, plural, round1, takenBackTryText, tutorLevelChangedText } from "../shared/text.ts";
+import { colorName, formatScore, judgeModeChangedText, plural, round1, runSpanText, takenBackTryText, tutorLevelChangedText } from "../shared/text.ts";
 import { playedThreshold, thresholdFor } from "../shared/threshold.ts";
 import {
   ASSIST_KINDS,
@@ -32,6 +32,8 @@ import {
   type Gtp,
   type JudgeMode,
   type MistakeCategory,
+  type MistakeRef,
+  type MistakeRun,
   type Move,
   type MoveRecord,
   type Overlay,
@@ -61,9 +63,24 @@ import {
 import { estimateRank, rankSamples } from "./estimate.ts";
 import { ProblemGenerator } from "./generate.ts";
 import { atLevelEvalFrom, candidatesOf, humanPolicyOptions, moveEvalFrom, needsReferenceAnalysis, positionOf, topHumanMove, type Analysis, type Engine, type Position } from "./katago.ts";
+import {
+  byMoveOrder,
+  gameRuns,
+  lessonInfo,
+  lessonKey,
+  pickNextProblem,
+  pickVariant,
+  recordLessonResult,
+  runOf,
+  sameRef,
+  setEntry,
+  variantsOf,
+  type SetEntry,
+} from "./lessons.ts";
+import { lessonsLogLine, migrateLessons } from "./migrate-lessons.ts";
 import { migrateRatingModel } from "./migrate.ts";
 import { PracticeSession, type PracticeDeps } from "./practice.ts";
-import { gameSource, generateProblems, pickNextProblem, recategorize, recentFromGame, resultOf, schedule, type StoredProblem } from "./problems.ts";
+import { gameSource, generateProblems, recategorize, recentFromGame, resultOf, type StoredProblem } from "./problems.ts";
 import {
   applyEstimate,
   applyGame,
@@ -135,13 +152,16 @@ interface PendingHelp {
   hintAsked?: boolean;
 }
 
-/** A review of one game's mistakes: its problem ids in move order, the one on the board (0-based), and the ones solved. */
+/**
+ * A review of one game's mistakes, one problem per lesson: its lessons (lessonKey) in move order,
+ * the one on the board (0-based), and the ones solved.
+ */
 interface ReviewState {
   gameId: string;
-  ids: string[];
+  lessons: string[];
   index: number;
   solved: Set<string>;
-  /** Problems that couldn't be set up, left out of the count. */
+  /** Lessons that couldn't be set up, left out of the count. */
   skipped: Set<string>;
 }
 
@@ -149,6 +169,28 @@ interface ReviewState {
 export const MAX_MIGRATION_ATTEMPTS = 4;
 /** Wait before trying a failed migration again; each further failure waits 4× longer (1, 4, 16 min). */
 export const MIGRATION_RETRY_MS = 60_000;
+
+/**
+ * The chat line once a finished game's mistakes are practice problems (`added`, linked into
+ * lessons): "7 of your mistakes are now practice problems, in 5 lessons: A2 stayed the biggest
+ * point from move 57 to 69, so those are one lesson. Press Review mistakes to try them."
+ */
+export function practiceProblemsText(added: readonly StoredProblem[]): string {
+  const press = `Press Review mistakes to try ${added.length === 1 ? "it" : "them"}.`;
+  if (added.length === 1) return `One of your mistakes is now a practice problem. ${press}`;
+  const lessons = new Map<string, StoredProblem[]>();
+  for (const p of added) lessons.set(lessonKey(p), [...(lessons.get(lessonKey(p)) ?? []), p]);
+  const runs = [...lessons.values()].filter((v) => v.length > 1 && v[0]!.lesson);
+  const head = `${added.length} of your mistakes are now practice problems`;
+  if (runs.length === 0) return `${head}. ${press}`;
+  const spans = runs.map((v, i) => {
+    const moves = v.map((p) => gameSource(p)?.moveNumber ?? 0);
+    const span = runSpanText(Math.min(...moves), Math.max(...moves), v.length);
+    return i === 0 ? `${v[0]!.lesson!.answer} stayed the biggest point ${span}` : `${v[0]!.lesson!.answer} ${span}`;
+  });
+  const which = runs.length === 1 ? "so those are one lesson" : "so each of those is one lesson";
+  return `${head}, in ${plural(lessons.size, "lesson")}: ${spans.join(", and ")}, ${which}. ${press}`;
+}
 
 /**
  * The index in `takenBack` of the taken-back try at `moveNumber` the tutor means: `which` is its
@@ -246,11 +288,15 @@ export class GameController {
   private engineState: EngineState = "starting";
   /** Problem mode: the problem on the board. */
   private practice: PracticeSession | null = null;
-  /** The problem shown last, so Next problem moves on to a different one. */
-  private lastProblemId: string | undefined;
-  /** A review of one game's mistakes: its problems in move order, the one on the board, and those solved. */
+  /**
+   * The practice set: the problems shown since the learner entered problem mode (Practice, the
+   * `problem` command, Review mistakes), so Next problem keeps the set varied. Starts over when a
+   * problem starts outside problem mode.
+   */
+  private practiceSet: SetEntry[] = [];
+  /** A review of one game's mistakes: its lessons in move order, the one on the board, and those solved. */
   private review: ReviewState | null = null;
-  /** Practice problems per source game (from problems.json, kept in step by updateProblems), for the finished game's Review mistakes count. */
+  /** Lessons per source game (from problems.json, kept in step by updateProblems), for the finished game's Review mistakes count. */
   private problemsPerGame = new Map<string, number>();
   /** Generated practice problems, made in the background while the learner doesn't need KataGo. */
   private readonly generator: ProblemGenerator;
@@ -1728,10 +1774,19 @@ export class GameController {
       }, delay);
       return false;
     }
-    // The migration wrote the profile, and maybe the problems; the controller's and the generator's copies follow.
+    // Runs of the same missed point become lessons once the rating migration has rebuilt the games.
+    let lessons = false;
+    try {
+      const line = lessonsLogLine(migrateLessons(this.store, this.clock.now()));
+      if (line) this.log(line);
+      lessons = !!line;
+    } catch (err) {
+      this.log(`grouping mistakes into lessons failed: ${(err as Error).message}`);
+    }
+    // The migrations wrote the profile, and maybe the problems; the controller's and the generator's copies follow.
     this.profile = this.store.loadProfile();
     this.profileVersion++;
-    if (report.problemsAdded.length) {
+    if (report.problemsAdded.length || lessons) {
       const problems = this.store.loadProblems();
       this.generator.problemsChanged(problems);
       this.countProblems(problems);
@@ -1762,7 +1817,7 @@ export class GameController {
         if (added.length === 0) return;
         this.log(`practice problems from ${gameId}: ${added.map((p) => p.id).join(", ")}`);
         if (this.gameId === gameId && !this.practice) {
-          this.system(`${added.length === 1 ? "One of your mistakes is" : `${added.length} of your mistakes are`} now a practice problem. Press Review mistakes to try ${added.length === 1 ? "it" : "them"}.`);
+          this.system(practiceProblemsText(added));
         }
       },
       (err: unknown) => this.log(`making practice problems from ${gameId} failed: ${(err as Error).message}`),
@@ -1782,13 +1837,55 @@ export class GameController {
         return mistakeEntry(r, settings.size, tagged ?? (this.heuristics[r.number] ??= this.classifyOrOther(r)), !!tagged);
       });
     const firsts = firstAttemptMistakes(this.takenBack, settings.size, threshold, (t) => (t.heuristic ??= this.classifyOrOther(t.record, t)));
+    const mistakes = worstFirst([...final, ...firsts]);
+    const runs = this.mistakeRuns(mistakes);
     return {
       moves: game.moves.length,
       threshold,
-      mistakes: worstFirst([...final, ...firsts]),
+      mistakes,
+      ...(runs.length && { runs }),
       totalPointLoss: totalPointLoss(game.moves, settings.humanColor, this.takenBack),
       assistance: { ...this.assistance },
     };
+  }
+
+  /**
+   * The runs among the game's summary mistakes (src/server/lessons.ts: one point stayed the
+   * biggest while the learner played elsewhere), each made one lesson: every member takes the
+   * lead's category and categorySource, and when the lead is tutor-tagged its category is written
+   * on every member's tag too (tagging one member tags the run; a member's own note stays).
+   * Mutates `mistakes` and the tags. A failure is logged and leaves the game without runs.
+   */
+  private mistakeRuns(mistakes: GameSummary["mistakes"]): MistakeRun[] {
+    let runs: MistakeRun[];
+    try {
+      runs = gameRuns({ settings: this.settings!, moves: this.game!.moves, takenBack: this.takenBack }, mistakes);
+    } catch (err) {
+      this.log(`finding runs of mistakes failed: ${(err as Error).message}`);
+      return [];
+    }
+    for (const run of runs) {
+      const lead = mistakes.find((m) => sameRef(m, run.lead));
+      if (!lead?.category) continue;
+      for (const ref of run.mistakes) {
+        const m = mistakes.find((x) => sameRef(x, ref));
+        if (!m || m === lead) continue;
+        m.category = lead.category;
+        m.categorySource = lead.categorySource;
+        if (lead.categorySource === "tutor") this.setTag(this.tags, this.takenBack, ref, { category: lead.category });
+      }
+    }
+    return runs;
+  }
+
+  /** Set a mistake's tag (a final move's in `tags`, a taken-back try's on itself); a note already there stays unless `value` has one. */
+  private setTag(tags: NonNullable<SavedGame["tags"]>, takenBack: readonly TakenBackMove[], ref: MistakeRef, value: { category: MistakeCategory; note?: string }): void {
+    const first = ref.takenBack !== undefined ? takenBack[ref.takenBack] : undefined;
+    if (ref.takenBack !== undefined && !first) return;
+    const before = first ? first.tag : tags[ref.moveNumber];
+    const tag = { ...(before?.note && { note: before.note }), ...value };
+    if (first) first.tag = tag;
+    else tags[ref.moveNumber] = tag;
   }
 
   /**
@@ -1833,7 +1930,9 @@ export class GameController {
 
   /**
    * Tag a mistake with a category (current or saved game). The tutor's tag replaces the heuristic
-   * category in the summary and in the profile tallies.
+   * category in the summary and in the profile tallies. A mistake in a run (GameSummary.runs) tags
+   * the whole run, one lesson: every member's tag, summary entry and practice problem take the
+   * category, and the profile changes once, on the run's lead.
    */
   private tag(gameId: string, moveNumber: number, category: MistakeCategory, note?: string, takenBack: boolean | number = false): void {
     const saved = gameId === this.gameId ? null : this.store.loadGame(gameId);
@@ -1851,75 +1950,98 @@ export class GameController {
     }
     const tags = saved ? (saved.tags ??= {}) : this.tags;
     const summary = saved ? saved.summary : this.summary;
-    const entry = summary?.mistakes.find((m) => m.moveNumber === moveNumber && m.takenBack === index);
-    // What the move counts as so far: an earlier tag, or the heuristic category counted at game end.
-    const previous = (first ? first.tag : tags[moveNumber])?.category ?? (entry?.categorySource === "heuristic" ? entry.category : undefined);
-    const value = { category, ...(note && { note }) };
-    if (first) first.tag = value;
-    else tags[moveNumber] = value;
+    const named: MistakeRef = { moveNumber, ...(index !== undefined && { takenBack: index }) };
+    const run = runOf(summary, named);
+    // The profile counts a run once, on its lead.
+    const counted = run?.lead ?? named;
+    const countedFirst = counted.takenBack !== undefined ? firsts[counted.takenBack] : undefined;
+    const countedRecord = countedFirst ? countedFirst.record : moves[counted.moveNumber - 1];
+    const entry = summary?.mistakes.find((m) => sameRef(m, counted));
+    // What it counts as so far: an earlier tag, or the heuristic category counted at game end.
+    const previous = (countedFirst ? countedFirst.tag : tags[counted.moveNumber])?.category ?? (entry?.categorySource === "heuristic" ? entry.category : undefined);
 
-    const pointLoss = round1(record.eval?.pointLoss ?? 0);
-    this.updateProfile((profile) =>
-      applyTag(profile, { ts: this.clock.now(), gameId, moveNumber, category, pointLoss, ...(note && { note }), ...(index !== undefined && { takenBack: index }) }, previous),
-    );
+    const members = run ? run.mistakes : [named];
+    for (const m of members) this.setTag(tags, firsts, m, { category, ...(sameRef(m, named) && note ? { note } : {}) });
+    const pointLoss = round1(countedRecord?.eval?.pointLoss ?? 0);
+    const tagged = { ts: this.clock.now(), gameId, moveNumber: counted.moveNumber, category, pointLoss, ...(note && { note }), ...(counted.takenBack !== undefined && { takenBack: counted.takenBack }) };
+    this.updateProfile((profile) => applyTag(profile, tagged, previous));
 
-    if (entry) {
-      entry.category = category;
-      entry.categorySource = "tutor";
+    for (const m of summary?.mistakes ?? []) {
+      if (!members.some((x) => sameRef(x, m))) continue;
+      m.category = category;
+      m.categorySource = "tutor";
     }
-    this.retagProblem(gameId, moveNumber, category, index);
+    this.retagProblems(gameId, members, category);
     if (saved) this.saveStored(saved);
     else this.save();
     this.changed();
   }
 
-  /** A tag changes what a mistake was about; the practice problem made from it follows. */
-  private retagProblem(gameId: string, moveNumber: number, category: MistakeCategory, takenBack: number | undefined): void {
-    const fromMove = (p: StoredProblem) => {
+  /**
+   * A tag changes what mistakes were about; the practice problems made from them follow, with the
+   * other variants of their lessons (src/server/lessons.ts), the one on the board included.
+   */
+  private retagProblems(gameId: string, mistakes: readonly MistakeRef[], category: MistakeCategory): void {
+    const fromMistake = (p: StoredProblem) => {
       const source = gameSource(p);
-      return source?.gameId === gameId && source.moveNumber === moveNumber && source.takenBack === takenBack;
+      return source?.gameId === gameId && mistakes.some((m) => m.moveNumber === source.moveNumber && m.takenBack === source.takenBack);
     };
-    // The problem may be on the board right now: its result and attempts count for the new category.
-    if (this.practice && fromMove(this.practice.problem)) this.practice.retag(category);
+    const board = this.practice?.problem;
+    let onBoard = !!board && fromMistake(board);
     try {
       this.updateProblems((problems) => {
-        const problem = problems.find(fromMove);
-        if (problem) recategorize(problem, category);
+        const lessons = new Set(problems.filter(fromMistake).map(lessonKey));
+        for (const p of problems) {
+          if (!fromMistake(p) && !lessons.has(lessonKey(p))) continue;
+          recategorize(p, category);
+          if (p.id === board?.id) onBoard = true;
+        }
       });
     } catch (err) {
-      this.log(`updating the problem from ${gameId} move ${moveNumber} failed: ${(err as Error).message}`);
+      this.log(`updating the problems from ${gameId} move ${mistakes.map((m) => m.moveNumber).join(", ")} failed: ${(err as Error).message}`);
     }
+    // Its result and attempts count for the new category.
+    if (onBoard) this.practice!.retag(category);
   }
 
   // --- practice problems -------------------------------------------------------------
 
   /**
-   * Enter problem mode with problem `id`, or the next one due: the recommended focus category
-   * first, then the learner's own problems, then generated ones (src/server/problems.ts). With
+   * Enter problem mode with problem `id` (exactly that one), or the next one: a lesson picked by
+   * pickNextProblem (src/server/lessons.ts) from the due ones, the recommended focus category
+   * first, keeping the practice set varied, and the lesson's variant seen least recently. With
    * `review`, the problem is that review's problem at `review.index` (any other start ends a review).
    */
   private startProblem(id?: string, review?: ReviewState): void {
     const problems = this.store.loadProblems();
+    // A problem started outside problem mode starts a new practice set.
+    const set = this.practice ? this.practiceSet : [];
     let problem: StoredProblem | undefined;
     let early = false;
     if (id) {
       problem = problems.find((p) => p.id === id);
       if (!problem) throw new UserError(`No practice problem "${id}". List them with: tutor problems`);
     } else {
-      const next = pickNextProblem(problems, { now: this.clock.now(), focus: recommendFocus(this.profile).category, exclude: this.lastProblemId });
+      const next = pickNextProblem(problems, { now: this.clock.now(), focus: recommendFocus(this.profile).category, set });
       if (!next) throw new UserError(this.noProblemsText());
       ({ problem, early } = next);
     }
+    const lesson = lessonInfo(problems, problem);
     if (!problem.recent && problem.kind === "game") problem = this.backfillRecent(problem);
-    const place = review && { gameId: review.gameId, index: review.index + 1, total: review.ids.length };
+    const place = review && { gameId: review.gameId, index: review.index + 1, total: review.lessons.length };
     // Checks the setup before the current problem closes.
-    const session = new PracticeSession(problem, this.practiceDeps, place);
-    // Leaving a problem after a wrong attempt reschedules it: the same problem again starts from its new box.
+    const session = new PracticeSession(problem, this.practiceDeps, { ...(place && { review: place }), ...(lesson && { lesson }) });
+    // Leaving a problem after a wrong attempt reschedules it, and its lesson: the same problem (or
+    // another variant of the lesson) again starts from the new box.
     const rescheduled = this.closePractice();
     if (rescheduled?.id === problem.id) Object.assign(session.problem, rescheduled);
+    else if (rescheduled && lessonKey(rescheduled) === lessonKey(problem)) {
+      const { box, due, lastResult, missedAt, category, prompt } = rescheduled;
+      Object.assign(session.problem, { box, due, lastResult, missedAt, category, prompt });
+    }
     this.practice = session;
     this.review = review ?? null;
-    this.lastProblemId = problem.id;
+    this.practiceSet = [...set, setEntry(session.problem)];
     session.start(early);
     this.changed();
   }
@@ -1947,29 +2069,26 @@ export class GameController {
   }
 
   /**
-   * Review a finished game's mistakes: its practice problems in move order (a taken-back first try
-   * before the move that stayed), each once, whether due or not. `gameId` "last" is the newest
-   * finished game. Results are scheduled like any other attempt.
+   * Review a finished game's mistakes: one problem per lesson (a run of mistakes that missed the
+   * same point is one), lessons in move order of their first mistake (a taken-back first try before
+   * the move that stayed), each once, whether due or not. Each lesson shows the variant seen least
+   * recently (pickVariant: a fresh review shows the run's first mistake). `gameId` "last" is the
+   * newest finished game. Results are scheduled like any other attempt.
    */
   private startReview(gameId: string): void {
     const id = gameId === "last" ? (this.result && this.gameId ? this.gameId : this.store.lastGame({ finished: true })?.id) : gameId;
     if (!id) throw new UserError("There is no finished game to review yet.");
     if (id === this.gameId && !this.result) throw new UserError(`Game ${id} is still going: its mistakes become practice problems when it ends.`);
-    // Move order; at one move, the taken-back first tries in order, then the move that stayed.
-    const order = (p: StoredProblem): [number, number] => {
-      const source = gameSource(p)!;
-      return [source.moveNumber, source.takenBack ?? Number.MAX_SAFE_INTEGER];
-    };
-    const ids = this.store
+    const fromGame = this.store
       .loadProblems()
       .filter((p) => gameSource(p)?.gameId === id)
-      .map((p) => ({ id: p.id, key: order(p) }))
-      .sort((a, b) => a.key[0] - b.key[0] || a.key[1] - b.key[1])
-      .map((p) => p.id);
-    if (ids.length === 0) {
+      .sort(byMoveOrder);
+    // The first variant of each lesson comes first in move order, so the lessons follow it too.
+    const lessons = [...new Set(fromGame.map(lessonKey))];
+    if (lessons.length === 0) {
       throw new UserError(`Game ${id} has no practice problems${id === this.gameId ? " yet: they are made from its mistakes a little after it ends" : ""}.`);
     }
-    this.reviewFrom({ gameId: id, ids, index: 0, solved: new Set(), skipped: new Set() }, 0);
+    this.reviewFrom({ gameId: id, lessons, index: 0, solved: new Set(), skipped: new Set() }, 0);
   }
 
   /** Next problem during a review: the review's next one, or after the last, back to the game with how it went. */
@@ -1980,18 +2099,24 @@ export class GameController {
     this.reviewFrom(review, review.index + 1);
   }
 
-  /** Put the review's problem at `index` on the board, skipping any that can't be set up; past the last, end the review. */
+  /**
+   * Put a problem of the review's lesson at `index` on the board (its variant seen least recently),
+   * skipping any lesson that can't be set up; past the last, end the review.
+   */
   private reviewFrom(review: ReviewState, index: number): void {
-    for (let i = index; i < review.ids.length; i++) {
+    for (let i = index; i < review.lessons.length; i++) {
+      const key = review.lessons[i]!;
       try {
-        return this.startProblem(review.ids[i], { ...review, index: i });
+        const variant = pickVariant(variantsOf(this.store.loadProblems(), { id: key }));
+        if (!variant) throw new UserError(`No practice problem "${key}" any more.`);
+        return this.startProblem(variant.id, { ...review, index: i });
       } catch (err) {
         if (!(err instanceof UserError)) throw err;
-        this.log(`review of ${review.gameId}: skipping ${review.ids[i]}: ${err.message}`);
-        review.skipped.add(review.ids[i]!);
+        this.log(`review of ${review.gameId}: skipping ${key}: ${err.message}`);
+        review.skipped.add(key);
       }
     }
-    const n = review.ids.length - review.skipped.size;
+    const n = review.lessons.length - review.skipped.size;
     if (n === 0) throw new UserError(`Game ${review.gameId}'s practice problems couldn't be set up.`);
     this.leaveProblem();
     const solved = review.solved.size;
@@ -2028,16 +2153,17 @@ export class GameController {
     return session?.close();
   }
 
-  /** A problem ended: schedule it (Leitner box) and count it in the profile. Returns it as stored now. */
+  /**
+   * A problem ended: it counts for its lesson (recordLessonResult: the Leitner box, a second miss in a
+   * session pushes the lesson to a later day, every variant takes the schedule), and once in the
+   * profile. Returns it as stored now.
+   */
   private recordProblemResult(problem: StoredProblem, solved: boolean, attempts: number): StoredProblem | undefined {
     let stored: StoredProblem | undefined;
     try {
-      stored = this.updateProblems((problems) => {
-        const p = problems.find((q) => q.id === problem.id);
-        if (p) schedule(p, resultOf(solved, attempts), this.clock.now());
-        return p;
-      });
-      if (solved && this.review?.ids.includes(problem.id)) this.review.solved.add(problem.id);
+      stored = this.updateProblems((problems) => recordLessonResult(problems, problem.id, resultOf(solved, attempts), this.clock.now()));
+      const key = lessonKey(stored ?? problem);
+      if (solved && this.review?.lessons.includes(key)) this.review.solved.add(key);
     } catch (err) {
       this.log(`saving problem ${problem.id} failed: ${(err as Error).message}`);
     }
@@ -2085,18 +2211,22 @@ export class GameController {
     return result;
   }
 
-  /** The finished game's practice problems (Review mistakes goes through them); 0 without a finished game. */
+  /** The finished game's lessons (Review mistakes shows one problem of each); 0 without a finished game. */
   private get reviewProblems(): number {
     return this.result && this.gameId ? (this.problemsPerGame.get(this.gameId) ?? 0) : 0;
   }
 
-  /** Count the practice problems per source game, for the finished game's Review mistakes. */
+  /** Count the lessons per source game (a lesson's variants once), for the finished game's Review mistakes. */
   private countProblems(problems: readonly StoredProblem[]): void {
-    this.problemsPerGame = new Map();
+    const lessons = new Map<string, Set<string>>();
     for (const p of problems) {
       const gameId = gameSource(p)?.gameId;
-      if (gameId) this.problemsPerGame.set(gameId, (this.problemsPerGame.get(gameId) ?? 0) + 1);
+      if (!gameId) continue;
+      const set = lessons.get(gameId) ?? new Set<string>();
+      set.add(lessonKey(p));
+      lessons.set(gameId, set);
     }
+    this.problemsPerGame = new Map([...lessons].map(([gameId, set]) => [gameId, set.size]));
   }
 
   /**

@@ -330,6 +330,8 @@ export interface ProblemView {
   recentMoves?: RecentMove[];
   /** Part of a review of one game's mistakes: this is problem `index` (1-based) of `total`. */
   review?: ProblemReview;
+  /** One variant of a lesson: a run of mistakes that missed the same point. */
+  lesson?: LessonInfo;
   /** The learner is playing the answered problem out against KataGo (absent otherwise). */
   playout?: PlayoutView;
 }
@@ -359,6 +361,23 @@ export interface RecentMove {
   color: Color;
   point: Point;
   ago: number;
+}
+
+/**
+ * A practice problem that is one variant of a lesson: a run of mistakes in one game that all
+ * missed `answer` (MistakeRun). The variants share one schedule and one category.
+ */
+export interface LessonInfo {
+  /** The lesson's id: its first variant's problem id. */
+  id: string;
+  /** This problem's place among the variants (1-based, move order) and how many there are. */
+  variant: number;
+  variants: number;
+  gameId: string;
+  /** The point that stayed open (left out of the problem's view until it is answered), and the moves of the first and last mistake of the run. */
+  answer?: Gtp;
+  fromMove: number;
+  toMove: number;
 }
 
 /** Where a problem stands in a review of one game's mistakes (its problems in move order, each once). */
@@ -532,6 +551,8 @@ export type TutorEvent =
       generated?: GeneratedProblemInfo;
       /** Part of a review of one game's mistakes. */
       review?: ProblemReview;
+      /** One variant of a lesson: a run of mistakes that missed the same point. */
+      lesson?: LessonInfo;
       /** ASCII rendering of the problem position. */
       board: string;
     }
@@ -573,12 +594,37 @@ export interface GameSummary {
     /** A taken-back move: its index in `SavedGame.takenBack`. */
     takenBack?: number;
   }[];
+  /**
+   * Runs of mistakes with the same answer (src/server/lessons.ts): one point stayed the biggest while
+   * the learner played elsewhere. Each run is one lesson. Absent on games saved before runs.
+   */
+  runs?: MistakeRun[];
   /** Points lost by every evaluated human move, taken-back ones included. */
   totalPointLoss: number;
   /** Help the learner had in the game. */
   assistance?: AssistCounts;
   /** How the game moved the learner's rating. Present once the game finished (not abandoned). */
   rating?: RatingChange;
+}
+
+/** A mistake of a game, as runs name it: its move number and, for a taken-back first try, its index in `takenBack`. */
+export interface MistakeRef {
+  moveNumber: number;
+  takenBack?: number;
+}
+
+/**
+ * Mistakes of one game that all missed the same point (src/server/lessons.ts): each shares the
+ * answer `answer`, and nothing was played on or next to it between them. One oversight, so one
+ * lesson: it counts once in the profile, takes one category, and its practice problems are variants.
+ */
+export interface MistakeRun {
+  /** The point that stayed open: an accepted answer of every mistake in the run. */
+  answer: Gtp;
+  /** The run's mistakes in move order (a taken-back first try before the move that stayed). */
+  mistakes: MistakeRef[];
+  /** The one that counts in the profile's tallies: a tutor-tagged one, else the worst. */
+  lead: MistakeRef;
 }
 
 /** The effect of one finished game on the profile's rating and on the next game's bot. */
@@ -657,6 +703,11 @@ export interface Profile {
   /** 2 = the rating comes from rank estimates of the learner's moves (absent: the old win/loss Elo; re-estimated at startup). */
   ratingModel?: 2;
   /**
+   * 1 = the tallies count each run of mistakes that missed the same point once, and the saved games
+   * and problems from before runs were grouped into lessons (src/server/migrate-lessons.ts, at startup).
+   */
+  lessons?: 1;
+  /**
    * Finished rated games whose rank estimate hasn't been applied yet, in the order they finished
    * (it waits for KataGo, and for the migration while `ratingModel` isn't 2). Absent when none.
    */
@@ -730,6 +781,8 @@ export interface ProblemListItem {
   difficulty?: number;
   /** Where a generated problem comes from (kind "generated"). */
   generated?: GeneratedProblemInfo;
+  /** One variant of a lesson: a run of mistakes that missed the same point. */
+  lesson?: LessonInfo;
 }
 
 /** GET /api/problems. */
