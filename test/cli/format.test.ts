@@ -160,6 +160,9 @@ describe("formatEvent", () => {
     expect(formatEvent({ ...base, type: "user_message", text: "what is this?", gameId: "g12", problemId: "b-ladder" }, ctx)).toBe(
       'USER "what is this?" (problem b-ladder)',
     );
+    expect(formatEvent({ ...base, type: "user_message", text: "why?", gameId: null, problemId: "p3", playout: true }, ctx)).toBe(
+      'USER "why?" (problem p3, playing it out: answer with one short say)',
+    );
     expect(formatEvent({ ...base, type: "hint_request", text: "where now?", gameId: "g12", size: 9, board: "", toPlay: "B" }, ctx)).toBe(
       'HINT game=g12 B to play — user asks: "where now?" — run: state, then say/show/mark',
     );
@@ -399,6 +402,20 @@ describe("formatState", () => {
     const v = view({ gameId: null, mode: "problem", status: "finished", moves: [], moment: null, problem: shown });
     expect(formatState(v)).toContain("problem p4 life_and_death (from g12 move 14, box 1) B to play, answer shown: Black to play. Live.");
     expect(statusLine(v)).toBe("problem=p4 mode=problem status=finished level=coach attempts=2/2 answer shown (D5)");
+    // Played out: where it stands, and that it is not the tutor's to comment on.
+    const playout = { ...shown, playout: { line: ["D5", "E4", "C3"], cursor: 2, thinking: false, over: false } };
+    expect(problemLines(playout)[3]).toBe("playing it out against KataGo: move 2 of 3 (D5 E4 C3) — unjudged; don't comment, only answer their chat");
+    expect(statusLine({ ...v, problem: playout })).toBe("problem=p4 mode=problem status=finished level=coach attempts=2/2 answer shown (D5) playout=2/3");
+    // Its moves are unjudged: no move list headed by losses.
+    const moves = [{ number: 1, move: { color: "B" as const, point: { x: 3, y: 4 } }, captures: [] }];
+    expect(formatState({ ...v, moves, problem: playout })).not.toContain("moves (");
+    // A reply the tutor still owes (the result's, or their chat's) is one say; a drawing isn't drawn.
+    const owed = { ...playout, playout: { ...playout.playout, replyOwed: true } };
+    expect(problemLines(owed)[3]).toMatch(/— unjudged; your reply to the result or their chat is still owed: one say, nothing is drawn$/);
+    expect(commandOutput({ type: "show", moves: ["D5"] }, { ...v, problem: owed }).split("\n")[1]).toBe(
+      "not drawn: the learner is playing the problem out (a say you owe them still goes)",
+    );
+    expect(commandOutput({ type: "show", moves: ["D5"] }, v)).not.toContain("not drawn");
   });
 
   it("handles an idle server", () => {

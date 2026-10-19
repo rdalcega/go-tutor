@@ -21,6 +21,9 @@ describe("request validation", () => {
     expect(parseTutorCommand({ type: "show", moves: ["C3", "pass"], start: "W" })).toEqual({ type: "show", moves: ["C3", "pass"], start: "W" });
     expect(parseClientAction({ type: "leave_problem", extra: 1 })).toEqual({ type: "leave_problem" });
     expect(parseClientAction({ type: "clear_overlay" })).toEqual({ type: "clear_overlay" });
+    for (const type of ["playout_start", "playout_back", "playout_forward", "playout_exit"] as const) {
+      expect(parseClientAction({ type, extra: 1 })).toEqual({ type });
+    }
     expect(parseClientAction({ type: "take_back" })).toEqual({ type: "take_back" });
     expect(parseClientAction({ type: "ask_tutor", text: "where?" })).toEqual({ type: "ask_tutor", text: "where?" });
     expect(parseTutorCommand({ type: "tag", gameId: "g", moveNumber: 3, category: "shape", takenBack: true })).toEqual({
@@ -395,6 +398,18 @@ describe("HTTP server", () => {
     const tutor = await stream(`${base}/api/tutor/events`);
     await flush();
     expect(tutor.frames.map((f) => JSON.parse(f) as TutorEvent)).toEqual([expect.objectContaining({ type: "problem_start", problemId: body.problems[0]!.id })]);
+    // Answered and played out: a tutor attaching now still hears of it while it owes the result a
+    // reply, and nothing once it has answered.
+    await post("/api/action", { type: "play", point: { x: 4, y: 8 } });
+    await flush();
+    expect((await post("/api/action", { type: "playout_start" })).body.view?.problem?.playout).toMatchObject({ cursor: 0, replyOwed: true });
+    const owed = await stream(`${base}/api/tutor/events`);
+    await flush();
+    expect(owed.frames.map((f) => (JSON.parse(f) as TutorEvent).type)).toEqual(["problem_start"]);
+    expect((await post("/api/tutor", { type: "say", text: "Nice." })).status).toBe(200);
+    const later = await stream(`${base}/api/tutor/events`);
+    await flush();
+    expect(later.frames).toEqual([]);
     const left = await post("/api/action", { type: "leave_problem" });
     expect(left.body.view?.mode).toBe("idle");
     expect(controller.view().problem).toBeNull();

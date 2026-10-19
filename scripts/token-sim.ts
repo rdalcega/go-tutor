@@ -1,7 +1,7 @@
 // Token-cost simulation of a typical tutoring session: `npm run -s sim:tokens`.
 //
-// A scripted session (setup, a 9×9 game on one tutor level, the review, three practice problems)
-// runs through the real `tutor watch` (src/cli/watch.ts) against a fake server, so every line the
+// A scripted session (setup, a 9×9 game on one tutor level, the review, three practice problems,
+// one played out) runs through the real `tutor watch` (src/cli/watch.ts) against a fake server, so every line the
 // stream prints, with its attached state or review, is the real formatter's output. Each burst of
 // output is one Monitor notification, i.e. one Claude turn. A tutor model then answers each
 // notification the way CLAUDE.md tells it to (the tool calls it makes and roughly how much it
@@ -327,7 +327,7 @@ interface Step {
   beat?: Beat;
 }
 
-/** The session for one tutor level: a 9×9 game of 80 moves, the review of two mistakes, three problems. */
+/** The session for one tutor level: a 9×9 game of 80 moves, the review of two mistakes, three problems (one played out). */
 function script(level: TutorLevel): Step[] {
   const steps: Step[] = [];
   const at = (after: number, run: Step["run"], beat?: Beat) => steps.push({ after, run, ...(beat && { beat }) });
@@ -433,6 +433,8 @@ function script(level: TutorLevel): Step[] {
   at(5, (w) => w.event({ type: "generation", status: "finished", batch: batch("finished") }));
   problem("p2", ["wrong", "right"]);
   problem("p3", ["wrong", "wrong"]);
+  // The learner plays p3 out against KataGo: its moves send nothing, and their question about it gets one say.
+  at(60, (w) => w.event({ type: "user_message", text: "Why does White answer there?", gameId: "g1", problemId: "p3", playout: true }), { kind: "problem-reply" });
   at(30, (w) => w.event({ type: "user_message", text: "Thanks, that's enough for today.", gameId: "g1" }), { kind: "user-question" });
   return steps;
 }
@@ -673,7 +675,7 @@ function money(n: number): string {
 
 async function main(): Promise<void> {
   const rows: string[] = [];
-  rows.push("Simulated tutoring session (setup, one 9x9 game of 80 moves, review of 2 mistakes, 3 problems), Claude Opus 5.5 prices");
+  rows.push("Simulated tutoring session (setup, one 9x9 game of 80 moves, review of 2 mistakes, 3 problems, 1 played out), Claude Opus 5.5 prices");
   rows.push("");
   rows.push("level      protocol  notifications  calls  cache read  cache write  output   cost");
   for (const level of LEVELS) {

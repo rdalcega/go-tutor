@@ -3,7 +3,8 @@
 import { beforeEach, describe, expect, it } from "vitest";
 import type { TutorEventInput } from "../../src/server/common.ts";
 import { GameController } from "../../src/server/game.ts";
-import { BOX_INTERVALS, DEEP_VISITS, gameSource } from "../../src/server/problems.ts";
+import { playoutMove } from "../../src/server/practice.ts";
+import { BOX_INTERVALS, DEEP_VISITS, gameSource, problemGame } from "../../src/server/problems.ts";
 import type { Store } from "../../src/server/store.ts";
 import { fromGtp } from "../../src/shared/coords.ts";
 import { FakeClock, FakeEngine, flush, liveProblem, seedProblems, tempStore } from "./fakes.ts";
@@ -670,5 +671,331 @@ describe("reviewing a game's mistakes", () => {
     await expect(ctl.handleTutor({ type: "start_problem", gameId })).rejects.toThrow(/still going/);
     expect(ctl.view()).not.toHaveProperty("reviewProblems");
     expect(ctl.view().allowed).not.toContain("review_game");
+  });
+});
+
+describe("playing a problem out", () => {
+  beforeEach(() => setup());
+
+  const playout = () => ctl.view().problem?.playout;
+  const act = (a: Parameters<GameController["handleAction"]>[0]) => ctl.handleAction(a);
+  const stone = (gtp: string) => ctl.view().board[at(gtp).y]![at(gtp).x];
+  /** Solve the problem (E1), then play it out: the answer's line E1 D8 E8 is ahead. */
+  async function solveAndPlayOut(): Promise<void> {
+    await startLive();
+    await act({ type: "play", point: at("E1") });
+    await flush();
+    await act({ type: "playout_start" });
+  }
+
+  it("is offered only once the problem is answered, solved or failed, and starts with the answer's line ahead", async () => {
+    await startLive();
+    expect(ctl.view().allowed).not.toContain("playout_start");
+    await expect(act({ type: "playout_start" })).rejects.toThrow(/Answer the problem first/);
+    await act({ type: "play", point: at("E1") });
+    await flush();
+    const answered = ctl.view();
+    expect(answered.allowed).toContain("playout_start");
+    await act({ type: "playout_start" });
+    const v = ctl.view();
+    // The tutor hasn't answered the solve yet.
+    expect(v.problem?.playout).toEqual({ line: ["E1", "D8", "E8"], cursor: 0, thinking: false, over: false, replyOwed: true });
+    // The answer's ghost stones go: the play-out puts real stones on the board.
+    expect(v.overlay).toBeNull();
+    expect(v.board).toEqual(answered.board);
+    expect(v.moves).toEqual([]);
+    expect(v.allowed).toEqual(expect.arrayContaining(["playout_forward", "playout_exit", "play", "pass"]));
+    expect(v.allowed).not.toContain("playout_start");
+    expect(v.allowed).not.toContain("playout_back");
+
+    // Failed: KataGo's answer is ahead.
+    setup();
+    engine.lossAfter(["D1"], 19.3);
+    engine.lossAfter(["F1"], 18.7);
+    await startLive();
+    await act({ type: "play", point: at("D1") });
+    await flush();
+    await act({ type: "play", point: at("F1") });
+    await flush();
+    await act({ type: "playout_start" });
+    expect(playout()).toMatchObject({ line: ["E1", "D8", "E8"], cursor: 0 });
+  });
+
+  it("steps through the line without asking KataGo, and Done puts the answer's drawing back", async () => {
+    await solveAndPlayOut();
+    const calls = engine.analyzeCalls.length;
+    await act({ type: "playout_forward" });
+    await act({ type: "playout_forward" });
+    let v = ctl.view();
+    expect(v.problem?.playout).toMatchObject({ cursor: 2, line: ["E1", "D8", "E8"] });
+    expect(stone("E1")).toBe("B");
+    expect(stone("D8")).toBe("W");
+    expect(v.moves.map((r) => [r.number, r.move.color])).toEqual([
+      [1, "B"],
+      [2, "W"],
+    ]);
+    expect(v.moves.every((r) => r.eval === undefined)).toBe(true);
+    expect(v.toPlay).toBe("B");
+    await act({ type: "playout_back" });
+    expect(playout()?.cursor).toBe(1);
+    expect(stone("D8")).toBeNull();
+    expect(engine.analyzeCalls.length).toBe(calls);
+    await act({ type: "playout_back" });
+    await expect(act({ type: "playout_back" })).rejects.toThrow(/problem position/);
+
+    await act({ type: "playout_exit" });
+    v = ctl.view();
+    expect(v.problem?.playout).toBeUndefined();
+    expect(v.overlay?.variation?.moves.map((m) => m.point)).toEqual([at("E1"), at("D8"), at("E8")]);
+    expect(v.moves).toEqual([]);
+    expect(v.allowed).toContain("playout_start");
+  });
+
+  it("answers the learner's own move with KataGo at full strength, dropping the moves that were ahead", async () => {
+    engine.lines.set("D1", { best: "E1", pv: ["E1", "F1"] });
+    await solveAndPlayOut();
+    await act({ type: "play", point: at("D1") });
+    expect(playout()).toMatchObject({ line: ["D1"], cursor: 1, thinking: true });
+    expect(ctl.view().engineBusy).toBe(true);
+    expect(ctl.view().allowed).not.toContain("play");
+    await expect(act({ type: "play", point: at("F1") })).rejects.toThrow(/thinking/);
+    await flush();
+    expect(playout()).toMatchObject({ line: ["D1", "E1"], cursor: 2, thinking: false, over: false });
+    expect(stone("E1")).toBe("W");
+    // The main net (no human-style profile), never the bot.
+    const last = engine.analyzeCalls.at(-1)!;
+    expect(last.pos.moves).toEqual([["B", "D1"]]);
+    expect(last.opts?.overrideSettings).toBeUndefined();
+    expect(engine.botCalls).toEqual([]);
+  });
+
+  it("steps forward when the learner plays the next move of the line, keeping the rest", async () => {
+    await solveAndPlayOut();
+    const calls = engine.analyzeCalls.length;
+    await act({ type: "play", point: at("E1") });
+    expect(playout()).toMatchObject({ line: ["E1", "D8", "E8"], cursor: 1, thinking: false });
+    expect(engine.analyzeCalls.length).toBe(calls);
+  });
+
+  it("stops KataGo's search when its move is no longer wanted", async () => {
+    await solveAndPlayOut();
+    engine.hold = true;
+    await act({ type: "play", point: at("A9") });
+    const signal = engine.analyzeCalls.at(-1)!.opts?.signal;
+    expect(signal?.aborted).toBe(false);
+    await act({ type: "playout_back" });
+    expect(signal?.aborted).toBe(true);
+    await flush();
+    expect(ctl.view().engineBusy).toBe(false);
+    await act({ type: "play", point: at("A9") });
+    const next = engine.analyzeCalls.at(-1)!.opts?.signal;
+    await act({ type: "leave_problem" });
+    expect(next?.aborted).toBe(true);
+  });
+
+  it("drops the moves ahead only for a legal move, and refuses moves on KataGo's turn", async () => {
+    await solveAndPlayOut();
+    await act({ type: "playout_forward" });
+    // White's turn: the learner can't play, and the line stays.
+    await expect(act({ type: "play", point: at("A9") })).rejects.toThrow(/KataGo's move/);
+    await act({ type: "playout_back" });
+    await expect(act({ type: "play", point: at("C1") })).rejects.toThrow(/already taken/);
+    expect(playout()?.line).toEqual(["E1", "D8", "E8"]);
+    await act({ type: "play", point: at("A9") });
+    expect(playout()?.line).toEqual(["A9"]);
+    await flush();
+    // KataGo's favorite (E5) is taken here, so it passes.
+    expect(playout()).toMatchObject({ line: ["A9", "pass"], cursor: 2 });
+  });
+
+  it("has KataGo move for the learner when they step forward at the end of the line, one move per press", async () => {
+    engine.lines.set("A9", { best: "B9", pv: ["B9"] });
+    engine.lines.set("A9 B9", { best: "C9", pv: ["C9"] });
+    engine.lines.set("A9 B9 C9", { best: "D9", pv: ["D9"] });
+    await solveAndPlayOut();
+    await act({ type: "play", point: at("A9") });
+    await flush();
+    expect(playout()).toMatchObject({ line: ["A9", "B9"], cursor: 2 });
+    await act({ type: "playout_forward" });
+    await flush();
+    expect(playout()).toMatchObject({ line: ["A9", "B9", "C9"], cursor: 3, thinking: false });
+    expect(stone("C9")).toBe("B");
+    // KataGo's turn: Forward asks it for White's move.
+    await act({ type: "playout_forward" });
+    await flush();
+    expect(playout()).toMatchObject({ line: ["A9", "B9", "C9", "D9"], cursor: 4 });
+  });
+
+  it("emits nothing to the tutor and records nothing", async () => {
+    engine.lines.set("A9", { best: "B9", pv: ["B9"] });
+    engine.lines.set("A9 B9", { best: "C9", pv: ["C9"] });
+    engine.lines.set("A9 B9 C9", { best: "D9", pv: ["D9"] });
+    await solveAndPlayOut();
+    const before = { events: events.length, problems: JSON.stringify(store.loadProblems()), profile: JSON.stringify(store.loadProfile()), version: ctl.view().profileVersion };
+    await act({ type: "playout_forward" });
+    await act({ type: "playout_back" });
+    await act({ type: "play", point: at("A9") });
+    await flush();
+    await act({ type: "playout_forward" }); // KataGo for the learner
+    await flush();
+    await act({ type: "playout_forward" }); // KataGo for itself
+    await flush();
+    await act({ type: "pass" });
+    await flush();
+    await act({ type: "playout_exit" });
+    expect(events.length).toBe(before.events);
+    expect(JSON.stringify(store.loadProblems())).toBe(before.problems);
+    expect(JSON.stringify(store.loadProfile())).toBe(before.profile);
+    expect(ctl.view().profileVersion).toBe(before.version);
+  });
+
+  it("drops KataGo's answer when the learner steps back or leaves while it thinks, also when it fails", async () => {
+    await solveAndPlayOut();
+    engine.hold = true;
+    await act({ type: "play", point: at("A9") });
+    expect(playout()?.thinking).toBe(true);
+    expect(ctl.view().allowed).toContain("playout_back");
+    await act({ type: "playout_back" });
+    expect(playout()).toMatchObject({ cursor: 0, thinking: false, line: ["A9"] });
+    // A new request while the old one is still out: the old one's end doesn't touch it.
+    await act({ type: "play", point: at("B9") });
+    engine.held.shift()!.release();
+    await flush();
+    expect(playout()).toMatchObject({ cursor: 1, thinking: true, line: ["B9"] });
+    engine.releaseAll();
+    await flush();
+    expect(playout()).toMatchObject({ cursor: 2, thinking: false });
+
+    const chat = ctl.view().chat.length;
+    await act({ type: "playout_back" });
+    await act({ type: "playout_back" });
+    await act({ type: "play", point: at("A9") });
+    await act({ type: "playout_exit" });
+    engine.failAnalyze = true;
+    engine.releaseAll();
+    await flush();
+    expect(ctl.view().chat.length).toBe(chat);
+    expect(playout()).toBeUndefined();
+  });
+
+  it("says when KataGo can't answer, and Forward tries again; stored moves step while KataGo isn't ready", async () => {
+    await solveAndPlayOut();
+    engine.failAnalyze = true;
+    await act({ type: "play", point: at("A9") });
+    await flush();
+    expect(playout()).toMatchObject({ line: ["A9"], cursor: 1, thinking: false });
+    expect(ctl.view().chat.at(-1)?.text).toMatch(/KataGo couldn't answer .* Press ▶ to try again/);
+    engine.failAnalyze = false;
+    await act({ type: "playout_forward" });
+    await flush();
+    expect(playout()).toMatchObject({ line: ["A9", "pass"], cursor: 2 });
+
+    ctl.setEngineState("starting");
+    await act({ type: "playout_back" });
+    await act({ type: "playout_forward" });
+    expect(playout()?.cursor).toBe(2);
+    await expect(act({ type: "playout_forward" })).rejects.toThrow(/starting up/);
+    await expect(act({ type: "play", point: at("B9") })).rejects.toThrow(/starting up/);
+    // Replaying the line's next move needs no KataGo while the line goes on past it.
+    await act({ type: "playout_back" });
+    await act({ type: "playout_back" });
+    expect(ctl.view().allowed).toContain("play");
+    await act({ type: "play", point: at("A9") });
+    expect(playout()).toMatchObject({ line: ["A9", "pass"], cursor: 1 });
+  });
+
+  it("ends after two passes, when only Back is left", async () => {
+    engine.lines.set("pass", { best: "pass", pv: ["pass"] });
+    await solveAndPlayOut();
+    await act({ type: "pass" });
+    await flush();
+    let v = ctl.view();
+    expect(v.problem?.playout).toMatchObject({ line: ["pass", "pass"], cursor: 2, thinking: false, over: true });
+    expect(v.moves.map((r) => "pass" in r.move)).toEqual([true, true]);
+    expect(v.allowed).not.toContain("playout_forward");
+    expect(v.allowed).not.toContain("play");
+    await expect(act({ type: "playout_forward" })).rejects.toThrow(/Both sides passed/);
+    await expect(act({ type: "play", point: at("A9") })).rejects.toThrow(/Both sides passed/);
+    await act({ type: "playout_back" });
+    expect(playout()).toMatchObject({ cursor: 1, over: false });
+    // The learner's own second pass ends it without asking KataGo.
+    await act({ type: "playout_back" });
+    await act({ type: "play", point: at("A9") });
+    await flush();
+    expect(playout()).toMatchObject({ line: ["A9", "pass"], cursor: 2 });
+    const calls = engine.analyzeCalls.length;
+    await act({ type: "pass" });
+    await flush();
+    expect(playout()).toMatchObject({ line: ["A9", "pass", "pass"], cursor: 3, over: true });
+    expect(engine.analyzeCalls.length).toBe(calls);
+  });
+
+  it("refuses game actions, and ends with the problem", async () => {
+    await solveAndPlayOut();
+    await expect(act({ type: "take_back" })).rejects.toThrow(/step back with ◀/);
+    await expect(act({ type: "retry" })).rejects.toThrow(/step back with ◀/);
+    await expect(act({ type: "ask_tutor" })).rejects.toThrow(/chat/);
+    await act({ type: "playout_start" }); // already playing out: nothing changes
+    expect(playout()?.cursor).toBe(0);
+    engine.hold = true;
+    await act({ type: "play", point: at("A9") });
+    // Next is allowed while KataGo thinks: the play-out goes with the problem.
+    expect(ctl.view().allowed).toContain("next_problem");
+    await act({ type: "next_problem" });
+    engine.releaseAll();
+    await flush();
+    expect(ctl.view().problem?.id).toBe("gen2");
+    expect(playout()).toBeUndefined();
+    await act({ type: "leave_problem" });
+    await expect(act({ type: "playout_forward" })).rejects.toThrow(/practice problem you have answered/);
+  });
+
+  it("keeps the tutor out: nothing drawn, and one say per answer it owes", async () => {
+    ctl.setTutorAttached(true);
+    await solveAndPlayOut();
+    expect(playout()?.replyOwed).toBe(true);
+    // Drawings are skipped, not refused (a `show && say` chain still sends the say), and settle nothing.
+    await ctl.handleTutor({ type: "show", moves: ["E1"] });
+    await ctl.handleTutor({ type: "mark", points: ["E1"] });
+    expect(ctl.view().overlay).toBeNull();
+    expect(playout()?.replyOwed).toBe(true);
+    // The learner pressed Play it out before the tutor answered the solve: that answer still goes, once.
+    // A moment id that isn't the game's open moment doesn't make a say the game's: it is that answer.
+    await ctl.handleTutor({ type: "say", text: "Nice, E1 makes two eyes.", momentId: "m1" });
+    expect(playout()?.replyOwed).toBeUndefined();
+    await expect(ctl.handleTutor({ type: "say", text: "Nice!" })).rejects.toThrow(/playing the answered problem out/);
+    await expect(ctl.handleTutor({ type: "say", text: "Nice!", momentId: "m1" })).rejects.toThrow(/playing the answered problem out/);
+    await ctl.handleAction({ type: "chat", text: "why does White play there?" });
+    expect(ofType("user_message").at(-1)).toMatchObject({ problemId: LIVE, playout: true });
+    await ctl.handleTutor({ type: "say", text: "To take away the eye." });
+    expect(ctl.view().chat.at(-1)).toMatchObject({ from: "tutor", text: "To take away the eye." });
+    await expect(ctl.handleTutor({ type: "say", text: "And more." })).rejects.toThrow(/one say/);
+    // Harmless: clear and resume.
+    await ctl.handleTutor({ type: "clear" });
+    await ctl.handleTutor({ type: "resume" });
+    // A question asked just before (or with the tutor away) is still answered, once.
+    await act({ type: "playout_exit" });
+    ctl.setTutorAttached(false);
+    await ctl.handleAction({ type: "chat", text: "hm" });
+    await act({ type: "playout_start" });
+    ctl.setTutorAttached(true);
+    await ctl.handleTutor({ type: "say", text: "late answer" });
+    await expect(ctl.handleTutor({ type: "say", text: "later" })).rejects.toThrow(/one say/);
+    // Back on the answered problem, the tutor talks and draws as usual.
+    await act({ type: "playout_exit" });
+    await ctl.handleTutor({ type: "say", text: "Well done." });
+    await ctl.handleTutor({ type: "mark", points: ["E1"] });
+    // The answer's drawing came back, and the mark joins it.
+    expect(ctl.view().overlay?.variation).toBeDefined();
+  });
+
+  it("plays KataGo's best legal candidate, or a pass", () => {
+    const game = problemGame(liveProblem());
+    const info = (move: string) => ({ move, scoreLead: 0, winrate: 0.5, visits: 10, order: 0, prior: 0.1, pv: [move] });
+    // E5 is taken (KataGo's rules can disagree with ours on a repeated position).
+    expect(playoutMove({ moveInfos: [info("E5"), info("A9")] }, game)).toBe("A9");
+    expect(playoutMove({ moveInfos: [info("E5"), info("pass"), info("A9")] }, game)).toBe("pass");
+    expect(playoutMove({ moveInfos: [info("E5")] }, game)).toBe("pass");
+    expect(playoutMove({ moveInfos: [] }, game)).toBe("pass");
   });
 });

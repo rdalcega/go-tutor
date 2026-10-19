@@ -301,6 +301,25 @@ export interface ProblemView {
   recentMoves?: RecentMove[];
   /** Part of a review of one game's mistakes: this is problem `index` (1-based) of `total`. */
   review?: ProblemReview;
+  /** The learner is playing the answered problem out against KataGo (absent otherwise). */
+  playout?: PlayoutView;
+}
+
+/**
+ * Playing an answered problem out against full-strength KataGo: nothing is judged or recorded. The
+ * view's board, side to move and `moves` are the play-out's position at `cursor`.
+ */
+export interface PlayoutView {
+  /** The whole line from the problem position, the learner first, moves ahead of the cursor included. */
+  line: Gtp[];
+  /** How many moves of `line` are on the board (0: the problem position). */
+  cursor: number;
+  /** KataGo is choosing a move. */
+  thinking: boolean;
+  /** Both sides passed at the cursor: only stepping back is left. */
+  over: boolean;
+  /** The tutor still owes the learner a reply (to the result, or to their chat): one say. */
+  replyOwed?: boolean;
 }
 
 /** How many of the moves before a problem's position it labels on the board (-1 … -5). */
@@ -347,7 +366,11 @@ export type ClientAction =
   | { type: "review_game"; gameId: string } // a review of a finished game's mistakes: its problems in move order, each once
   | { type: "clear_overlay" } // hide the drawing on the board (the tutor's, KataGo's or a hint)
   | { type: "set_tutor_level"; level: TutorLevel } // applies from the learner's next move
-  | { type: "set_judge_mode"; mode: JudgeMode }; // applies from the learner's next move
+  | { type: "set_judge_mode"; mode: JudgeMode } // applies from the learner's next move
+  | { type: "playout_start" } // after answering a problem: play it out against full-strength KataGo, unjudged
+  | { type: "playout_back" } // step one move back through the play-out
+  | { type: "playout_forward" } // step one move forward; at the end of the line KataGo plays the side to move
+  | { type: "playout_exit" }; // back to the answered problem
 
 // ---------------------------------------------------------------------------
 // Tutor → server (the `tutor` CLI posts these to POST /api/tutor)
@@ -426,6 +449,8 @@ export type TutorEvent =
       momentId?: string;
       gameId: string | null;
       problemId?: string;
+      /** Sent while the learner plays the problem out against KataGo (unjudged; the tutor only answers the message). */
+      playout?: boolean;
       /** The learner's tutor level, on a message about a game (absent on a problem, and in events logged before it was sent). */
       tutorLevel?: TutorLevel;
     }

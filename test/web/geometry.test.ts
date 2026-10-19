@@ -2,10 +2,12 @@ import { describe, expect, it } from "vitest";
 import type { GameSettings, MoveRecord } from "../../src/shared/types.ts";
 import {
   backoffDelay,
+  botPassBanner,
   columnLabel,
   computeLayout,
   formatLoss,
   lastHumanMove,
+  lastPass,
   lossLevel,
   pixelToPoint,
   pointToPixel,
@@ -93,6 +95,30 @@ describe("eval helpers", () => {
     });
     expect(lastHumanMove([rec(1, "B"), rec(2, "W")], "B")?.number).toBe(1);
     expect(lastHumanMove([rec(1, "B")], "W")).toBeNull();
+  });
+
+  it("finds a pass at the end of the game and says when the bot's pass ends it", () => {
+    const stone = (number: number, color: "B" | "W"): MoveRecord => ({ number, move: { color, point: { x: 0, y: number } }, captures: [] });
+    const pass = (number: number, color: "B" | "W"): MoveRecord => ({ number, move: { color, pass: true }, captures: [] });
+
+    expect(lastPass([], "B")).toBeNull();
+    expect(lastPass([stone(1, "B"), stone(2, "W")], "B")).toBeNull();
+    expect(botPassBanner(lastPass([stone(1, "B"), stone(2, "W")], "B"))).toBeNull();
+
+    // The bot passes: the learner can pass too or play on.
+    const botPassed = lastPass([stone(1, "B"), pass(2, "W")], "B");
+    expect(botPassed).toEqual({ number: 2, color: "W", by: "bot", final: false });
+    expect(botPassBanner(botPassed)).toBe("White passed");
+
+    // The bot answers the learner's pass with a pass: the game is over.
+    const bothPassed = lastPass([stone(1, "W"), pass(2, "W"), pass(3, "B")], "W");
+    expect(bothPassed).toEqual({ number: 3, color: "B", by: "bot", final: true });
+    expect(botPassBanner(bothPassed)).toBe("Black passed too: the game is over");
+
+    // The learner's own passes get no banner.
+    expect(botPassBanner(lastPass([stone(1, "B"), pass(2, "W"), pass(3, "B")], "B"))).toBeNull();
+    expect(lastPass([stone(1, "B"), pass(2, "W"), pass(3, "B")], "B")?.final).toBe(true);
+    expect(botPassBanner(lastPass([pass(1, "B")], "B"))).toBeNull();
   });
 
   it("scales the sparkline with a floor and dips on bigger losses", () => {

@@ -4,7 +4,7 @@
 import { gameBefore } from "../../src/engine/game.ts";
 import { GTP_COLUMNS, movePoint, samePoint } from "../../src/shared/coords.ts";
 import { ratingToRank } from "../../src/shared/rank.ts";
-import { categoryLabel, comeBackText, estimateRankText, plural, rankEstimateText } from "../../src/shared/text.ts";
+import { categoryLabel, colorName, comeBackText, estimateRankText, plural, rankEstimateText } from "../../src/shared/text.ts";
 import { sizeText, thresholdMultiplier, thresholdNum, thresholdText } from "../../src/shared/threshold.ts";
 import type {
   Board,
@@ -95,6 +95,38 @@ export function formatLoss(pointLoss: number): string {
 /** Human moves in order, with their eval when it has arrived. */
 export function humanMoves(moves: MoveRecord[], humanColor: Color): MoveRecord[] {
   return moves.filter((m) => m.move.color === humanColor);
+}
+
+/**
+ * A pass as the last move of a game (or of a problem's play-out): who passed, and whether it was the second pass in a row, which
+ * ends the game. Null when the last move is a stone (or there are no moves). The UI uses it to make
+ * the bot's pass obvious: a banner on the board and the status line.
+ */
+export interface LastPass {
+  /** Move number of the pass, so each pass gets its banner once. */
+  number: number;
+  color: Color;
+  by: "bot" | "human";
+  /** The other side passed just before: the game is over (its score may not be in yet). */
+  final: boolean;
+}
+
+export function lastPass(moves: MoveRecord[], humanColor: Color): LastPass | null {
+  const last = moves.at(-1);
+  if (!last || !("pass" in last.move)) return null;
+  const before = moves.at(-2);
+  return {
+    number: last.number,
+    color: last.move.color,
+    by: last.move.color === humanColor ? "human" : "bot",
+    final: !!before && "pass" in before.move,
+  };
+}
+
+/** The board banner for the bot's pass ("White passed"), or null when the last move isn't one. */
+export function botPassBanner(pass: LastPass | null): string | null {
+  if (pass?.by !== "bot") return null;
+  return pass.final ? `${colorName(pass.color)} passed too: the game is over` : `${colorName(pass.color)} passed`;
 }
 
 /** The most recent human move (evaluated or not). */
@@ -241,9 +273,37 @@ export function generationFact(g: GenerationStatus | undefined): { short: string
  * The labels of a problem's last moves before its position ("−1" on the last move, "−2" on the one
  * before, …), except where a drawing (a variation stone or a mark) is on the same point.
  */
-export function recentMoveLabels(v: { problem?: ProblemView | null; overlay: Overlay | null }): { point: Point; text: string }[] {
+export function recentMoveLabels(v: { problem?: ProblemView | null; overlay: Overlay | null; moves?: readonly MoveRecord[] }): { point: Point; text: string }[] {
   const drawn = [...(v.overlay?.variation?.moves ?? []), ...(v.overlay?.marks ?? [])].map((d) => d.point);
-  return (v.problem?.recentMoves ?? []).filter((m) => !drawn.some((p) => samePoint(p, m.point))).map((m) => ({ point: m.point, text: `\u2212${m.ago}` }));
+  const free = (p: Point) => !drawn.some((d) => samePoint(d, p));
+  // Played out past the position: the play-out's moves are numbered instead (1 is the learner's
+  // first), except the last, which has the last-move marker; the latest move on a point wins.
+  if (v.problem?.playout && v.problem.playout.cursor > 0) {
+    const labels = new Map<string, { point: Point; text: string }>();
+    (v.moves ?? []).forEach((r, i) => {
+      const point = movePoint(r.move);
+      if (point) labels.set(`${point.x},${point.y}`, { point, text: String(i + 1) });
+    });
+    const last = movePoint(v.moves?.at(-1)?.move);
+    if (last) labels.delete(`${last.x},${last.y}`);
+    return [...labels.values()].filter((l) => free(l.point));
+  }
+  return (v.problem?.recentMoves ?? []).filter((m) => free(m.point)).map((m) => ({ point: m.point, text: `\u2212${m.ago}` }));
+}
+
+/** The play-out card's line: where the learner is in it, and that nothing here counts. */
+export function playoutText(p: ProblemView): string {
+  const po = p.playout;
+  if (!po) return "";
+  const at = po.cursor === 0 ? "The problem position" : `Move ${po.cursor} of ${po.line.length}`;
+  return `${at} · nothing here is judged`;
+}
+
+/** The Forward button's tooltip: the next move of the line, or at its end KataGo moving for the side to play. */
+export function forwardTitle(p: ProblemView, toPlay: Color): string {
+  const po = p.playout;
+  if (po && po.cursor >= po.line.length) return toPlay === p.toPlay ? "KataGo plays your move (→)" : "KataGo's move (→)";
+  return "Next move (→)";
 }
 
 /** "2 attempts left", "1 attempt left", or "" once the problem is over. */

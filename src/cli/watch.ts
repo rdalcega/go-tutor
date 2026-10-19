@@ -43,6 +43,9 @@ export interface WatchOptions {
 /** Events older than this (a `--since` replay) get no state or review: the board has moved on, and the reviews would flood one notification. */
 const CONTEXT_MAX_AGE_MS = 10 * 60_000;
 
+/** Under a PROBLEM_START whose problem the learner already answered and now plays out against KataGo. */
+export const PLAYOUT_CONTEXT = "(the learner answered it and is playing it out against KataGo; nothing to answer)";
+
 const defaultSleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
 
 /** Events the tutor acts on. The rest stays out of the text stream unless `all` is set. */
@@ -105,6 +108,12 @@ export async function watch(opts: WatchOptions): Promise<void> {
     try {
       if (event.type === "game_end") return await reviewText(client, event.gameId, fetchSignal, true);
       const view = await state();
+      // A problem being played out is answered and unjudged: its board is for the tutor only while it
+      // still owes a reply (only a problem_start can match a problem view; a moment under it prints
+      // the game's board below).
+      if (event.type === "problem_start" && view.problem?.playout && !view.problem.playout.replyOwed) {
+        return view.problem.id === event.problemId ? PLAYOUT_CONTEXT : "gone";
+      }
       // The board must be the one the event is about: a replayed moment or hint can come after the game moved on.
       const same =
         event.type === "teaching_moment"

@@ -20,15 +20,19 @@ import { readCollapsed, writeCollapsed } from "./collapse.ts";
 import { gtpLine, moveGtp, movePoint } from "../../src/shared/coords.ts";
 import {
   attemptsLeftText,
+  botPassBanner,
   formatLoss,
+  forwardTitle,
   humanMoves,
   lastHumanMove,
+  lastPass,
   latestEstimate,
   lossLevel,
   nextBotText,
   positionBefore,
   generationFact,
   nextProblemLabel,
+  playoutText,
   problemHeading,
   problemResult,
   ratingChangeFor,
@@ -54,6 +58,7 @@ const $ = <T extends Element = HTMLElement>(id: string): T => {
 const el = {
   boardWrap: $("board-wrap"),
   canvas: $<HTMLCanvasElement>("board"),
+  passBanner: $("pass-banner"),
   variationLabel: $("variation-label"),
   captionRow: $("caption-row"),
   hideOverlay: $<HTMLButtonElement>("hide-overlay"),
@@ -91,6 +96,12 @@ const el = {
   problemResult: $("problem-result"),
   nextProblem: $<HTMLButtonElement>("next-problem"),
   leaveProblem: $<HTMLButtonElement>("leave-problem"),
+  playoutStart: $<HTMLButtonElement>("playout-start"),
+  playout: $("playout"),
+  playoutText: $("playout-text"),
+  playoutBack: $<HTMLButtonElement>("playout-back"),
+  playoutForward: $<HTMLButtonElement>("playout-forward"),
+  playoutExit: $<HTMLButtonElement>("playout-exit"),
   evalCard: $("eval"),
   evalLoss: $("eval-loss"),
   evalDetail: $("eval-detail"),
@@ -207,6 +218,7 @@ function can(v: GameView | null, action: ClientAction["type"]): v is GameView {
 function render(): void {
   const v = view;
   renderBoard(v);
+  renderPassBanner(v);
   renderStatus(v);
   renderControls(v);
   renderLevels(v);
@@ -248,6 +260,50 @@ function renderBoard(v: GameView | null): void {
   // Any drawing gets a Hide button (Esc too); it stays until the learner moves on or hides it.
   el.captionRow.hidden = !v.overlay;
   el.hideOverlay.disabled = !can(v, "clear_overlay");
+}
+
+/** How long the banner for the bot's pass stays on the board; the status line keeps saying it. */
+const PASS_BANNER_MS = 4000;
+/** The pass each game or problem last showed its banner for (its move number), so going to a problem and back doesn't show it again. */
+const passBannerShown = new Map<string, number>();
+/** Games and problems remembered at most (the oldest go first): enough to come back to any recent one. */
+const PASS_BANNER_REMEMBERED = 20;
+/** The game or problem the banner on the board belongs to. */
+let passBannerContext: string | null = null;
+let passBannerTimer: ReturnType<typeof setTimeout> | undefined;
+
+/**
+ * The bot's pass is easy to miss (no stone appears), so it gets a banner on the board, once per
+ * pass. It is visual only: the status line says the same and is the live region screen readers hear.
+ * In a problem's play-out the view's moves are the play-out's, and the bot is KataGo's side.
+ */
+function renderPassBanner(v: GameView | null): void {
+  const context = v?.mode === "game" ? `game|${v.gameId}` : v?.mode === "problem" ? `problem|${v.problem?.id}` : null;
+  const pass = context && v?.settings ? lastPass(v.moves, v.settings.humanColor) : null;
+  const text = botPassBanner(pass);
+  // Another game or problem's banner doesn't stay over this one.
+  if (passBannerContext !== context) {
+    clearTimeout(passBannerTimer);
+    el.passBanner.hidden = true;
+    passBannerContext = null;
+  }
+  if (!text || !pass || !context) {
+    clearTimeout(passBannerTimer);
+    el.passBanner.hidden = true;
+    // Forget the pass once it is no longer this game's (or play-out's) last move: after a take-back
+    // or a step back, a pass at the same number is a new one.
+    if (context) passBannerShown.delete(context);
+    return;
+  }
+  if (passBannerShown.get(context) === pass.number) return;
+  passBannerShown.delete(context);
+  passBannerShown.set(context, pass.number);
+  if (passBannerShown.size > PASS_BANNER_REMEMBERED) passBannerShown.delete(passBannerShown.keys().next().value!);
+  passBannerContext = context;
+  el.passBanner.textContent = text;
+  el.passBanner.hidden = false;
+  clearTimeout(passBannerTimer);
+  passBannerTimer = setTimeout(() => (el.passBanner.hidden = true), PASS_BANNER_MS);
 }
 
 /**
@@ -317,14 +373,29 @@ function turnText(v: GameView): string {
   const s = v.settings;
   const p = v.problem;
   if (v.mode === "problem" && p) {
+    const po = p.playout;
+    if (po) {
+      if (po.thinking) return "KataGo is thinking…";
+      if (po.over) return "Both sides passed.";
+      const pass = lastPass(v.moves, p.toPlay);
+      const passed = pass ? `${colorName(pass.color)} passed. ` : "";
+      return v.toPlay === p.toPlay ? `${passed}Playing it out: your move (${colorName(p.toPlay)}).` : `${passed}Playing it out: press Forward for KataGo's move.`;
+    }
     if (p.revealed) return p.solved ? "Problem solved." : "Here's the answer.";
     return v.engineBusy ? "Checking your move…" : `Problem: ${colorName(p.toPlay)} to play.`;
   }
   if (v.mode === "idle" || !s) return "Start a new game to begin.";
-  if (v.status === "finished") return "Game over.";
+  // A pass places no stone, so the status line says so until the next move.
+  const pass = lastPass(v.moves, s.humanColor);
+  const passed = !pass ? "" : pass.by === "bot" ? `${colorName(pass.color)} passed${pass.final ? " too" : ""}. ` : pass.final ? "You both passed. " : "";
+  if (v.status === "finished") return pass?.final ? `${passed}Game over.` : "Game over.";
   if (v.result) return "You resigned. KataGo is finishing its verdict on your last move…";
+  if (pass?.final) return `${passed}Counting the score…`;
   if (v.status === "paused") return "Paused for a teaching moment.";
-  if (v.toPlay === s.humanColor) return v.engineBusy ? "Analyzing your position…" : `Your move (${colorName(s.humanColor)}).`;
+  if (v.toPlay === s.humanColor) {
+    if (v.engineBusy) return `${passed}Analyzing your position…`;
+    return pass ? `${passed}Your move (${colorName(s.humanColor)}): pass too to end the game, or play on.` : `Your move (${colorName(s.humanColor)}).`;
+  }
   return "Bot is thinking…";
 }
 
@@ -416,7 +487,17 @@ function renderProblem(v: GameView | null): void {
   el.problemTitle.textContent = problemHeading(p, v.board.length);
   el.problemAttempts.textContent = attemptsLeftText(p);
   el.problemText.textContent = p.prompt;
-  const result = problemResult(p);
+  // Playing out, the play-out's controls take the place of the attempt's verdict.
+  const po = p.playout;
+  el.playout.hidden = !po;
+  el.playoutStart.hidden = !v.allowed.includes("playout_start");
+  el.playoutStart.disabled = !can(v, "playout_start");
+  el.playoutText.textContent = playoutText(p);
+  el.playoutBack.disabled = !can(v, "playout_back");
+  el.playoutForward.disabled = !can(v, "playout_forward");
+  el.playoutForward.title = forwardTitle(p, v.toPlay);
+  el.playoutExit.disabled = !can(v, "playout_exit");
+  const result = po ? null : problemResult(p);
   el.problemResult.hidden = !result;
   el.problemResult.className = `problem-result ${result?.tone ?? ""}`;
   el.problemResult.textContent = result?.text ?? "";
@@ -606,7 +687,10 @@ function renderResult(v: GameView | null): void {
   const human = v.settings?.humanColor;
   const won = r.winner !== null && r.winner === human;
   el.resultTitle.textContent = r.winner === null ? "Draw" : won ? "You won" : "You lost";
-  el.resultText.textContent = r.winner === null ? "The game ended in a draw." : `${formatScore(r)}.`;
+  // The dialog is modal (the status line behind it is inert), so it says itself how the game ended.
+  const pass = human ? lastPass(v.moves, human) : null;
+  const ended = !pass?.final ? "" : pass.by === "bot" ? `${colorName(pass.color)} passed too, so the game ended. ` : "You both passed, so the game ended. ";
+  el.resultText.textContent = `${ended}${r.winner === null ? "The game ended in a draw." : `${formatScore(r)}.`}`;
 
   // The server's mistakes (worst first, at the threshold the game was played with).
   const mistakes = (v.summary?.mistakes ?? []).slice(0, 3);
@@ -637,6 +721,10 @@ el.retry.addEventListener("click", () => void act({ type: "retry" }));
 el.nextProblem.addEventListener("click", () => void act({ type: "next_problem" }));
 el.practice.addEventListener("click", () => void act({ type: "next_problem" }));
 el.leaveProblem.addEventListener("click", () => void act({ type: "leave_problem" }));
+el.playoutStart.addEventListener("click", () => void act({ type: "playout_start" }));
+el.playoutBack.addEventListener("click", () => void act({ type: "playout_back" }));
+el.playoutForward.addEventListener("click", () => void act({ type: "playout_forward" }));
+el.playoutExit.addEventListener("click", () => void act({ type: "playout_exit" }));
 function reviewGame(): void {
   if (!view?.gameId) return;
   el.resultDialog.close();
@@ -736,6 +824,13 @@ document.addEventListener("keydown", (e) => {
   } else if (key === "h" && !el.hint.disabled) {
     e.preventDefault();
     void act({ type: "ask_tutor" });
+  } else if (e.key === "ArrowLeft" && can(view, "playout_back")) {
+    // Stepping through a play-out.
+    e.preventDefault();
+    void act({ type: "playout_back" });
+  } else if (e.key === "ArrowRight" && can(view, "playout_forward")) {
+    e.preventDefault();
+    void act({ type: "playout_forward" });
   } else if (e.key === "Enter" && can(view, "continue") && !el.moment.hidden) {
     // Don't steal Enter from a focused button.
     if (target?.closest("button")) return;

@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { ProblemView } from "../../src/shared/types.ts";
 import { categoryLabel } from "../../src/shared/text.ts";
-import { attemptsLeftText, generationFact, nextProblemLabel, problemHeading, problemResult, recentMoveLabels } from "../../web/src/geometry.ts";
+import { attemptsLeftText, forwardTitle, generationFact, nextProblemLabel, playoutText, problemHeading, problemResult, recentMoveLabels } from "../../web/src/geometry.ts";
 
 const base: ProblemView = {
   id: "p4",
@@ -121,5 +121,30 @@ describe("recent move labels", () => {
     expect(recentMoveLabels({ problem: { ...base, recentMoves }, overlay: { marks: [{ point: { x: 2, y: 6 }, kind: "x" }] } }).map((l) => l.text)).toEqual(["\u22121"]);
     expect(recentMoveLabels({ problem: base, overlay: null })).toEqual([]);
     expect(recentMoveLabels({ overlay: null })).toEqual([]);
+  });
+
+  it("numbers a play-out's moves instead, but not the last one, and the latest move on a point", () => {
+    const rec = (number: number, color: "B" | "W", x: number, y: number) => ({ number, move: { color, point: { x, y } }, captures: [] });
+    const moves = [rec(1, "B", 4, 8), rec(2, "W", 4, 0), { number: 3, move: { color: "B" as const, pass: true as const }, captures: [] }, rec(4, "W", 4, 8), rec(5, "B", 0, 0)];
+    const playing = (cursor: number) => ({ ...base, recentMoves, revealed: true, playout: { line: [], cursor, thinking: false, over: false } });
+    // At the problem position the last moves before it keep their labels.
+    expect(recentMoveLabels({ problem: playing(0), overlay: null, moves: [] }).map((l) => l.text)).toEqual(["−2", "−1"]);
+    expect(recentMoveLabels({ problem: playing(5), overlay: null, moves })).toEqual([
+      { point: { x: 4, y: 8 }, text: "4" },
+      { point: { x: 4, y: 0 }, text: "2" },
+    ]);
+  });
+});
+
+describe("play-out card", () => {
+  const playing = (cursor: number, length: number) => ({ ...base, revealed: true, playout: { line: Array<string>(length).fill("A1"), cursor, thinking: false, over: false } });
+
+  it("says where the learner is in the line, and what Forward does", () => {
+    expect(playoutText(base)).toBe("");
+    expect(playoutText(playing(0, 3))).toBe("The problem position · nothing here is judged");
+    expect(playoutText(playing(2, 3))).toBe("Move 2 of 3 · nothing here is judged");
+    expect(forwardTitle(playing(2, 3), "B")).toBe("Next move (→)");
+    expect(forwardTitle(playing(3, 3), "W")).toBe("KataGo's move (→)");
+    expect(forwardTitle(playing(3, 3), "B")).toBe("KataGo plays your move (→)");
   });
 });

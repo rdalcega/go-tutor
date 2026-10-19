@@ -26,6 +26,9 @@ import { colorName, judgeModeChangedText, round1, tutorLevelChangedText } from "
 import { atLevelOf, judgedLoss } from "../../src/shared/judge.ts";
 import { thresholdFor } from "../../src/shared/threshold.ts";
 
+/** The mock bot's move that is a pass (its third), to show how the UI marks the bot's pass. */
+const MOCK_BOT_PASS_AT = 3;
+
 /** A batch of generated problems halfway done, for the progress card. */
 const MOCK_GENERATION: GenerationStatus = {
   state: "waiting",
@@ -163,6 +166,18 @@ class MockServer implements Transport {
   private problemIndex = 0;
   /** A review of the finished game's mistakes (the mock problems in turn stand in for them). */
   private review: { gameId: string; index: number; total: number } | null = null;
+  /** Playing the answered problem out: the line, the rules engine at the cursor, the problem board and the answer's drawing to put back. */
+  private playout: {
+    line: string[];
+    cursor: number;
+    game: GoGame;
+    thinking: boolean;
+    gen: number;
+    answerOverlay: GameView["overlay"];
+    base: GameView["board"];
+  } | null = null;
+  /** The answer's line as drawn at the reveal (kept even if the learner hides the drawing): a play-out starts with it ahead. */
+  private answerLine: string[] = [];
 
   constructor() {
     this.view = this.sampleView();
@@ -233,6 +248,17 @@ class MockServer implements Transport {
       v.captures = this.game.captures;
       v.toPlay = this.game.toPlay;
     }
+    const po = this.playout;
+    if (po && v.problem) {
+      v.board = po.game.board;
+      v.moves = po.game.moves;
+      v.captures = po.game.captures;
+      v.toPlay = po.game.toPlay;
+      v.engineBusy = po.thinking;
+      v.problem.playout = { line: [...po.line], cursor: po.cursor, thinking: po.thinking, over: po.game.isOver };
+    } else if (v.problem) {
+      delete v.problem.playout;
+    }
     v.allowed = this.allowed();
     return structuredClone(v);
   }
@@ -250,7 +276,19 @@ class MockServer implements Transport {
       moment: v.moment,
       engineReady: true,
       tutorAttached: v.tutorAttached,
-      problem: v.problem ? { revealed: v.problem.revealed, checking: false } : null,
+      problem: v.problem
+        ? {
+            revealed: v.problem.revealed,
+            checking: false,
+            playout: this.playout && {
+              cursor: this.playout.cursor,
+              length: this.playout.line.length,
+              thinking: this.playout.thinking,
+              learnerToPlay: this.playout.game.toPlay === v.problem.toPlay,
+              over: this.playout.game.isOver,
+            },
+          }
+        : null,
       overlay: v.overlay !== null,
       reviewProblems: v.reviewProblems ?? 0,
       inReview: this.review !== null,
@@ -368,6 +406,7 @@ class MockServer implements Transport {
     const v = this.view;
     const s = v.settings;
     const game = this.game;
+    if (v.mode === "problem" && (a.type.startsWith("playout_") || (this.playout && (a.type === "play" || a.type === "pass")))) return this.playoutApply(a);
     if (v.mode === "problem" && a.type === "play") return this.problemPlay(a.point);
     switch (a.type) {
       case "next_problem":
@@ -403,6 +442,7 @@ class MockServer implements Transport {
         this.msg("system", judgeModeChangedText(a.mode, v.atLevelRank ?? "18k"));
         return null;
       case "new_game": {
+        this.playout = null;
         this.gameView = null;
         this.problemDef = null;
         this.review = null;
@@ -427,6 +467,11 @@ class MockServer implements Transport {
       case "pass": {
         if (!s || !game || game.toPlay !== s.humanColor || v.status !== "playing") return "It isn't your turn.";
         game.pass();
+        // Passing after the bot passed ends the game; otherwise the bot passes too.
+        if (game.isOver) {
+          this.finish({ winner: "W", margin: -4.5, reason: "score" });
+          return null;
+        }
         v.engineBusy = true;
         setTimeout(() => {
           game.pass();
@@ -475,10 +520,100 @@ class MockServer implements Transport {
         this.msg("system", p ? `Hint: consider ${toGtp(p, s.size)}.` : "No hint available.");
         return null;
       }
+      case "playout_start":
+      case "playout_back":
+      case "playout_forward":
+      case "playout_exit":
+        return "Playing out is for a practice problem you have answered.";
     }
   }
 
+  /** Play-out, as the server does it (src/server/practice.ts), with a random legal point for KataGo. */
+  private playoutApply(a: ClientAction): string | null {
+    const v = this.view;
+    const p = v.problem!;
+    const size = v.board.length;
+    if (a.type === "playout_start") {
+      if (this.playout) return null;
+      if (!p.revealed) return "Answer the problem first; then you can play it out.";
+      const line = [...this.answerLine];
+      this.playout = { line, cursor: 0, game: GoGame.fromBoard(v.board, p.toPlay), thinking: false, gen: 0, answerOverlay: v.overlay, base: v.board };
+      v.overlay = null;
+      this.msg("system", "Playing it out: KataGo answers at full strength, and nothing here is judged.");
+      return null;
+    }
+    const po = this.playout;
+    if (!po) return "Press Play it out first.";
+    const advance = (gtp: string) => {
+      const point = tryFromGtp(gtp, size);
+      const color = po.game.toPlay;
+      po.game.play(point ? { color, point } : { color, pass: true });
+      po.cursor++;
+    };
+    const reply = () => {
+      const gen = ++po.gen;
+      po.thinking = true;
+      setTimeout(() => {
+        if (this.playout !== po || po.gen !== gen) return;
+        po.thinking = false;
+        let move = "pass";
+        for (let tries = 0; tries < 50; tries++) {
+          const q = this.randomEmpty();
+          if (q && po.game.isLegal(q)) {
+            move = toGtp(q, size);
+            break;
+          }
+        }
+        po.line.length = po.cursor;
+        po.line.push(move);
+        advance(move);
+        this.emit();
+      }, 600);
+    };
+    switch (a.type) {
+      case "playout_exit":
+        this.playout = null;
+        v.board = po.base;
+        v.moves = [];
+        v.toPlay = p.toPlay;
+        v.captures = { B: 0, W: 0 };
+        v.engineBusy = false;
+        v.overlay = po.answerOverlay;
+        return null;
+      case "playout_back":
+        if (po.cursor === 0) return "This is the problem position.";
+        po.game.undo(1);
+        po.cursor--;
+        po.gen++;
+        po.thinking = false;
+        return null;
+      case "playout_forward":
+        if (po.thinking) return "KataGo is thinking.";
+        if (po.cursor < po.line.length) advance(po.line[po.cursor]!);
+        else if (po.game.isOver) return "Both sides passed.";
+        else reply();
+        return null;
+      case "play":
+      case "pass": {
+        if (po.thinking || po.game.isOver || po.game.toPlay !== p.toPlay) return "It isn't your turn.";
+        if (a.type === "play" && !po.game.isLegal(a.point)) return "That point is not a legal move.";
+        const gtp = a.type === "play" ? toGtp(a.point, size) : "pass";
+        // As on the server: the next move of the line itself just steps forward, keeping what follows it.
+        if (po.line[po.cursor] !== gtp) {
+          po.line.length = po.cursor;
+          po.line.push(gtp);
+        }
+        advance(gtp);
+        po.gen++;
+        if (!po.game.isOver && po.cursor === po.line.length) reply();
+        return null;
+      }
+    }
+    return null;
+  }
+
   private leaveProblem(): void {
+    this.playout = null;
     if (this.gameView) ({ view: this.view, game: this.game } = this.gameView);
     this.gameView = null;
     this.problemDef = null;
@@ -488,6 +623,7 @@ class MockServer implements Transport {
   /** Problem mode with the mock problems in turn; the game view waits underneath. */
   private startProblem(): void {
     const def = MOCK_PROBLEMS[this.problemIndex++ % MOCK_PROBLEMS.length]!;
+    this.playout = null;
     this.gameView ??= { view: this.view, game: this.game };
     this.game = null;
     this.problemDef = def;
@@ -540,6 +676,7 @@ class MockServer implements Transport {
       p.nextDue = Date.now() + BOX_INTERVALS[p.box]!;
       v.status = "finished";
       const shown = fromGtp(correct ? gtp : answer, size)!;
+      this.answerLine = [toGtp(shown, size)];
       v.overlay = {
         variation: { label: correct ? `${gtp} and how play goes on` : `KataGo's answer: ${answer}`, moves: [{ color: def.toPlay, point: shown }] },
         ...(!correct && { marks: [{ point, kind: "x" as const }] }),
@@ -584,7 +721,9 @@ class MockServer implements Transport {
     v.engineBusy = true;
     this.emit();
     setTimeout(() => {
-      for (let tries = 0; tries < 50; tries++) {
+      // The bot passes on its third move of a game, so the pass banner and status can be eyeballed.
+      const botMoves = game.moves.filter((r) => r.move.color !== v.settings?.humanColor).length;
+      for (let tries = 0; tries < 50 && botMoves !== MOCK_BOT_PASS_AT - 1; tries++) {
         const p = this.randomEmpty();
         if (!p) break;
         if (game.playAt(p).ok) break;
