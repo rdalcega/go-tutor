@@ -8,7 +8,7 @@ import type { PlayoutState } from "../shared/allowed.ts";
 import { samePoint, toGtp, tryFromGtp } from "../shared/coords.ts";
 import { plural, round1 } from "../shared/text.ts";
 import { sizeText } from "../shared/threshold.ts";
-import type { ClientAction, Color, GameSettings, GameView, Gtp, Overlay, Point, ProblemAttempt, ProblemReview, RecentMove, TutorCommand } from "../shared/types.ts";
+import type { ClientAction, Color, GameSettings, GameView, Gtp, LessonInfo, Overlay, Point, ProblemAttempt, ProblemReview, RecentMove, TutorCommand } from "../shared/types.ts";
 import { ILLEGAL_TEXT, PV_STONES, UserError, alternatingStones, lineStones, type TutorEventInput } from "./common.ts";
 import { moveEvalFrom, trustedCandidate, type Analysis, type Engine } from "./katago.ts";
 import { ANSWER_MARGIN, MAX_ATTEMPTS, gameSource, generatedInfo, problemGame, problemPosition, promptFor, recentMovesView, type StoredProblem } from "./problems.ts";
@@ -56,6 +56,11 @@ export function playoutMove(analysis: Pick<Analysis, "moveInfos">, game: GoGame)
     if (point && game.isLegal(point)) return info.move;
   }
   return "pass";
+}
+
+function withoutAnswer(lesson: LessonInfo): LessonInfo {
+  const { answer: _, ...rest } = lesson;
+  return rest;
 }
 
 /** What a session needs from the controller. */
@@ -110,13 +115,23 @@ export class PracticeSession {
    */
   private tutorOwed = false;
 
-  /** Throws a UserError when the problem can't be set up. `review`: the problem's place in a review of one game's mistakes. */
+  /** The problem's place in a review of one game's mistakes. */
+  private readonly review: ProblemReview | undefined;
+  /** The problem's lesson, when it is one variant of several (as it was when the session started). */
+  private readonly lesson: LessonInfo | undefined;
+
+  /**
+   * Throws a UserError when the problem can't be set up. `review`: the problem's place in a review of
+   * one game's mistakes; `lesson`: its lesson (lessonInfo), shown with it.
+   */
   constructor(
     problem: StoredProblem,
     private readonly deps: PracticeDeps,
-    private readonly review?: ProblemReview,
+    opts: { review?: ProblemReview; lesson?: LessonInfo } = {},
   ) {
     this.problem = problem;
+    this.review = opts.review;
+    this.lesson = opts.lesson;
     try {
       this.game = problemGame(problem);
     } catch (err) {
@@ -165,6 +180,7 @@ export class PracticeSession {
       ...(source && { source: { gameId: source.gameId, moveNumber: source.moveNumber } }),
       ...(generated && { generated }),
       ...(this.review && { review: { ...this.review } }),
+      ...(this.lesson && { lesson: { ...this.lesson } }),
       board: toAscii(this.game.board, null),
     });
     if (this.deps.engineNotReady() === null) this.analysis([]).catch(() => {});
@@ -320,6 +336,8 @@ export class PracticeSession {
         ...(this.nextDue !== undefined && { nextDue: this.nextDue }),
         ...(this.recentMoves && { recentMoves: this.recentMoves }),
         ...(this.review && { review: { ...this.review } }),
+        // The lesson's point is its answer: the browser gets it once the problem is over.
+        ...(this.lesson && { lesson: this.revealed ? { ...this.lesson } : withoutAnswer(this.lesson) }),
         ...(po && { playout: { line: [...po.line], cursor: po.cursor, thinking: po.thinking, over: po.game.isOver, ...(this.tutorOwed && { replyOwed: true }) } }),
       },
     };

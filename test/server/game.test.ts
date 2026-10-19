@@ -4,6 +4,7 @@ import { beforeEach, describe, expect, it } from "vitest";
 import { formatReview } from "../../src/cli/format.ts";
 import { UserError, type TutorEventInput } from "../../src/server/common.ts";
 import { GameController, passIsFine } from "../../src/server/game.ts";
+import { gameSource } from "../../src/server/problems.ts";
 import type { Store } from "../../src/server/store.ts";
 import { fromGtp } from "../../src/shared/coords.ts";
 import { judgedLoss } from "../../src/shared/judge.ts";
@@ -478,7 +479,7 @@ describe("GameController", () => {
     expect(saved.assistance).toEqual({ hints: 0, takeBacks: 1, rethinks: 0 });
   });
 
-  it("tags a taken-back first attempt apart from the move that replaced it", async () => {
+  it("tags a taken-back first attempt and the move that replaced it, one run, as one lesson", async () => {
     await startGame();
     engine.lossAfter(["C3"], 9);
     ctl.play(C3);
@@ -496,21 +497,27 @@ describe("GameController", () => {
       [1, "C3", 0],
       [1, "D4", undefined],
     ]);
-    await ctl.handleTutor({ type: "tag", gameId, moveNumber: 1, category: "opening", takenBack: true });
-    await ctl.handleTutor({ type: "tag", gameId, moveNumber: 1, category: "shape" });
+    // Both tries missed E5 in the same position: one run, its lead the worst (the taken-back C3).
+    expect(end.summary.runs).toEqual([{ answer: "E5", mistakes: [{ moveNumber: 1, takenBack: 0 }, { moveNumber: 1 }], lead: { moveNumber: 1, takenBack: 0 } }]);
+    await ctl.handleTutor({ type: "tag", gameId, moveNumber: 1, category: "opening", note: "first", takenBack: true });
     ctl.flush();
-    const saved = store.loadGame(gameId)!;
-    expect(saved.takenBack![0]!.tag).toEqual({ category: "opening" });
-    expect(saved.tags[1]).toEqual({ category: "shape" });
+    let saved = store.loadGame(gameId)!;
+    expect(saved.takenBack![0]!.tag).toEqual({ category: "opening", note: "first" });
+    expect(saved.tags[1]).toEqual({ category: "opening" });
+    await ctl.handleTutor({ type: "tag", gameId, moveNumber: 1, category: "shape", note: "second" });
+    ctl.flush();
+    saved = store.loadGame(gameId)!;
+    // The note stays on the mistake it was about; the category is the run's.
+    expect(saved.takenBack![0]!.tag).toEqual({ category: "shape", note: "first" });
+    expect(saved.tags[1]).toEqual({ category: "shape", note: "second" });
     expect(saved.summary!.mistakes.map((m) => [m.category, m.categorySource, m.takenBack])).toEqual([
-      ["opening", "tutor", 0],
+      ["shape", "tutor", 0],
       ["shape", "tutor", undefined],
     ]);
+    // The profile counts the run once, keyed on its lead.
     const tallies = store.loadProfile().recentMistakes.map((m) => [m.moveNumber, m.category, m.takenBack]);
-    expect(tallies).toEqual([
-      [1, "shape", undefined],
-      [1, "opening", 0],
-    ]);
+    expect(tallies).toEqual([[1, "shape", 0]]);
+    expect(store.loadProfile().mistakeCounts).toMatchObject({ opening: 0, shape: 1 });
     await expect(ctl.handleTutor({ type: "tag", gameId, moveNumber: 3, category: "shape", takenBack: true })).rejects.toThrow(/no taken-back move 3/);
   });
 
@@ -537,16 +544,17 @@ describe("GameController", () => {
       /2 taken-back tries at move 1 \(#1 C3 -9, #2 D4 -5\)\. Name one: --taken-back <n>/,
     );
     await expect(ctl.handleTutor({ type: "tag", gameId, moveNumber: 1, category: "shape", takenBack: 3 })).rejects.toThrow(/no taken-back first try #3 at move 1; it has #1 C3 -9, #2 D4 -5/);
-    // #2 is the second try, D4, even though C3 cost more.
-    await ctl.handleTutor({ type: "tag", gameId, moveNumber: 1, category: "shape", takenBack: 2 });
+    // #2 is the second try, D4, even though C3 cost more: the note lands on it. Both tries missed
+    // E5, one run, so the category is the run's and the profile counts it once, on the worst (C3).
+    await ctl.handleTutor({ type: "tag", gameId, moveNumber: 1, category: "shape", note: "D4", takenBack: 2 });
     ctl.flush();
     const saved = store.loadGame(gameId)!;
-    expect(saved.takenBack!.map((t) => t.tag?.category)).toEqual([undefined, "shape"]);
+    expect(saved.takenBack!.map((t) => t.tag)).toEqual([{ category: "shape" }, { category: "shape", note: "D4" }]);
     expect(saved.summary!.mistakes.map((m) => [m.move, m.category, m.categorySource, m.takenBack])).toEqual([
-      ["C3", "opening", "heuristic", 0],
+      ["C3", "shape", "tutor", 0],
       ["D4", "shape", "tutor", 1],
     ]);
-    expect(store.loadProfile().recentMistakes.find((m) => m.takenBack === 1)).toMatchObject({ category: "shape", pointLoss: 5 });
+    expect(store.loadProfile().recentMistakes.filter((m) => m.gameId === gameId)).toMatchObject([{ category: "shape", pointLoss: 9, takenBack: 0, note: "D4" }]);
   });
 
   it("tag refuses the bot's moves", async () => {
@@ -711,9 +719,10 @@ describe("GameController", () => {
 
   it("summarizes mistakes worst first and records tags", async () => {
     await startGame();
-    engine.botMoves = ["G7", "G3"];
+    // White's F6 lands next to E5, KataGo's answer to both mistakes, so they aren't one run (lessons.ts).
+    engine.botMoves = ["F6", "G3"];
     engine.lossAfter(["C3"], 4.5);
-    engine.lossAfter(["C3", "G7", "D4"], 10);
+    engine.lossAfter(["C3", "F6", "D4"], 10);
     ctl.play(C3);
     await flush();
     await ctl.handleAction({ type: "continue" });
@@ -753,6 +762,66 @@ describe("GameController", () => {
     expect(after.mistakeCounts.direction).toBe(1);
     ctl.flush();
     expect(store.loadGame(end.gameId)!.summary!.mistakes[0]!.category).toBe("direction");
+  });
+
+  it("makes a run of mistakes that missed one point one lesson: one category, counted once, its problems linked, tagged as a whole", async () => {
+    await startGame();
+    // E5 stays KataGo's best while the learner plays C3, then B2, far from it.
+    engine.botMoves = ["G7", "G3"];
+    engine.lossAfter(["C3"], 4.5);
+    engine.lossAfter(["C3", "G7", "B2"], 6);
+    ctl.play(C3);
+    await flush();
+    await ctl.handleAction({ type: "continue" });
+    await flush();
+    ctl.play({ x: 1, y: 7 }); // B2
+    await flush();
+    await ctl.handleAction({ type: "continue" });
+    await flush();
+    await ctl.handleAction({ type: "resign" });
+    const end = events.find((e) => e.type === "game_end");
+    if (end?.type !== "game_end") throw new Error("expected game_end");
+    expect(end.summary.runs).toEqual([{ answer: "E5", mistakes: [{ moveNumber: 1 }, { moveNumber: 3 }], lead: { moveNumber: 3 } }]);
+    const [worst, other] = end.summary.mistakes;
+    expect(other!.category).toBe(worst!.category); // the lead's (the worst)
+    expect(other!.categorySource).toBe("heuristic");
+
+    // The profile counts the run once, on its lead.
+    let profile = store.loadProfile();
+    expect(Object.values(profile.mistakeCounts).reduce((a, b) => a + (b ?? 0), 0)).toBe(1);
+    expect(profile.recentMistakes.map((m) => m.moveNumber)).toEqual([3]);
+    expect(profile.recentGames.at(-1)!.mistakes).toBe(1);
+
+    // Its practice problems are variants of one lesson.
+    await flush(10);
+    const fromGame = () => store.loadProblems().filter((p) => gameSource(p)?.gameId === end.gameId);
+    const [p1, p3] = fromGame().sort((a, b) => gameSource(a)!.moveNumber - gameSource(b)!.moveNumber);
+    expect(p1!.lesson).toEqual({ id: p1!.id, answer: "E5" });
+    expect(p3!.lesson).toEqual({ id: p1!.id, answer: "E5" });
+    expect(ctl.view().chat.at(-1)?.text).toBe(
+      "2 of your mistakes are now practice problems, in 1 lesson: E5 stayed the biggest point from move 1 to 3, so those are one lesson. Press Review mistakes to try them.",
+    );
+
+    // Tagging one member tags the run: every entry, tag and problem; the profile changes once.
+    await ctl.handleTutor({ type: "tag", gameId: end.gameId, moveNumber: 1, category: "direction", note: "E5 was bigger" });
+    expect(ctl.view().summary!.mistakes.map((m) => [m.moveNumber, m.category, m.categorySource])).toEqual([
+      [3, "direction", "tutor"],
+      [1, "direction", "tutor"],
+    ]);
+    profile = store.loadProfile();
+    expect(profile.mistakeCounts.direction).toBe(1);
+    expect(Object.values(profile.mistakeCounts).reduce((a, b) => a + (b ?? 0), 0)).toBe(1);
+    expect(profile.recentMistakes).toMatchObject([{ moveNumber: 3, category: "direction", pointLoss: 6, note: "E5 was bigger" }]);
+    expect(profile.recentMistakes).toHaveLength(1);
+    expect(fromGame().map((p) => p.category)).toEqual(["direction", "direction"]);
+    ctl.flush();
+    expect(store.loadGame(end.gameId)!.tags).toEqual({ 1: { category: "direction", note: "E5 was bigger" }, 3: { category: "direction" } });
+
+    // Tagging again moves the one count.
+    await ctl.handleTutor({ type: "tag", gameId: end.gameId, moveNumber: 3, category: "opening" });
+    profile = store.loadProfile();
+    expect(profile.mistakeCounts).toMatchObject({ direction: 0, opening: 1 });
+    expect(fromGame().map((p) => p.category)).toEqual(["opening", "opening"]);
   });
 
   it("answers a hint with KataGo's move when no tutor is attached", async () => {

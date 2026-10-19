@@ -11,6 +11,7 @@ import {
   botStrength,
   classifyMistake,
   combinedEstimate,
+  countedMistakes,
   type EstimatedGame,
   endgameStart,
   expectedScore,
@@ -471,6 +472,49 @@ describe("mistake tallies", () => {
       [15, "endgame"],
     ]);
     expect(p.practiced.direction).toBe(1);
+  });
+
+  it("counts a run of mistakes that missed one point once, on its lead", () => {
+    const p = defaultProfile();
+    applyGame(p, {
+      ...game(),
+      summary: {
+        moves: 24,
+        totalPointLoss: 20,
+        mistakes: [
+          { moveNumber: 13, move: "J1", pointLoss: 7, bestMove: "A2", category: "endgame", categorySource: "heuristic" },
+          { moveNumber: 9, move: "C3", pointLoss: 6, bestMove: "D4", category: "shape", categorySource: "heuristic" },
+          { moveNumber: 11, move: "J2", pointLoss: 5, bestMove: "A2", category: "endgame", categorySource: "heuristic" },
+          { moveNumber: 15, move: "H1", pointLoss: 5, bestMove: "A2", category: "endgame", categorySource: "heuristic" },
+        ],
+        runs: [{ answer: "A2", mistakes: [{ moveNumber: 11 }, { moveNumber: 13 }, { moveNumber: 15 }], lead: { moveNumber: 13 } }],
+      },
+    });
+    expect(p.mistakeCounts).toMatchObject({ shape: 1, endgame: 1 });
+    expect(p.recentMistakes.map((m) => m.moveNumber)).toEqual([13, 9]);
+    expect(p.recentGames.at(-1)!.mistakes).toBe(2);
+    expect(countedMistakes({ mistakes: [], runs: [] })).toEqual([]);
+  });
+
+  it("stops counting run members other than the lead that the tutor tagged during the game", () => {
+    const p = defaultProfile();
+    // Moves 11 and 13 were tagged during the game, before the run was known.
+    applyTag(p, { ts: 500, gameId: "g1", moveNumber: 11, category: "direction", pointLoss: 5 });
+    applyTag(p, { ts: 600, gameId: "g1", moveNumber: 13, category: "endgame", pointLoss: 7 });
+    applyGame(p, {
+      ...game(),
+      summary: {
+        moves: 24,
+        totalPointLoss: 12,
+        mistakes: [
+          { moveNumber: 13, move: "J1", pointLoss: 7, bestMove: "A2", category: "endgame", categorySource: "tutor" },
+          { moveNumber: 11, move: "J2", pointLoss: 5, bestMove: "A2", category: "endgame", categorySource: "tutor" },
+        ],
+        runs: [{ answer: "A2", mistakes: [{ moveNumber: 11 }, { moveNumber: 13 }], lead: { moveNumber: 13 } }],
+      },
+    });
+    expect(p.mistakeCounts).toMatchObject({ direction: 0, endgame: 1 });
+    expect(p.recentMistakes.map((m) => [m.moveNumber, m.category])).toEqual([[13, "endgame"]]);
   });
 
   it("keeps at most 50 recent mistakes", () => {

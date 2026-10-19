@@ -7,7 +7,7 @@ import { moveGtp, movePoint, toGtp } from "../shared/coords.ts";
 import { atLevelOf } from "../shared/judge.ts";
 import { ratingToRank } from "../shared/rank.ts";
 import { playedThreshold, sizeText, thresholdNum, thresholdText } from "../shared/threshold.ts";
-import { JUDGE_MODE_TEXT, TUTOR_LEVEL_TEXT, assistText, estimateRankText, plural, rankEstimateText, round1, secondsUntil, takenBackTry, takenBackTryText } from "../shared/text.ts";
+import { JUDGE_MODE_TEXT, TUTOR_LEVEL_TEXT, assistText, estimateRankText, lessonText, mistakeRunText, plural, rankEstimateText, round1, secondsUntil, takenBackTry, takenBackTryText } from "../shared/text.ts";
 import type {
   ChatMessage,
   Color,
@@ -20,6 +20,9 @@ import type {
   GenerationBatchStatus,
   GenerationStatus,
   JudgeMode,
+  LessonInfo,
+  MistakeRef,
+  MistakeRun,
   Move,
   MoveEval,
   MoveRecord,
@@ -72,7 +75,10 @@ function mistakesText(summary: GameSummary): string {
   const worst = summary.mistakes.reduce((a, b) => (b.pointLoss > a.pointLoss ? b : a));
   const firsts = summary.mistakes.filter((m) => m.takenBack !== undefined).length;
   const taken = firsts ? ` (${firsts} taken back)` : "";
-  return `${plural(n, "mistake")}${taken}, worst move ${worst.moveNumber} (${num(worst.pointLoss)})`;
+  // A run of mistakes that missed one point is one lesson.
+  const lessons = n - (summary.runs ?? []).reduce((sum, r) => sum + r.mistakes.length - 1, 0);
+  const inLessons = lessons < n ? ` in ${plural(lessons, "lesson")}` : "";
+  return `${plural(n, "mistake")}${inLessons}${taken}, worst move ${worst.moveNumber} (${num(worst.pointLoss)})`;
 }
 
 /** A game's rating change: its rank estimate, the rating and the next bot. */
@@ -95,6 +101,11 @@ export function problemOrigin(p: { source?: { gameId: string; moveNumber: number
   const size = p.size ?? 9;
   if (p.generated) return `generated ${size}x${size}, difficulty ${p.generated.difficultyRank}, ${p.generated.batchId}`;
   return "built-in";
+}
+
+/** " — lesson 2/5: A2 stayed the biggest point from move 57 to 69 (5 mistakes, one lesson)" for a variant of a lesson, else "". */
+function lessonLine(l: LessonInfo | undefined): string {
+  return l ? ` — lesson ${l.variant}/${l.variants}: ${lessonText(l)}` : "";
 }
 
 /** ", review g12 2/4" for a problem in a review of one game's mistakes, else "". */
@@ -236,7 +247,7 @@ function formatKnownEvent(e: TutorEvent, ctx: EventContext): string {
       return `RATING ${e.gameId} ${ratingChangeText(e.rating)}`;
     case "problem_start":
       return (
-        `PROBLEM_START ${e.problemId} ${e.category} ${e.toPlay} to play (${problemOrigin(e)}, box ${e.box}${reviewText(e.review)}) answers ${e.answers.join(",")} — ` +
+        `PROBLEM_START ${e.problemId} ${e.category} ${e.toPlay} to play (${problemOrigin(e)}, box ${e.box}${reviewText(e.review)}) answers ${e.answers.join(",")}${lessonLine(e.lesson)} — ` +
         `${quote(e.prompt)} — ${ctx.attached ? "state below" : "run: state"}; let them try, don't give the answer`
       );
     case "generation": {
@@ -309,7 +320,8 @@ function chatLine(c: ChatMessage): string {
 export function problemLines(p: ProblemView, size?: number): string[] {
   const from = problemOrigin({ ...p, ...(size !== undefined && { size }) });
   const state = p.revealed ? (p.solved ? "solved" : "answer shown") : `attempt ${p.attempts + 1} of ${p.maxAttempts}`;
-  const lines = [`problem ${p.id} ${p.category} (${from}, box ${p.box}${reviewText(p.review)}) ${p.toPlay} to play, ${state}: ${p.prompt}`];
+  const lesson = p.lesson ? `, lesson ${p.lesson.variant}/${p.lesson.variants} (${p.lesson.answer ? `${p.lesson.answer} stayed open` : `moves ${p.lesson.fromMove}-${p.lesson.toMove}`})` : "";
+  const lines = [`problem ${p.id} ${p.category} (${from}, box ${p.box}${reviewText(p.review)}${lesson}) ${p.toPlay} to play, ${state}: ${p.prompt}`];
   const a = p.lastAttempt;
   if (a) lines.push(`last attempt ${a.move} ${a.correct ? "correct" : "wrong"}${a.pointLoss !== null ? `, lost ${num(a.pointLoss)}` : ""}`);
   if (p.answer) lines.push(`answer ${p.answer.move} (pv ${pv(p.answer.pv)})`);
@@ -608,10 +620,16 @@ export function formatProblems(r: ProblemsResponse, now = Date.now(), show = 5):
   return [head, ...generation, `next due (the first is what "problem" starts):`, ...due.map((p) => `  ${problemItemText(p, now, false)}`)].join("\n");
 }
 
+/** "[lesson p23 2/5: A2, moves 57-69]": a problem that is one variant of a lesson (its variants share one schedule). */
+function lessonMarker(l: LessonInfo): string {
+  const moves = l.fromMove === l.toMove ? `move ${l.fromMove}` : `moves ${l.fromMove}-${l.toMove}`;
+  return `[lesson ${l.id} ${l.variant}/${l.variants}: ${l.answer}, ${moves}]`;
+}
+
 /** `tutor problems`: every problem in the order next_problem picks them, with the accepted answers. */
 export function formatProblemList(r: ProblemsResponse, now = Date.now()): string {
   const out = [`problems: ${r.counts.total}, ${r.counts.due} due; focus ${r.focus.category} (next_problem prefers it, then the learner's own, then generated)`];
-  for (const p of r.problems) out.push(`  ${problemItemText(p, now, true)}`);
+  for (const p of r.problems) out.push(`  ${problemItemText(p, now, true)}${p.lesson ? ` ${lessonMarker(p.lesson)}` : ""}`);
   out.push("start one with: problem <id> (or problem for the next due)");
   return out.join("\n");
 }
@@ -662,6 +680,11 @@ function boardBefore(g: ReviewedGame, n: number, first?: TakenBackMove): string 
   }
 }
 
+/** The run (GameSummary.runs) a summary entry belongs to, if any. */
+function runOfRef(runs: readonly MistakeRun[], m: MistakeRef): MistakeRun | undefined {
+  return runs.find((r) => r.mistakes.some((x) => x.moveNumber === m.moveNumber && x.takenBack === m.takenBack));
+}
+
 /** The taken-back first attempt a summary entry is about, if it is one. */
 function firstOf(g: ReviewedGame, m: { takenBack?: number }): TakenBackMove | undefined {
   return m.takenBack !== undefined ? g.takenBack?.[m.takenBack] : undefined;
@@ -694,6 +717,7 @@ export function formatReview(g: ReviewedGame, threshold = playedThreshold(g), br
     out.push(`help: ${help ? assistText(help) : "?"}${moves ? `; moves played with help (* below, left out of the rank estimate): ${moves}` : ""}`);
   }
 
+  const runs = g.summary?.runs ?? [];
   const mistakes: GameSummary["mistakes"] =
     g.summary?.mistakes ??
     g.moves
@@ -710,7 +734,12 @@ export function formatReview(g: ReviewedGame, threshold = playedThreshold(g), br
       const record = first ? first.record : g.moves[m.moveNumber - 1];
       const category = m.category ? `[${m.category}${m.categorySource === "heuristic" ? ", heuristic" : ""}]` : "[untagged]";
       const line = record?.eval?.bestPv.length ? ` pv ${pv(record.eval.bestPv)}` : "";
-      out.push(`  move ${m.moveNumber}${firstTryText(g, m)} ${record?.move.color ?? human} ${m.move} -${num(m.pointLoss)} best ${m.bestMove} ${category}${line}`);
+      const run = runOfRef(runs, m);
+      out.push(`  move ${m.moveNumber}${firstTryText(g, m)} ${record?.move.color ?? human} ${m.move} -${num(m.pointLoss)} best ${m.bestMove} ${category}${run ? ` (run ${run.answer})` : ""}${line}`);
+    }
+    for (const run of runs) {
+      const moves = run.mistakes.map((m) => `${m.moveNumber}${m.takenBack !== undefined && g.takenBack ? ` ${takenBackTryText(takenBackTry(g.takenBack, m.takenBack))}` : ""}`);
+      out.push(`  run ${mistakeRunText(run)}: moves ${moves.join(", ")}; discuss it once, tagging one move tags the run`);
     }
     const untagged = mistakes.filter((m) => m.categorySource !== "tutor");
     if (untagged.length) {
@@ -729,7 +758,16 @@ export function formatReview(g: ReviewedGame, threshold = playedThreshold(g), br
     }
   }
 
-  for (const m of mistakes.slice(0, REVIEW_BOARDS)) {
+  // One board per run: its positions differ only away from the point that stayed open.
+  const boarded = new Set<MistakeRun>();
+  const boards = mistakes.filter((m) => {
+    const run = runOfRef(runs, m);
+    if (!run) return true;
+    if (boarded.has(run)) return false;
+    boarded.add(run);
+    return true;
+  });
+  for (const m of boards.slice(0, REVIEW_BOARDS)) {
     const first = firstOf(g, m);
     const board = boardBefore(g, m.moveNumber, first);
     if (!board) continue;

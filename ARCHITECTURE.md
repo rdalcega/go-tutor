@@ -37,7 +37,9 @@ The contract for every boundary is `src/shared/types.ts`.
 | `src/server/profile.ts` | Learner memory, pure functions over `Profile`: a finished game's tallies and stats (`applyGame`), the rating from its rank estimate (`applyEstimate`, `combinedEstimate`), heuristic mistake categories (`classifyMistake`, `classifyPlayed` for a move on its replayed position), the summary pieces the controller and the migration share (`mistakeEntry`, `firstAttemptMistakes`, `totalPointLoss`, `noAssistance`), `mistakeKey` (which mistake: game, move, first-attempt index), tutor tags (`applyTag`), the adaptive mistake threshold, and `recommendFocus`. See "Learner profile". |
 | `src/server/estimate.ts` | The rank estimate from move quality: which human moves count (`rankSamples`), their human-SL probabilities at 13 rank profiles (`movePolicies`), the maximum-likelihood rank (`fitRank`, `peakRating`), `estimateRank`. See "Rank estimate". |
 | `src/server/migrate.ts` | The one-time re-estimate for data from before rating model 2: `reconstructGame` (first attempts and help from `events.jsonl`, pure) and `migrateRatingModel`. See "Rating model migration". |
-| `src/server/problems.ts` | Practice problems, pure functions over `StoredProblem`: problems from a finished game's mistakes, their sources (`gameSource`, `generatedSource`), position hashes, Leitner scheduling (`src/shared/schedule.ts`), which problem comes next, the `GET /api/problems` body. See "Practice problems". |
+| `src/server/problems.ts` | Practice problems, pure functions over `StoredProblem`: problems from a finished game's mistakes, their sources (`gameSource`, `generatedSource`), position hashes, Leitner scheduling (`src/shared/schedule.ts`), the listing order and the `GET /api/problems` body. See "Practice problems". |
+| `src/server/lessons.ts` | Runs and lessons, pure: the runs of a game's mistakes that missed the same point (`findRuns`, `gameRuns`, `runLead`), the lessons their problems form (`linkGameLessons`, `linkLesson`, `syncLesson`, `lessonInfo`), a result counted for the whole lesson with the two-misses rule (`recordLessonResult`, `sessionStart`), and which problem comes next (`pickNextProblem`, `pickVariant`). See "Lessons". |
+| `src/server/migrate-lessons.ts` | The one-time startup migration that finds the runs in saved games, counts each once in the profile and links their problems into lessons (`Profile.lessons`). |
 | `src/server/generate.ts` | Generated problems from KataGo's human-SL self-play: batch quotas and ranks, the candidate filters (`examineCandidate`), difficulty, the batch trigger, the startup removal of the old built-in problems (`removeLegacyBuiltins`), and `ProblemGenerator`, which the controller runs in the background. See "Generated problems". |
 | `src/server/index.ts` | `node:http` server on port 4747 (`PORT` env): JSON API, SSE, serves `dist/` in production. |
 | `src/cli/tutor.ts` | The tutor's command line. See "Tutor CLI". |
@@ -88,8 +90,8 @@ The contract for every boundary is `src/shared/types.ts`.
 5. Game ends on two consecutive passes (score with KataGo ownership to remove dead stones) or resign
    (a resignation takes effect at once; the verdict on a move still being evaluated lands first,
    opening no moment, and the game finishes with it, or without it if a new game starts meanwhile).
-   Build the `GameSummary` (mistakes categorized, taken-back first attempts included, the help the
-   learner had), update the profile's tallies and stats, save the game, emit `game_end` (a rated
+   Build the `GameSummary` (mistakes categorized, taken-back first attempts included, the runs of
+   mistakes that missed the same point (see "Lessons"), the help the learner had), update the profile's tallies and stats, save the game, emit `game_end` (a rated
    game's `summary.rating` is `pending`, and the game id joins the profile's `estimating` list).
    Then, in the background, each mistake becomes a practice problem (see "Practice problems"), and
    the rank estimates of the games in `estimating` run in order (see "Rank estimate"): each rating
@@ -305,7 +307,9 @@ when its rank estimate is in, and when the tutor tags a mistake.
   clump at the played point, with the best move within 3 lines or a loss under twice the threshold),
   direction (loss ≥ 1.5× threshold with the best move 4+ lines away), else other. Heuristic categories
   are counted in `mistakeCounts`/`recentMistakes` (cap 50) at game end; tags are counted when made
-  and replace whatever the move was counted as. A tag also marks the category as practiced.
+  and replace whatever the move was counted as. A run (see "Lessons") counts once, as its lead
+  (`countedMistakes`): every member takes the lead's category, and a tag on any member tags them all
+  (and their problems) while the profile changes once, on the lead. A tag also marks the category as practiced.
   Taken-back first attempts count like any move: their mistakes are in the summary (with
   `takenBack`, the index in `SavedGame.takenBack`), the tallies (`recentMistakes[].takenBack`) and
   the tutor tags them with `takenBack: n`, the try's number among those taken back at that move
@@ -380,6 +384,36 @@ profile or problems; `ratingModel` unchanged), and the controller logs it and tr
 - **Problems**: a problem that ends (solved, or out of attempts) marks its category as practiced; a
   solve adds one to `problemsSolved`.
 
+## Lessons
+
+When a big point stays open while the learner plays elsewhere, each move elsewhere is a new mistake
+with the same answer. At game end `gameRuns` finds these runs among the summary's mistakes (in move
+order, taken-back first tries included): a mistake joins a run when it shares an accepted answer
+with the run's last mistake and nothing was played on or next to that point (diagonals included)
+between their positions; the run keeps the answers all its mistakes share. `GameSummary.runs` holds
+each run of two or more (`answer`, `mistakes`, and `lead`: the tutor-tagged member, else the worst),
+and `review`/`game_end` name it once ("A2 stayed the biggest point from move 57 to 69 (5 mistakes,
+one lesson)") with its moves marked `(run A2)`.
+
+A run is one lesson. The profile counts it once (above), and its practice problems become variants
+(`StoredProblem.lesson`: the first variant's id and the answer; `linkGameLessons` when the problems
+are made). The variants share `box`, `due`, `lastResult`, `missedAt` and the category: a result on
+any of them is the lesson's (`recordLessonResult` writes it to all). `lessonInfo` (variant n of m,
+the answer, the moves) goes on `ProblemView.lesson`, `problem_start.lesson` and `ProblemListItem.lesson`;
+the problem card says "Variant 2 of 5" (and names the point only once the problem is answered).
+
+A practice session is practice without a gap of 2 hours (`sessionStart`, from the stored
+`lastSeen` and `missedAt`). A lesson missed a second time in one session is due no sooner than a
+day later, whatever its box.
+
+At startup, after `removeLegacyBuiltins`, `migrateLessons` runs once (`Profile.lessons`): it backs up
+`profile.json`, `problems.json` and the game files it changes to `backup-<time>/`, gives finished
+games their `summary.runs` (each run one category: the most recent tutor tag in it, else the
+lead's), counts each run once in `mistakeCounts`, `recentMistakes` and `recentGames`, and links each
+run's problems into a lesson (the lowest box, the earliest due); problems whose game is gone are
+grouped from the problems themselves (`findRuns` over their boards and answers). The profile is
+written first, so a stop partway can't take the tallies off twice.
+
 ## Practice problems
 
 `data/problems.json` (`{ version: 1, problems: StoredProblem[] }`) holds every problem with its
@@ -418,10 +452,15 @@ variation's numbers, hidden under a drawn stone or mark); `tutor state` lists th
   change. Due again after the box's interval: 10 min, 1 day, 3 days, 7 days, 21 days. Once a
   problem on the board is over, `ProblemView.nextDue` holds its new due time, and the problem card
   says when it comes back ("You'll see this one again in about 10 minutes", "…tomorrow", "…in 3 days").
-- **Next problem** (`pickNextProblem`): a due problem, preferring the recommended focus category (the
-  learner's own before generated ones), then the learner's own problems, then generated ones; lower
-  boxes and older due times first; never the problem just shown while there is another. When nothing
-  is due, the one due soonest (an early review). With no problems at all, Practice says why: the
+- **Next problem** (`pickNextProblem`, lessons.ts): lessons are picked, not problems (a problem not
+  in a lesson is a lesson of one). A due lesson, preferring the recommended focus category (the
+  learner's own before generated ones), then the learner's own problems, then generated ones; the
+  longest overdue first, so a problem just missed doesn't jump the queue. The controller keeps the
+  practice set (`practiceSet`: the problems since problem mode was entered; leaving it starts a new
+  set), and while anything else is due the picker avoids the lesson and the game of the problem just
+  shown and keeps the focus category to at most half of the set. When nothing is due, the lesson due
+  soonest (an early review). The lesson shows its variant seen longest ago (`pickVariant`; never
+  shown first, in move order). With no problems at all, Practice says why: the
   first batch is being generated (with its progress), or there are none yet.
 - **Problem mode**: `next_problem` (browser) or `start_problem` (tutor) puts a problem on the board:
   `GameView.mode` is `"problem"`, `gameId` null, `board` the problem position, `settings.humanColor`
@@ -446,8 +485,8 @@ variation's numbers, hidden under a drawn stone or mark); `tutor state` lists th
   `problem_start` carries `size` (and `generated`: batch, difficulty rank, self-play ranks).
 - **Reviewing a game's mistakes**: `review_game` (browser, with the finished game's id) or
   `start_problem` with `gameId` (tutor, `problem --game <id|last>`; "last" is the newest finished
-  game) runs that game's problems in move order (a taken-back first try before the move that
-  stayed), each once, due or not. A finished game's view has `reviewProblems` (its problem count,
+  game) runs that game's lessons in move order (a taken-back first try before the move that
+  stayed), one problem each (`pickVariant`), due or not. A finished game's view has `reviewProblems` (its lesson count,
   which the controller keeps per game from `problems.json`), and `review_game` is allowed when it is
   above 0. During a review, `next_problem` goes on to the review's next problem; after the last it
   leaves problem mode and says how it went ("Review done: you solved 2 of 3. …"); Next is refused
@@ -615,7 +654,7 @@ unless `--json`).
   mastery count, due now by category, per box, and the next few due). Used at session start.
 - `problem --game <gameId|last>` — review a finished game's mistakes (see "Reviewing a game's
   mistakes"); `PROBLEM_START` and `state`'s problem line then say `review g12 2/4`.
-- `problems` — every practice problem in the order `problem` picks them, with source (or "generated
+- `problems` — every practice problem, due first in about the order `problem` picks lessons (each variant marked `[lesson p23 2/5: A2, moves 57-69]`), with source (or "generated
   13x13, difficulty 14k, batch2"), box, due time, results and the accepted answers.
 - `generate [--status]` — problem generation: the batch in progress (per size found/target), the
   last batch and its mastery count, and KataGo minutes per size. `generate --now` starts the next
@@ -696,7 +735,8 @@ first ones are being generated, with the count; the button's tooltip shows it to
 replaces the eval strip with the category and source ("from your game, move 14", or for a generated
 problem its board and difficulty, "13×13 · about 14k"), the prompt, attempts left, the verdict (correct, or the point loss of
 the attempt and, once out of attempts, the answer; once the problem is over, when it comes back), and
-Next problem / Back to playing buttons. A finished game with practice problems shows "Review mistakes
+Next problem / Back to playing buttons; a variant of a lesson adds a muted line ("Variant 2 of 5 ·
+Moves 57 to 69 all missed the same point", naming the point once answered). A finished game with practice problems shows "Review mistakes
 (3)" in the result dialog and in the controls; during the review the card's heading is
 "Review 2/3 · Shape · move 20" and Next reads "Next mistake", then "Finish review" on the last. The
 board takes clicks and shows the hover stone as in games; Pass, Take back, Hint and Resign are disabled.

@@ -240,6 +240,24 @@ export function problemHeading(p: ProblemView, size = 9): string {
   return `${categoryLabel(p.category, { capitalize: true })} · ${from}`;
 }
 
+/**
+ * The problem card's lesson line, for a problem that is one variant of a lesson (a run of mistakes
+ * that missed the same point): "Variant 2 of 5", what the run was, and the tooltip. The point
+ * itself is the answer, so it is named only once the problem is answered.
+ */
+export function lessonLine(p: ProblemView): { text: string; title: string } | null {
+  const l = p.lesson;
+  if (!l) return null;
+  const span = l.fromMove === l.toMove ? `${l.variants} tries at move ${l.fromMove}` : `moves ${l.fromMove} to ${l.toMove}`;
+  const what = p.revealed
+    ? `${l.answer} stayed the biggest point through ${span}`
+    : `${span[0]!.toUpperCase()}${span.slice(1)} all missed the same point`;
+  return {
+    text: `Variant ${l.variant} of ${l.variants} · ${what}`,
+    title: "One lesson: these mistakes share one schedule, and each time it comes back you get another of its positions.",
+  };
+}
+
 /** The problem card's Next button: on to the next problem, or within a review the next mistake, and after its last, the end. */
 export function nextProblemLabel(p: ProblemView): string {
   if (!p.review) return "Next problem";

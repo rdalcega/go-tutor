@@ -1,7 +1,7 @@
 // Small wording helpers shared by the server, the tutor CLI and the browser.
 
 import { ratingToRank } from "./rank.ts";
-import type { AssistCounts, Color, GameResult, JudgeMode, MistakeCategory, RankEstimate, TutorLevel } from "./types.ts";
+import type { AssistCounts, Color, GameResult, JudgeMode, LessonInfo, MistakeCategory, MistakeRun, RankEstimate, TutorLevel } from "./types.ts";
 
 /** "Black" or "White". */
 export function colorName(c: Color): string {
@@ -102,6 +102,32 @@ export function takenBackTry(takenBack: readonly { moveNumber: number }[], index
 /** "first try #2": a taken-back try by its number at its move (what `tag --taken-back 2` takes). */
 export function takenBackTryText(n: number): string {
   return `first try #${n}`;
+}
+
+/**
+ * "A2 stayed the biggest point from move 57 to 69 (5 mistakes, one lesson)": a run of mistakes that
+ * all missed one point (src/server/lessons.ts). Tries at one move read "through 3 tries at move 57".
+ */
+export function runText(answer: string, fromMove: number, toMove: number, count: number): string {
+  return `${answer} stayed the biggest point ${runSpanText(fromMove, toMove, count)} (${count} mistakes, one lesson)`;
+}
+
+/** "from move 57 to 69", or "through 3 tries at move 57" for a run of tries at one move. */
+export function runSpanText(fromMove: number, toMove: number, count: number): string {
+  return fromMove === toMove ? `through ${count} tries at move ${fromMove}` : `from move ${fromMove} to ${toMove}`;
+}
+
+/** `runText` of a game's run (GameSummary.runs). */
+export function mistakeRunText(run: MistakeRun): string {
+  const first = run.mistakes[0]!;
+  const last = run.mistakes[run.mistakes.length - 1]!;
+  return runText(run.answer, first.moveNumber, last.moveNumber, run.mistakes.length);
+}
+
+/** `runText` of the lesson a practice problem is a variant of (without its point while the view leaves it out). */
+export function lessonText(info: LessonInfo): string {
+  if (info.answer) return runText(info.answer, info.fromMove, info.toMove, info.variants);
+  return `the same point stayed the biggest ${runSpanText(info.fromMove, info.toMove, info.variants)} (${info.variants} mistakes, one lesson)`;
 }
 
 /** "3 hints, 2 take-backs, 1 tutor take-back" (zero counts left out), or "no help". */

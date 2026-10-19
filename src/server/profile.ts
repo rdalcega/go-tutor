@@ -206,6 +206,22 @@ export function mistakeEntry(record: MoveRecord, size: number, category: Mistake
   };
 }
 
+const sameMistake = (a: { moveNumber: number; takenBack?: number }, b: { moveNumber: number; takenBack?: number }) =>
+  a.moveNumber === b.moveNumber && a.takenBack === b.takenBack;
+
+/**
+ * The mistakes of a game that count in the profile's tallies: a run of mistakes that all missed one
+ * point (`GameSummary.runs`, src/server/lessons.ts) is one oversight, so only its lead counts; every
+ * mistake outside a run counts. Games saved before runs count every mistake.
+ */
+export function countedMistakes(summary: Pick<GameSummary, "mistakes" | "runs">): SummaryMistake[] {
+  const runs = summary.runs ?? [];
+  return summary.mistakes.filter((m) => {
+    const run = runs.find((r) => r.mistakes.some((x) => sameMistake(x, m)));
+    return !run || sameMistake(run.lead, m);
+  });
+}
+
 /**
  * The taken-back first attempts that were mistakes (point loss >= `threshold`) as summary entries,
  * each with the tutor's tag, else `heuristic(t)` (which may work it out and keep it on `t`).
@@ -247,7 +263,8 @@ export function lossStats(moves: readonly MoveRecord[], humanColor: Color, taken
 
 /**
  * Applies a finished game to the profile (mutating it): heuristic mistake categories (tutor tags
- * were counted when they were made; taken-back first attempts count too), recent-game stats and the
+ * were counted when they were made; taken-back first attempts count too; a run of mistakes that
+ * missed one point counts once, `countedMistakes`), recent-game stats and the
  * threshold. The rating waits for the game's rank estimate (`applyEstimate`): a rated game is
  * marked `estimating` and its change comes back `pending`. A game already applied (the profile was
  * saved but the game wasn't, and it was finished again after a restart) changes nothing; its
@@ -272,8 +289,19 @@ export function applyGame(profile: Profile, game: FinishedGame): GameUpdate {
   const rated = isRated(game);
   if (rated) markEstimating(profile, game.gameId);
 
+  // A run counts once (its lead): a member other than the lead that the tutor tagged during the
+  // game was counted then (applyTag); it stops counting now.
+  const counted = countedMistakes(summary);
+  const dropped = new Set(
+    summary.mistakes.filter((m) => !counted.includes(m)).map((m) => mistakeKey({ gameId: game.gameId, moveNumber: m.moveNumber, takenBack: m.takenBack })),
+  );
+  for (const m of profile.recentMistakes) {
+    if (dropped.has(mistakeKey(m))) profile.mistakeCounts[m.category] = Math.max(0, (profile.mistakeCounts[m.category] ?? 0) - 1);
+  }
+  profile.recentMistakes = profile.recentMistakes.filter((m) => !dropped.has(mistakeKey(m)));
+
   // Mistakes the tutor didn't tag count under their heuristic category.
-  const added = summary.mistakes
+  const added = counted
     .filter((m) => m.categorySource === "heuristic" && m.category)
     .sort((a, b) => b.moveNumber - a.moveNumber)
     .map((m) => ({
@@ -294,7 +322,7 @@ export function applyGame(profile: Profile, game: FinishedGame): GameUpdate {
   // Game stats and the threshold, first attempts included.
   const stats = lossStats(game.moves, settings.humanColor, game.takenBack ?? []);
   if (stats) {
-    profile.recentGames.push({ ts: game.ts, gameId: game.gameId, size: settings.size, ...stats, mistakes: summary.mistakes.length, threshold: game.threshold });
+    profile.recentGames.push({ ts: game.ts, gameId: game.gameId, size: settings.size, ...stats, mistakes: counted.length, threshold: game.threshold });
     profile.recentGames = profile.recentGames.slice(-RECENT_GAMES_CAP);
   }
   const threshold = adaptThreshold(profile, game);

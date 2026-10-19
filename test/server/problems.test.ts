@@ -13,7 +13,6 @@ import {
   isLegacyBuiltin,
   listItem,
   nextProblemId,
-  pickNextProblem,
   positionHash,
   problemBoard,
   problemFromMistake,
@@ -217,36 +216,7 @@ describe("spaced repetition", () => {
     expect(BOX_INTERVALS[1]).toBeLessThan(BOX_INTERVALS[2]!);
   });
 
-  it("picks a due problem: the focus category first (own before generated), then own problems, then generated", () => {
-    const own = gameProblem({ id: "p1", category: "shape" });
-    const ownFocus = gameProblem({ id: "p2", category: "tactics", box: 2 });
-    const generatedFocus = gameProblem({ id: "gen1", kind: "generated", category: "tactics" });
-    const generated = gameProblem({ id: "gen2", kind: "generated", category: "shape" });
-    const notDue = gameProblem({ id: "p9", category: "tactics", due: NOW + 1000 });
-    const all = [generated, generatedFocus, own, ownFocus, notDue];
-    const order: string[] = [];
-    let pool = all;
-    for (;;) {
-      const next = pickNextProblem(pool, { now: NOW, focus: "tactics" });
-      if (!next || next.early) break;
-      order.push(next.problem.id);
-      pool = pool.filter((p) => p !== next.problem);
-    }
-    expect(order).toEqual(["p2", "gen1", "p1", "gen2"]);
-    expect(pickNextProblem(all, { now: NOW, focus: "endgame" })!.problem.id).toBe("p1");
-    // Lower boxes first within a group.
-    expect(pickNextProblem([gameProblem({ id: "p5", box: 3 }), gameProblem({ id: "p6", box: 1 })], { now: NOW })!.problem.id).toBe("p6");
-  });
-
-  it("skips the problem just shown, and reviews early when nothing is due", () => {
-    const a = gameProblem({ id: "p1" });
-    const b = gameProblem({ id: "p2", box: 2 });
-    expect(pickNextProblem([a, b], { now: NOW, exclude: "p1" })!.problem.id).toBe("p2");
-    expect(pickNextProblem([a], { now: NOW, exclude: "p1" })!.problem.id).toBe("p1");
-    const later = [gameProblem({ id: "p1", due: NOW + 5000 }), gameProblem({ id: "p2", due: NOW + 1000 })];
-    expect(pickNextProblem(later, { now: NOW })).toMatchObject({ early: true, problem: { id: "p2" } });
-    expect(pickNextProblem([], { now: NOW })).toBeNull();
-  });
+  // Picking the next problem (lessons, a varied set): test/server/lessons.test.ts.
 });
 
 describe("GET /api/problems body", () => {
@@ -266,6 +236,25 @@ describe("GET /api/problems body", () => {
     expect(r.generation).toBeUndefined();
     expect(r.problems[1]).toMatchObject({ source: { gameId: "g1", moveNumber: 5 }, difficulty: 5, answers: ["D7"] });
     expect(r.problems[1]!.source).not.toHaveProperty("played");
+    expect(r.problems[1]).not.toHaveProperty("lesson");
+  });
+
+  it("names the lesson of a problem that is one of its variants, and counts every variant", () => {
+    const source = (moveNumber: number) => ({ gameId: "g1", moveNumber, played: "A1" });
+    const lesson = { id: "p1", answer: "D7" };
+    const problems = [
+      gameProblem({ id: "p1", source: source(57), lesson }),
+      gameProblem({ id: "p2", source: source(59), lesson }),
+      gameProblem({ id: "p3", source: source(69), lesson }),
+      gameProblem({ id: "p4", source: source(80) }),
+    ];
+    const r = problemsResponse(problems, NOW, { category: "tactics", reason: "", suggestion: "problems" });
+    const byId = new Map(r.problems.map((p) => [p.id, p]));
+    expect(byId.get("p2")!.lesson).toEqual({ id: "p1", variant: 2, variants: 3, gameId: "g1", answer: "D7", fromMove: 57, toMove: 69 });
+    expect(byId.get("p4")).not.toHaveProperty("lesson");
+    expect(r.counts.total).toBe(4);
+    // Alone, a problem can't tell its place among the variants: it lists as standing alone.
+    expect(listItem(problems[1]!, NOW)).not.toHaveProperty("lesson");
   });
 });
 

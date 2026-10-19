@@ -10,6 +10,7 @@ import { UserError } from "./common.ts";
 import { GameController } from "./game.ts";
 import { removeLegacyBuiltins } from "./generate.ts";
 import { KataGo } from "./katago.ts";
+import { lessonsLogLine, migrateLessons } from "./migrate-lessons.ts";
 import { problemsResponse } from "./problems.ts";
 import { recommendFocus } from "./profile.ts";
 import { Store, isValidGameId } from "./store.ts";
@@ -232,6 +233,14 @@ async function main(): Promise<void> {
   // Generated problems replaced the built-in starter set: drop it from problems.json (backed up first).
   const migrated = removeLegacyBuiltins(store, Date.now());
   if (migrated.removed) console.log(`removed ${migrated.removed} built-in practice problems from problems.json (backup in ${migrated.backupDir})`);
+  // Runs of mistakes that missed the same point became one lesson: group the saved data once (backed up
+  // first). Data still waiting for the rating migration is grouped right after it (game.ts).
+  try {
+    const line = lessonsLogLine(migrateLessons(store, Date.now()));
+    if (line) console.log(line);
+  } catch (err) {
+    console.error(`grouping mistakes into lessons failed: ${(err as Error).message}`);
+  }
   const mayRestart = crashLimiter();
   let controller: GameController;
   const engine = new KataGo({
