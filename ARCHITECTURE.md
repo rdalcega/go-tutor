@@ -114,10 +114,16 @@ take-backs, its heuristic category and tag), and a tag the profile already count
 
 **Help** (`MoveRecord.assist`, human moves): `"hint"` when the move was played after a hint for that
 position was answered (KataGo's, or a tutor `say`/`show`/`mark` after a hint request on the
-learner's turn), `"retry"`/`"rethink"` when it replaces a taken-back move, `"shown"` when the tutor
-drew on that position on the learner's turn (or KataGo's hint circled a point), even if the learner
-hid the drawing. Help is kept per position (move count) and cleared by the next move or take-back; it
-is saved with the game (`SavedGame.help`, with `hintAsked` for a hint the tutor hasn't answered), so
+learner's turn), `"asked"` when the tutor answered a chat question of theirs (a `say`/`show`/`mark`
+after a question asked in that position or on the bot's turn just before it, not during a teaching
+moment; one answer settles a hint request and a question beside it as a hint), `"retry"`/`"rethink"`
+when it replaces a taken-back move, `"shown"` when the tutor drew on that position on the learner's
+turn (or KataGo's hint circled a point), even if the learner hid the drawing. Help is kept per
+position (move count; a question on the bot's turn is kept for the learner's move after the bot's
+reply) and cleared by the learner's move or a take-back, and an unanswered question also by
+entering or leaving practice; it
+is saved with the game (`SavedGame.help`, with `hintAsked` for a hint the tutor hasn't answered and
+`questionAsked` for a chat question it hasn't, asked while attached or not: a replay delivers it), so
 a restart before the move still counts it as assisted.
 
 **Restart.** `restoreLastGame` picks up the newest unfinished game with its chat, tags, first
@@ -131,8 +137,8 @@ were (it is given again); one whose move the tutor took back (`rethink`) stays o
 the tutor, for the learner's new move. A mistake whose eval arrived but never opened a moment opens
 one now. A game resigned while its last move was being evaluated, and stopped before the verdict
 landed (a result on file but no summary), finishes now, without it.
-`SavedGame.assistance` / `GameSummary.assistance` count hint requests, the learner's take-backs and
-the tutor's rethinks. Assisted moves don't count for the rank estimate.
+`SavedGame.assistance` / `GameSummary.assistance` count hint requests, chat questions the tutor
+answered (`questions`, absent in older games), the learner's take-backs and the tutor's rethinks. Assisted moves don't count for the rank estimate.
 
 A move's point loss is KataGo's root lead before it minus the root lead after it, except for a move
 KataGo searched well (50+ visits) in the position before: that one loses its candidate's lead below

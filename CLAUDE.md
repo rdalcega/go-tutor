@@ -152,6 +152,7 @@ in the record). Don't comment unless they ask; on silent, one `say` answers the 
 
 **USER "<text>"** — answer with `say` (add `--moment <id>` when the line names one). A line ending in
 `(problem <id>)` is about the practice problem on the board, not the game.
+In a game, answering marks the learner's next move as helped (`asked`), like a hint: answer freely.
 
 **GAME_END** — post-game review. The line shows the result and the help the learner had. The
 server waits up to 15 s for the rank estimate, so the **RATING** line ("rank estimate 18k from 25

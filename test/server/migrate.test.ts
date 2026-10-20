@@ -98,6 +98,14 @@ describe("rating model migration", () => {
     expect(rebuilt.moves.map((r) => r.assist)).toEqual(current.moves.map((r) => r.assist));
   });
 
+  it("keeps the saved count of answered questions, which the log doesn't have", async () => {
+    const { store, gameId } = await oldGame();
+    const saved = store.loadGame(gameId)!;
+    const rebuilt = reconstructGame({ ...saved, assistance: { hints: 1, questions: 2, takeBacks: 1, rethinks: 0 } }, store.readEvents());
+    expect(rebuilt.complete).toBe(true);
+    expect(rebuilt.assistance).toEqual({ hints: 1, questions: 2, takeBacks: 1, rethinks: 0 });
+  });
+
   it("uses only what survives when the log doesn't replay to the saved game", async () => {
     const { store, gameId } = await oldGame();
     const saved = store.loadGame(gameId)!;

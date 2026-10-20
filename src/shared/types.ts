@@ -49,9 +49,11 @@ export interface MoveRecord {
  * Kinds of help for one human move: "hint" = played after a hint for that position was answered
  * (by the tutor or KataGo); "retry" = replaces a move the learner took back (Try again, Take back);
  * "rethink" = replaces a move the tutor took back; "shown" = played after the tutor drew on that
- * position (show or mark) or a hint circled a point there, even if the learner hid the drawing.
+ * position (show or mark) or a hint circled a point there, even if the learner hid the drawing;
+ * "asked" = played after the tutor answered the learner's chat question (asked in that position, or
+ * on the bot's turn just before it).
  */
-export const ASSIST_KINDS = ["hint", "retry", "rethink", "shown"] as const;
+export const ASSIST_KINDS = ["hint", "asked", "retry", "rethink", "shown"] as const;
 export type AssistKind = (typeof ASSIST_KINDS)[number];
 
 /** A human move that was taken back, kept in the game record with its eval (its first attempt). */
@@ -71,9 +73,11 @@ export interface TakenBackMove {
   tag?: { category: MistakeCategory; note?: string };
 }
 
-/** Help the learner had in one game: hint requests, their own take-backs, and the tutor's rethinks. */
+/** Help the learner had in one game: hint requests, chat questions the tutor answered, their own take-backs, and the tutor's rethinks. */
 export interface AssistCounts {
   hints: number;
+  /** Absent in games saved before answered questions counted as help. */
+  questions?: number;
   takeBacks: number;
   rethinks: number;
 }
@@ -668,9 +672,10 @@ export interface SavedGame {
   /**
    * Help the learner has for the move they play next, at move count `at`, so a restart still counts
    * that move as assisted; `hintAsked`: they asked the attached tutor for a hint there and have no
-   * answer yet (the answer adds "hint").
+   * answer yet (the answer adds "hint"); `questionAsked`: they asked a chat question there (or on
+   * the bot's turn before it) and have no answer yet (the answer adds "asked").
    */
-  help?: { at: number; kinds: AssistKind[]; hintAsked?: true };
+  help?: { at: number; kinds: AssistKind[]; hintAsked?: true; questionAsked?: true };
   /** The learner's latest question or hint request reached the tutor and has no answer yet (on Silent, the tutor may answer it with one say). */
   questionOpen?: true;
   /** The reference rank for "at_level" judging, fixed when the game started (absent before judge modes existed). */
