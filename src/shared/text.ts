@@ -130,10 +130,10 @@ export function lessonText(info: LessonInfo): string {
   return `the same point stayed the biggest ${runSpanText(info.fromMove, info.toMove, info.variants)} (${info.variants} mistakes, one lesson)`;
 }
 
-/** "3 hints, 2 take-backs, 1 tutor take-back" (zero counts left out), or "no help". */
+/** "3 hints, 1 question, 2 take-backs, 1 tutor take-back" (zero counts left out), or "no help". */
 export function assistText(a: AssistCounts): string {
   const count = (n: number, word: string) => (n ? [plural(n, word)] : []);
-  const parts = [...count(a.hints, "hint"), ...count(a.takeBacks, "take-back"), ...count(a.rethinks, "tutor take-back")];
+  const parts = [...count(a.hints, "hint"), ...count(a.questions ?? 0, "question"), ...count(a.takeBacks, "take-back"), ...count(a.rethinks, "tutor take-back")];
   return parts.length ? parts.join(", ") : "no help";
 }
 

@@ -1896,6 +1896,120 @@ describe("GameController take-backs and help", () => {
     expect(ctl.view().moves[4]!.assist).toEqual(["shown"]);
   });
 
+  it("marks a move played after the tutor answered a chat question as asked", async () => {
+    setup({ tutor: true });
+    await startGame();
+    engine.botMoves = ["G7", "G3", "C7"];
+    // The tutor talks without being asked: no help.
+    await ctl.handleTutor({ type: "say", text: "Good luck!" });
+    ctl.play(E5);
+    await flush();
+    expect(ctl.view().moves[0]!.assist).toBeUndefined();
+    // A question answered on the learner's turn helps the move they play there.
+    await ctl.handleAction({ type: "chat", text: "Is my group safe?" });
+    await ctl.handleTutor({ type: "say", text: "Count its eyes." });
+    ctl.play(D4);
+    await flush();
+    expect(ctl.view().moves[2]!.assist).toEqual(["asked"]);
+    // A question asked but never answered: no help.
+    await ctl.handleAction({ type: "chat", text: "hm" });
+    ctl.play(C3);
+    await flush();
+    expect(ctl.view().moves[4]!.assist).toBeUndefined();
+    ctl.flush();
+    expect(store.loadGame(ctl.view().gameId!)!.assistance).toEqual({ hints: 0, questions: 1, takeBacks: 0, rethinks: 0 });
+  });
+
+  it("marks the move after the bot's reply when the tutor answers a question on the bot's turn", async () => {
+    setup({ tutor: true });
+    await startGame();
+    engine.botMoves = ["G7", "G3"];
+    engine.hold = true;
+    ctl.play(E5);
+    await ctl.handleAction({ type: "chat", text: "Why did I play there?" });
+    await ctl.handleTutor({ type: "say", text: "To take the center." });
+    engine.hold = false;
+    engine.releaseAll();
+    await flush();
+    ctl.play(D4);
+    await flush();
+    expect(ctl.view().moves[0]!.assist).toBeUndefined();
+    expect(ctl.view().moves[2]!.assist).toEqual(["asked"]);
+  });
+
+  it("counts an answer to a question asked while the tutor was away", async () => {
+    setup({ tutor: false });
+    await startGame();
+    engine.botMoves = ["G7"];
+    await ctl.handleAction({ type: "chat", text: "Is my group safe?" });
+    ctl.setTutorAttached(true); // the replay brings the question
+    await ctl.handleTutor({ type: "say", text: "Count its eyes." });
+    ctl.play(D4);
+    await flush();
+    expect(ctl.view().moves[0]!.assist).toEqual(["asked"]);
+  });
+
+  it("doesn't count a hint answered after the learner moved on as a question", async () => {
+    setup({ tutor: true });
+    await startGame();
+    engine.botMoves = ["G7", "G3"];
+    await ctl.handleAction({ type: "ask_tutor" });
+    ctl.play(E5); // played before the answer
+    await flush();
+    await ctl.handleTutor({ type: "say", text: "Which corner is open?" });
+    ctl.play(D4);
+    await flush();
+    expect(ctl.view().moves[2]!.assist).toBeUndefined();
+    ctl.flush();
+    expect(store.loadGame(ctl.view().gameId!)!.assistance).toEqual({ hints: 1, takeBacks: 0, rethinks: 0 });
+  });
+
+  it("doesn't count the tutor's answer during a teaching moment as an answered question", async () => {
+    setup({ tutor: true });
+    await startGame();
+    engine.botMoves = ["G7", "G3"];
+    engine.lossAfter(["C3"], 6);
+    ctl.play(C3);
+    await flush();
+    const momentId = ctl.view().moment!.id;
+    await ctl.handleAction({ type: "chat", text: "oops" });
+    await ctl.handleTutor({ type: "claim", momentId });
+    await ctl.handleTutor({ type: "say", text: "E5 was bigger." });
+    await ctl.handleTutor({ type: "resume" });
+    await flush();
+    ctl.play(D4);
+    await flush();
+    expect(ctl.view().moves[2]!.assist).toBeUndefined();
+  });
+
+  it("settles a hint and a question beside it with one answer, as a hint", async () => {
+    setup({ tutor: true });
+    await startGame();
+    engine.botMoves = ["G7"];
+    await ctl.handleAction({ type: "chat", text: "Is my group safe?" });
+    await ctl.handleAction({ type: "ask_tutor" });
+    await ctl.handleTutor({ type: "mark", points: ["C3"] });
+    await ctl.handleTutor({ type: "say", text: "Look here." });
+    ctl.play(D4);
+    await flush();
+    expect(ctl.view().moves[0]!.assist).toEqual(["hint", "shown"]);
+    ctl.flush();
+    expect(store.loadGame(ctl.view().gameId!)!.assistance).toEqual({ hints: 1, takeBacks: 0, rethinks: 0 });
+  });
+
+  it("counts a hint the tutor answers as a hint, not also a question", async () => {
+    setup({ tutor: true });
+    await startGame();
+    engine.botMoves = ["G7"];
+    await ctl.handleAction({ type: "ask_tutor", text: "where?" });
+    await ctl.handleTutor({ type: "say", text: "Which corner is open?" });
+    ctl.play(D4);
+    await flush();
+    expect(ctl.view().moves[0]!.assist).toEqual(["hint"]);
+    ctl.flush();
+    expect(store.loadGame(ctl.view().gameId!)!.assistance).toEqual({ hints: 1, takeBacks: 0, rethinks: 0 });
+  });
+
   it("marks the move after a rethink, and the help survives a restart", async () => {
     setup({ tutor: true });
     await startGame();

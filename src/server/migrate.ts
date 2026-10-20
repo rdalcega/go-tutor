@@ -183,7 +183,15 @@ export function reconstructGame(saved: SavedGame, events: readonly TutorEvent[])
       : consistent
         ? takenBack.map((t) => copyAttempt(t))
         : [];
-  return { moves, takenBack: firsts, assistance: complete ? assistance : { ...assistance, ...saved.assistance }, complete, events: mine.length };
+  // Answered questions aren't in the log: the file's count stands either way.
+  const questions = saved.assistance?.questions;
+  return {
+    moves,
+    takenBack: firsts,
+    assistance: complete ? { ...assistance, ...(questions && { questions }) } : { ...assistance, ...saved.assistance },
+    complete,
+    events: mine.length,
+  };
 }
 /** What `migrateRatingModel` needs. */
 export interface MigrationDeps {
@@ -459,7 +467,15 @@ export async function migrateRatingModel(deps: MigrationDeps): Promise<Migration
   if (problemsAdded.length) store.saveProblems(problems);
 
   const rated = reports.filter((r) => r.rated);
-  const help = reports.reduce((a, r) => ({ hints: a.hints + r.assistance.hints, takeBacks: a.takeBacks + r.assistance.takeBacks, rethinks: a.rethinks + r.assistance.rethinks }), noAssistance());
+  const help = reports.reduce(
+    (a, r) => ({
+      hints: a.hints + r.assistance.hints,
+      questions: (a.questions ?? 0) + (r.assistance.questions ?? 0),
+      takeBacks: a.takeBacks + r.assistance.takeBacks,
+      rethinks: a.rethinks + r.assistance.rethinks,
+    }),
+    noAssistance(),
+  );
   const before = ratingToRank(original.rating);
   const after = ratingToRank(profile.rating);
   const perGame = reports.map((r) => `${r.gameId} ${r.estimate ? rankEstimateText(r.estimate) : r.rated ? "no estimate" : "unrated"}${r.complete ? "" : " (log incomplete)"}`).join("; ");

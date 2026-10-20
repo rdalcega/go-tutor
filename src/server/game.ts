@@ -145,11 +145,15 @@ const REFERENCE_PRIORITY = 5;
 
 const NO_GAME_TEXT = "No game in progress. Start a new game first.";
 
-/** Help the learner has for the move they play next, at move count `at`; `hintAsked`: the attached tutor owes them a hint there. */
+/**
+ * Help the learner has for the move they play next, at move count `at`; `hintAsked`: the attached
+ * tutor owes them a hint there; `questionAsked`: the tutor owes them an answer to a chat question.
+ */
 interface PendingHelp {
   at: number;
   kinds: Set<AssistKind>;
   hintAsked?: boolean;
+  questionAsked?: boolean;
 }
 
 /**
@@ -648,7 +652,10 @@ export class GameController {
     this.takenBack = saved.takenBack ?? [];
     this.assistance = { ...noAssistance(), ...saved.assistance };
     // Help for the move the learner hadn't played yet (a hint, a drawing, a take-back) still counts for it.
-    if (saved.help) this.help = { at: saved.help.at, kinds: new Set(saved.help.kinds), ...(saved.help.hintAsked && { hintAsked: true }) };
+    if (saved.help) {
+      const { at, kinds, hintAsked, questionAsked } = saved.help;
+      this.help = { at, kinds: new Set(kinds), ...(hintAsked && { hintAsked: true }), ...(questionAsked && { questionAsked: true }) };
+    }
     this.questionOpen = saved.questionOpen === true;
     this.overlay = saved.overlay ?? null;
     this.chat = saved.chat ?? [];
@@ -762,28 +769,42 @@ export class GameController {
   }
 
   /**
-   * The tutor said or drew something in a game, on the learner's turn: a hint request it answers
-   * makes their next move hinted, and a drawing makes it "shown" (both only for this position).
+   * The tutor said or drew something in a game: a hint request it answers makes the learner's next
+   * move hinted, an answer to their chat question makes it "asked", and a drawing on their turn
+   * makes it "shown" (all only for that move's position). A question asked on the bot's turn (a
+   * teaching moment, or the bot thinking) is about the move the learner plays after the bot's.
    */
   private noteTutorHelp(type: "say" | "show" | "mark"): void {
     const { game, settings } = this;
-    if (this.practice || !game || !settings || this.result || game.toPlay !== settings.humanColor) return;
-    if (this.help?.at === game.moves.length && this.help.hintAsked) {
-      this.help.hintAsked = false;
-      this.noteHelp("hint");
+    if (this.practice || !game || !settings || this.result) return;
+    // One answer settles what the learner asked there: a hint request (with any question beside it), or a question.
+    const help = this.help?.at === this.learnerMoveAt() ? this.help : null;
+    if (help?.hintAsked) {
+      help.hintAsked = help.questionAsked = false;
+      this.noteHelp("hint", help.at);
+    } else if (help?.questionAsked) {
+      help.questionAsked = false;
+      this.assistance.questions = (this.assistance.questions ?? 0) + 1;
+      this.noteHelp("asked", help.at);
     }
-    if (type !== "say") this.noteHelp("shown");
+    if (type !== "say" && game.toPlay === settings.humanColor) this.noteHelp("shown");
   }
 
-  /** The learner gets `kind` of help for the move they play next in this position (saved with the game, so a restart keeps it). */
-  private noteHelp(kind: AssistKind): void {
-    this.pendingHelp().kinds.add(kind);
+  /** The move count at which the learner plays next: now on their turn, after the bot's reply on its turn. */
+  private learnerMoveAt(): number {
+    const { game, settings } = this;
+    if (!game || !settings) return 0;
+    return game.moves.length + (game.toPlay === settings.humanColor ? 0 : 1);
+  }
+
+  /** The learner gets `kind` of help for the move they play at move count `at` (by default next, in this position; saved with the game, so a restart keeps it). */
+  private noteHelp(kind: AssistKind, at?: number): void {
+    this.pendingHelp(at).kinds.add(kind);
     this.save();
   }
 
-  /** The help record for the learner's next move (the current move count), started afresh when the one kept is for another position (an older one, or one a take-back moved away from). */
-  private pendingHelp(): PendingHelp {
-    const at = this.game?.moves.length ?? 0;
+  /** The help record for the learner's move at `at` (by default the current move count), started afresh when the one kept is for another position (an older one, or one a take-back moved away from). */
+  private pendingHelp(at = this.game?.moves.length ?? 0): PendingHelp {
     if (this.help?.at !== at) this.help = { at, kinds: new Set() };
     return this.help;
   }
@@ -1552,6 +1573,13 @@ export class GameController {
     // On a problem the tutor owes an answer, also one it reads later from a replay: a play-out lets
     // it say only that (the problem's rule; Silent's rule and the saved game are the game's).
     if (problemId) this.practice!.questionAsked();
+    // A question in a game in progress: the tutor's answer, whenever it comes (also from a replay
+    // after a reconnection), helps the learner's next move. One during a teaching moment is about
+    // the moment's move, which the tutor answers anyway.
+    else if (this.game && !this.result && !momentId) {
+      this.pendingHelp(this.learnerMoveAt()).questionAsked = true;
+      this.save();
+    }
     if (this.tutorAttached) {
       // The tutor got it: on Silent it may answer with one say.
       if (!problemId) this.noteQuestion(true);
@@ -2150,6 +2178,7 @@ export class GameController {
     this.review = null;
     // Entering or leaving a problem: a question about the game isn't one about the problem, nor the other way round.
     this.noteQuestion(false);
+    if (this.help?.questionAsked) this.help.questionAsked = false;
     return session?.close();
   }
 
@@ -2265,7 +2294,14 @@ export class GameController {
       overlay: this.overlay,
       takenBack: this.takenBack,
       assistance: this.assistance,
-      ...(this.help && { help: { at: this.help.at, kinds: [...this.help.kinds], ...(this.help.hintAsked && { hintAsked: true as const }) } }),
+      ...(this.help && {
+        help: {
+          at: this.help.at,
+          kinds: [...this.help.kinds],
+          ...(this.help.hintAsked && { hintAsked: true as const }),
+          ...(this.help.questionAsked && { questionAsked: true as const }),
+        },
+      }),
       ...(this.questionOpen && { questionOpen: true as const }),
       ...(this.atLevelRank && { atLevelRank: this.atLevelRank }),
     };
