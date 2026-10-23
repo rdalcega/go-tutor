@@ -4,12 +4,6 @@ Features to add or change. Newest at the bottom; move an item to "Done" with its
 
 ## To do
 
-- **Limit practice: stop after three misses, then come back later.** Practice today has no limit,
-  so the learner can keep going until they're just getting the same problems wrong again and
-  learning nothing from them. When the learner presses Practice, they practice until they've
-  gotten three problems wrong; then practice closes and stays unavailable for a while (at least an
-  hour). When they practice again, the problems they got wrong come first.
-
 ## Done
 
 - **Review a game's mistakes as practice.** At the end of a game, add a button option for review
@@ -64,3 +58,8 @@ Features to add or change. Newest at the bottom; move an item to "Done" with its
   there's something else, cap the focus category at about half of a set, and after two misses in
   a session push a problem to a later session. Keep Review mistakes in move order, one per lesson.
   (1407605)
+- **Limit practice: stop after three misses, then come back later.** Practice today has no limit,
+  so the learner can keep going until they're just getting the same problems wrong again and
+  learning nothing from them. When the learner presses Practice, they practice until they've
+  gotten three problems wrong; then practice closes and stays unavailable for a while (at least an
+  hour). When they practice again, the problems they got wrong come first. (f4292f0)
