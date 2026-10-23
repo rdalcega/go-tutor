@@ -4,6 +4,11 @@ Features to add or change. Newest at the bottom; move an item to "Done" with its
 
 ## To do
 
+- **Limit practice: stop after three misses, then come back later.** Practice today has no limit,
+  so the learner can keep going until they're just getting the same problems wrong again and
+  learning nothing from them. When the learner presses Practice, they practice until they've
+  gotten three problems wrong; then practice closes and stays unavailable for a while (at least an
+  hour). When they practice again, the problems they got wrong come first.
 
 ## Done
 
