@@ -12,7 +12,7 @@ import { allowedActions, hintBlocked, retryBlocked, takeBackBlocked, type Action
 import { gtpLine, gtpMove, moveGtp, movePoint, samePoint, tryFromGtp } from "../shared/coords.ts";
 import { atLevelOf, judgedLoss } from "../shared/judge.ts";
 import { atLevelRankFor, normalizeBotRank } from "../shared/rank.ts";
-import { colorName, formatScore, judgeModeChangedText, plural, round1, runSpanText, takenBackTryText, tutorLevelChangedText } from "../shared/text.ts";
+import { colorName, formatScore, judgeModeChangedText, plural, practiceBreakText, round1, runSpanText, takenBackTryText, tutorLevelChangedText } from "../shared/text.ts";
 import { playedThreshold, thresholdFor } from "../shared/threshold.ts";
 import {
   ASSIST_KINDS,
@@ -64,13 +64,17 @@ import { estimateRank, rankSamples } from "./estimate.ts";
 import { ProblemGenerator } from "./generate.ts";
 import { atLevelEvalFrom, candidatesOf, humanPolicyOptions, moveEvalFrom, needsReferenceAnalysis, positionOf, topHumanMove, type Analysis, type Engine, type Position } from "./katago.ts";
 import {
+  PRACTICE_MISS_LIMIT,
   byMoveOrder,
   gameRuns,
   lessonInfo,
   lessonKey,
   pickNextProblem,
   pickVariant,
+  practiceClosed,
   recordLessonResult,
+  recordPracticeMiss,
+  retryShown,
   runOf,
   sameRef,
   setEntry,
@@ -173,6 +177,9 @@ interface ReviewState {
 export const MAX_MIGRATION_ATTEMPTS = 4;
 /** Wait before trying a failed migration again; each further failure waits 4× longer (1, 4, 16 min). */
 export const MIGRATION_RETRY_MS = 60_000;
+
+/** The practice reopen timer fires this long after practice opens: a timer can fire a little early. */
+const REOPEN_SLACK_MS = 1000;
 
 /**
  * The chat line once a finished game's mistakes are practice problems (`added`, linked into
@@ -300,6 +307,8 @@ export class GameController {
   private practiceSet: SetEntry[] = [];
   /** A review of one game's mistakes: its lessons in move order, the one on the board, and those solved. */
   private review: ReviewState | null = null;
+  /** Fires when practice opens again after its break (REOPEN_SLACK_MS after), so the view lets the learner back in. */
+  private practiceTimer: unknown = null;
   /** Lessons per source game (from problems.json, kept in step by updateProblems), for the finished game's Review mistakes count. */
   private problemsPerGame = new Map<string, number>();
   /** Generated practice problems, made in the background while the learner doesn't need KataGo. */
@@ -352,7 +361,8 @@ export class GameController {
       changed: () => this.changed(),
       busyWhile: (p) => this.busyWhile(p),
       addAnswer: (id, move) => this.addProblemAnswer(id, move),
-      recordResult: (problem, solved, attempts) => this.recordProblemResult(problem, solved, attempts),
+      recordResult: (problem, solved, attempts, inReview) => this.recordProblemResult(problem, solved, attempts, inReview),
+      practiceClosedUntil: () => this.practiceClosedUntil,
     };
     this.generator = new ProblemGenerator({
       engine: this.engine,
@@ -367,6 +377,7 @@ export class GameController {
       emit: (e) => this.emit(e),
       system: (text) => this.system(text),
     });
+    this.schedulePracticeReopen();
   }
 
   /**
@@ -432,6 +443,7 @@ export class GameController {
       // A problem shows the current game's threshold, or the next one's on the last game's board.
       mistakeThreshold: this.threshold,
       generation: this.generator.status(),
+      ...(this.practiceClosedUntil !== undefined && { practiceClosedUntil: this.practiceClosedUntil }),
     };
     if (this.practice) return this.practice.view(common, this.settings?.botRank ?? this.profile.botRank);
     const game = this.game;
@@ -552,6 +564,7 @@ export class GameController {
       overlay: this.activeOverlay !== null,
       reviewProblems: this.reviewProblems,
       inReview: this.review !== null,
+      practiceClosed: this.practiceClosedUntil !== undefined,
     };
   }
 
@@ -2041,6 +2054,9 @@ export class GameController {
    * `review`, the problem is that review's problem at `review.index` (any other start ends a review).
    */
   private startProblem(id?: string, review?: ReviewState): void {
+    // After too many misses practice takes a break; a problem by its id, and reviews, still start.
+    const picked = !id && !review;
+    if (picked && this.practiceClosedUntil !== undefined) throw new UserError(`${practiceBreakText(this.practiceClosedUntil)} A game meanwhile?`);
     const problems = this.store.loadProblems();
     // A problem started outside problem mode starts a new practice set.
     const set = this.practice ? this.practiceSet : [];
@@ -2050,7 +2066,7 @@ export class GameController {
       problem = problems.find((p) => p.id === id);
       if (!problem) throw new UserError(`No practice problem "${id}". List them with: tutor problems`);
     } else {
-      const next = pickNextProblem(problems, { now: this.clock.now(), focus: recommendFocus(this.profile).category, set });
+      const next = pickNextProblem(problems, { now: this.clock.now(), focus: recommendFocus(this.profile).category, set, retry: this.profile.practice?.retry ?? [] });
       if (!next) throw new UserError(this.noProblemsText());
       ({ problem, early } = next);
     }
@@ -2062,6 +2078,13 @@ export class GameController {
     // Leaving a problem after a wrong attempt reschedules it, and its lesson: the same problem (or
     // another variant of the lesson) again starts from the new box.
     const rescheduled = this.closePractice();
+    // Leaving the last one after a wrong attempt was the miss that closed practice: back to playing
+    // (the chat says why), and no problem started, so the command fails (a tutor's chain stops).
+    if (picked && this.practiceClosedUntil !== undefined) {
+      this.resumeTurn();
+      this.changed();
+      throw new UserError(`${practiceBreakText(this.practiceClosedUntil)} A game meanwhile?`);
+    }
     if (rescheduled?.id === problem.id) Object.assign(session.problem, rescheduled);
     else if (rescheduled && lessonKey(rescheduled) === lessonKey(problem)) {
       const { box, due, lastResult, missedAt, category, prompt } = rescheduled;
@@ -2070,8 +2093,45 @@ export class GameController {
     this.practice = session;
     this.review = review ?? null;
     this.practiceSet = [...set, setEntry(session.problem)];
+    this.retryDone(lessonKey(session.problem));
     session.start(early);
     this.changed();
+  }
+
+  /** A lesson practice was to show first is on the board: it leaves that list. */
+  private retryDone(lesson: string): void {
+    const limit = this.profile.practice;
+    if (!limit?.retry?.includes(lesson)) return;
+    try {
+      this.updateProfile((profile) => {
+        const next = retryShown(profile.practice, lesson);
+        if (next) profile.practice = next;
+        else delete profile.practice;
+      });
+    } catch (err) {
+      this.log(`updating the practice limit failed: ${(err as Error).message}`);
+    }
+  }
+
+  /** When practice opens again, while it is closed after too many misses. */
+  private get practiceClosedUntil(): number | undefined {
+    const limit = this.profile.practice;
+    return practiceClosed(limit, this.clock.now()) ? limit!.closedUntil : undefined;
+  }
+
+  /** Practice is closed: the view lets the learner back in once it opens (also after a restart). */
+  private schedulePracticeReopen(): void {
+    if (this.practiceTimer !== null) this.clock.clearTimeout(this.practiceTimer);
+    this.practiceTimer = null;
+    const until = this.practiceClosedUntil;
+    if (until === undefined) return;
+    this.practiceTimer = this.clock.setTimeout(() => {
+      this.practiceTimer = null;
+      // A timer can fire a little early (hence the slack): then it waits out the rest.
+      if (this.practiceClosedUntil !== undefined) return this.schedulePracticeReopen();
+      this.changed();
+    }, until - this.clock.now() + REOPEN_SLACK_MS);
+    (this.practiceTimer as { unref?: () => void } | null)?.unref?.();
   }
 
   /**
@@ -2185,25 +2245,44 @@ export class GameController {
   /**
    * A problem ended: it counts for its lesson (recordLessonResult: the Leitner box, a second miss in a
    * session pushes the lesson to a later day, every variant takes the schedule), and once in the
-   * profile. Returns it as stored now.
+   * profile; a miss outside a review counts toward the practice limit. Returns it as stored now.
    */
-  private recordProblemResult(problem: StoredProblem, solved: boolean, attempts: number): StoredProblem | undefined {
+  private recordProblemResult(problem: StoredProblem, solved: boolean, attempts: number, inReview: boolean): StoredProblem | undefined {
     let stored: StoredProblem | undefined;
+    let problems: StoredProblem[] = [];
     try {
-      stored = this.updateProblems((problems) => recordLessonResult(problems, problem.id, resultOf(solved, attempts), this.clock.now()));
+      stored = this.updateProblems((all) => {
+        problems = all;
+        return recordLessonResult(all, problem.id, resultOf(solved, attempts), this.clock.now());
+      });
       const key = lessonKey(stored ?? problem);
       if (solved && this.review?.lessons.includes(key)) this.review.solved.add(key);
     } catch (err) {
       this.log(`saving problem ${problem.id} failed: ${(err as Error).message}`);
     }
+    const missed = !solved && !inReview ? lessonKey(stored ?? problem) : null;
+    let closed = false;
     try {
-      this.updateProfile((profile) => applyProblemResult(profile, problem.category, solved));
+      closed = this.updateProfile((profile) => {
+        applyProblemResult(profile, problem.category, solved);
+        if (!missed) return false;
+        const r = recordPracticeMiss(profile.practice, missed, problems, this.clock.now());
+        profile.practice = r.limit;
+        return r.closed;
+      });
     } catch (err) {
       this.log(`updating the profile after problem ${problem.id} failed: ${(err as Error).message}`);
     }
+    if (closed) this.practiceClosedNow();
     // Enough of the newest generated batch mastered: the next batch starts.
     this.generator.checkTrigger();
     return stored;
+  }
+
+  /** A miss just closed practice (the limit, lessons.ts): the learner is told, and the view reopens it later. */
+  private practiceClosedNow(): void {
+    this.schedulePracticeReopen();
+    this.system(`That's ${PRACTICE_MISS_LIMIT} problems missed. ${practiceBreakText(this.practiceClosedUntil!)} A game meanwhile?`);
   }
 
   /** An attempt KataGo found as good as the answers becomes one. */

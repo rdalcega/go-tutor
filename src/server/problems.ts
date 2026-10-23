@@ -19,6 +19,7 @@ import type {
   Gtp,
   MistakeCategory,
   MoveRecord,
+  PracticeStatus,
   ProblemKind,
   ProblemListItem,
   ProblemsResponse,
@@ -484,9 +485,18 @@ export function compareRank(a: readonly number[], b: readonly number[]): number 
   return 0;
 }
 
-/** Problems in listing order: due ones first (by rank), then the rest by due time. */
-export function orderProblems(problems: readonly StoredProblem[], now: number, focus?: MistakeCategory): StoredProblem[] {
-  const due = problems.filter((p) => p.due <= now).sort((a, b) => compareRank(rank(a, focus), rank(b, focus)) || a.id.localeCompare(b.id));
+/**
+ * Problems in listing order: due ones first (the `retry` lessons first, in their order, then by
+ * rank), then the rest by due time.
+ */
+export function orderProblems(problems: readonly StoredProblem[], now: number, focus?: MistakeCategory, retry: readonly string[] = []): StoredProblem[] {
+  const retryIndex = (p: StoredProblem) => {
+    const i = retry.indexOf(p.lesson?.id ?? p.id);
+    return i < 0 ? retry.length : i;
+  };
+  const due = problems
+    .filter((p) => p.due <= now)
+    .sort((a, b) => retryIndex(a) - retryIndex(b) || compareRank(rank(a, focus), rank(b, focus)) || a.id.localeCompare(b.id));
   const later = problems.filter((p) => p.due > now).sort((a, b) => a.due - b.due || compareRank(rank(a, focus), rank(b, focus)) || a.id.localeCompare(b.id));
   return [...due, ...later];
 }
@@ -522,8 +532,14 @@ export function listItem(p: StoredProblem, now: number, problems: readonly Store
 }
 
 /** GET /api/problems: every problem (each variant of a lesson too), counted per problem. */
-export function problemsResponse(problems: readonly StoredProblem[], now: number, focus: FocusRecommendation, generation?: GenerationStatus): ProblemsResponse {
-  const ordered = orderProblems(problems, now, focus.category);
+export function problemsResponse(
+  problems: readonly StoredProblem[],
+  now: number,
+  focus: FocusRecommendation,
+  generation?: GenerationStatus,
+  practice?: PracticeStatus,
+): ProblemsResponse {
+  const ordered = orderProblems(problems, now, focus.category, practice?.retry);
   // Due counts are lessons: one result reschedules every variant of a lesson.
   const lessons = new Set<string>();
   const due = ordered.filter((p) => p.due <= now && !lessons.has(p.lesson?.id ?? p.id) && lessons.add(p.lesson?.id ?? p.id));
@@ -542,5 +558,6 @@ export function problemsResponse(problems: readonly StoredProblem[], now: number
     },
     focus,
     ...(generation && { generation }),
+    ...(practice && { practice }),
   };
 }

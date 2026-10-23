@@ -13,7 +13,7 @@ import {
 } from "../../src/shared/types.ts";
 import { atLevelOf, judgedLoss } from "../../src/shared/judge.ts";
 import { ratingToRank } from "../../src/shared/rank.ts";
-import { JUDGE_MODE_TEXT, TUTOR_LEVEL_TEXT, categoryLabel, colorName, formatScore, rankEstimateText, secondsUntil } from "../../src/shared/text.ts";
+import { JUDGE_MODE_TEXT, TUTOR_LEVEL_TEXT, categoryLabel, colorName, formatScore, practiceBreakText, rankEstimateText, secondsUntil } from "../../src/shared/text.ts";
 import { type ConnectionState, type Transport, httpTransport } from "./api.ts";
 import { BoardView } from "./board.ts";
 import { readCollapsed, writeCollapsed } from "./collapse.ts";
@@ -410,7 +410,9 @@ function renderControls(v: GameView | null): void {
   el.resign.disabled = !can(v, "resign");
   el.practice.disabled = !can(v, "next_problem") || v.mode === "problem";
   const generating = v?.generation?.current;
-  el.practice.title = generating
+  el.practice.title = v?.practiceClosedUntil !== undefined
+    ? practiceBreakText(v.practiceClosedUntil)
+    : generating
     ? `Practice problems: from your mistakes, and generated at your level (generating ${generating.found}/${generating.target})`
     : "Practice problems: from your mistakes, and generated at your level";
   el.chatInput.disabled = !v;
@@ -503,12 +505,13 @@ function renderProblem(v: GameView | null): void {
   el.playoutForward.disabled = !can(v, "playout_forward");
   el.playoutForward.title = forwardTitle(p, v.toPlay);
   el.playoutExit.disabled = !can(v, "playout_exit");
-  const result = po ? null : problemResult(p);
+  const result = po ? null : problemResult(p, Date.now(), v.practiceClosedUntil);
   el.problemResult.hidden = !result;
   el.problemResult.className = `problem-result ${result?.tone ?? ""}`;
   el.problemResult.textContent = result?.text ?? "";
   el.nextProblem.textContent = nextProblemLabel(p);
   el.nextProblem.disabled = !can(v, "next_problem");
+  el.nextProblem.title = v.practiceClosedUntil !== undefined && !p.review ? practiceBreakText(v.practiceClosedUntil) : "";
   el.leaveProblem.disabled = !can(v, "leave_problem");
 }
 

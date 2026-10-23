@@ -26,6 +26,8 @@ export interface ActionState {
   reviewProblems?: number;
   /** In problem mode: the problem is part of a review of one game's mistakes. */
   inReview?: boolean;
+  /** Practice is taking a break after too many misses: Practice and Next problem wait (a review goes on). */
+  practiceClosed?: boolean;
 }
 
 /** What the rules read of a problem being played out (its own position, not the game's underneath). */
@@ -44,9 +46,10 @@ export interface PlayoutState {
 /** Actions the browser can send in any mode. */
 const ALWAYS: readonly ActionType[] = ["new_game", "chat", "next_problem", "set_tutor_level", "set_judge_mode"];
 
-/** ALWAYS, plus hiding the drawing when there is one. */
-function always(s: Pick<ActionState, "overlay">): ActionType[] {
-  return s.overlay ? [...ALWAYS, "clear_overlay"] : [...ALWAYS];
+/** ALWAYS, plus hiding the drawing when there is one; without the next problem while practice is closed (outside a review). */
+function always(s: Pick<ActionState, "overlay" | "practiceClosed" | "inReview">): ActionType[] {
+  const base = s.practiceClosed && !s.inReview ? ALWAYS.filter((a) => a !== "next_problem") : [...ALWAYS];
+  return s.overlay ? [...base, "clear_overlay"] : base;
 }
 
 /** Two consecutive passes: the game is over, though its score may not be in yet. */

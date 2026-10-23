@@ -1,12 +1,19 @@
 import { describe, expect, it } from "vitest";
 import { BOX_INTERVALS } from "../../src/shared/schedule.ts";
-import type { MistakeCategory } from "../../src/shared/types.ts";
+import type { MistakeCategory, PracticeLimit } from "../../src/shared/types.ts";
 import {
   LATER_SESSION_MS,
+  PRACTICE_MISS_LIMIT,
+  PRACTICE_PAUSE_MS,
   SESSION_GAP_MS,
+  countedMisses,
   pickNextProblem,
   pickVariant,
+  practiceClosed,
+  practiceStatus,
   recordLessonResult,
+  recordPracticeMiss,
+  retryShown,
   sessionStart,
   setEntry,
   type SetEntry,
@@ -285,5 +292,66 @@ describe("runs of mistakes that missed one point", () => {
     expect(c.lesson).toBeUndefined();
     expect(d.lesson).toBeUndefined();
     expect(linkGameLessons([a, b], "g1", runs)).toEqual([]);
+  });
+});
+
+describe("the practice limit", () => {
+  const missAt = (limit: PracticeLimit | undefined, lesson: string, at: number, problems: StoredProblem[] = []) => recordPracticeMiss(limit, lesson, problems, at);
+
+  it("closes practice for an hour at the third miss of a session, with the missed lessons first in line", () => {
+    let r = missAt(undefined, "p1", NOW);
+    expect(r).toEqual({ limit: { misses: [{ at: NOW, lesson: "p1" }] }, closed: false });
+    r = missAt(r.limit, "p2", NOW + MINUTE);
+    expect(r.closed).toBe(false);
+    expect(practiceClosed(r.limit, NOW + MINUTE)).toBe(false);
+    r = missAt(r.limit, "p1", NOW + 2 * MINUTE);
+    expect(r.closed).toBe(true);
+    expect(r.limit).toEqual({ misses: [], closedUntil: NOW + 2 * MINUTE + PRACTICE_PAUSE_MS, retry: ["p1", "p2"] });
+    expect(practiceClosed(r.limit, NOW + 2 * MINUTE + PRACTICE_PAUSE_MS - 1)).toBe(true);
+    expect(practiceClosed(r.limit, NOW + 2 * MINUTE + PRACTICE_PAUSE_MS)).toBe(false);
+    expect(PRACTICE_MISS_LIMIT).toBe(3);
+  });
+
+  it("doesn't count a miss while practice is closed, and counts afresh once it opens", () => {
+    const closed: PracticeLimit = { misses: [], closedUntil: NOW + 30 * MINUTE, retry: ["p1"] };
+    expect(missAt(closed, "p9", NOW)).toEqual({ limit: closed, closed: false });
+    const after = missAt(closed, "p9", NOW + 31 * MINUTE).limit;
+    expect(after.misses).toEqual([{ at: NOW + 31 * MINUTE, lesson: "p9" }]);
+    // Two more close it again; the lessons still waiting stay in line behind the new ones.
+    const again = missAt(missAt(after, "p8", NOW + 32 * MINUTE).limit, "p7", NOW + 33 * MINUTE);
+    expect(again.limit.retry).toEqual(["p9", "p8", "p7", "p1"]);
+  });
+
+  it("starts the count over in a new practice session", () => {
+    const old = NOW - SESSION_GAP_MS - 10 * MINUTE;
+    const problems = [prob("p1", { lastSeen: old, missedAt: [old] }), prob("p2", { lastSeen: NOW, missedAt: [NOW] })];
+    const limit: PracticeLimit = { misses: [{ at: old, lesson: "p1" }, { at: old + MINUTE, lesson: "p1" }] };
+    expect(countedMisses(limit, problems, NOW)).toEqual([]);
+    expect(missAt(limit, "p2", NOW, problems)).toEqual({ limit: { misses: [{ at: NOW, lesson: "p2" }] }, closed: false });
+    expect(practiceStatus(limit, problems, NOW)).toEqual({ misses: 0, limit: 3, retry: [] });
+  });
+
+  it("takes a lesson off the list to show first once it is shown", () => {
+    const limit: PracticeLimit = { misses: [], closedUntil: NOW, retry: ["p1", "p2"] };
+    expect(retryShown(limit, "p1")).toEqual({ misses: [], closedUntil: NOW, retry: ["p2"] });
+    expect(retryShown({ misses: [], retry: ["p2"] }, "p2")).toEqual({ misses: [] });
+    expect(retryShown(limit, "p9")).toBe(limit);
+    expect(retryShown(undefined, "p1")).toBeUndefined();
+  });
+
+  it("reports the misses and the break", () => {
+    const limit: PracticeLimit = { misses: [], closedUntil: NOW + MINUTE, retry: ["p1"] };
+    expect(practiceStatus(limit, [prob("p1")], NOW)).toEqual({ misses: 0, limit: 3, closedUntil: NOW + MINUTE, retry: ["p1"] });
+    // A lesson whose problems are gone is left out.
+    expect(practiceStatus(limit, [], NOW).retry).toEqual([]);
+    expect(practiceStatus(undefined, [], NOW)).toEqual({ misses: 0, limit: 3, retry: [] });
+  });
+
+  it("puts the missed lessons first in practice once they are due, in order, then the usual picks", () => {
+    const problems = [prob("p1", { category: "endgame" }), prob("p2"), prob("p3"), prob("p4", { due: NOW + DAY })];
+    expect(pickNextProblem(problems, { now: NOW, focus: "endgame" })!.problem.id).toBe("p1");
+    expect(pickNextProblem(problems, { now: NOW, focus: "endgame", retry: ["p4", "p3", "p2"] })!.problem.id).toBe("p3");
+    // Not the lesson just shown.
+    expect(pickNextProblem(problems, { now: NOW, focus: "endgame", retry: ["p3", "p2"], set: [setEntry(problems[2]!)] })!.problem.id).toBe("p2");
   });
 });

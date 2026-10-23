@@ -38,7 +38,7 @@ The contract for every boundary is `src/shared/types.ts`.
 | `src/server/estimate.ts` | The rank estimate from move quality: which human moves count (`rankSamples`), their human-SL probabilities at 13 rank profiles (`movePolicies`), the maximum-likelihood rank (`fitRank`, `peakRating`), `estimateRank`. See "Rank estimate". |
 | `src/server/migrate.ts` | The one-time re-estimate for data from before rating model 2: `reconstructGame` (first attempts and help from `events.jsonl`, pure) and `migrateRatingModel`. See "Rating model migration". |
 | `src/server/problems.ts` | Practice problems, pure functions over `StoredProblem`: problems from a finished game's mistakes, their sources (`gameSource`, `generatedSource`), position hashes, Leitner scheduling (`src/shared/schedule.ts`), the listing order and the `GET /api/problems` body. See "Practice problems". |
-| `src/server/lessons.ts` | Runs and lessons, pure: the runs of a game's mistakes that missed the same point (`findRuns`, `gameRuns`, `runLead`), the lessons their problems form (`linkGameLessons`, `linkLesson`, `syncLesson`, `lessonInfo`), a result counted for the whole lesson with the two-misses rule (`recordLessonResult`, `sessionStart`), and which problem comes next (`pickNextProblem`, `pickVariant`). See "Lessons". |
+| `src/server/lessons.ts` | Runs and lessons, pure: the runs of a game's mistakes that missed the same point (`findRuns`, `gameRuns`, `runLead`), the lessons their problems form (`linkGameLessons`, `linkLesson`, `syncLesson`, `lessonInfo`), a result counted for the whole lesson with the two-misses rule (`recordLessonResult`, `sessionStart`), which problem comes next (`pickNextProblem`, `pickVariant`), and the practice limit that closes practice for an hour after 3 misses (`recordPracticeMiss`, `practiceStatus`). See "Lessons". |
 | `src/server/migrate-lessons.ts` | The one-time startup migration that finds the runs in saved games, counts each once in the profile and links their problems into lessons (`Profile.lessons`). |
 | `src/server/generate.ts` | Generated problems from KataGo's human-SL self-play: batch quotas and ranks, the candidate filters (`examineCandidate`), difficulty, the batch trigger, the startup removal of the old built-in problems (`removeLegacyBuiltins`), and `ProblemGenerator`, which the controller runs in the background. See "Generated problems". |
 | `src/server/index.ts` | `node:http` server on port 4747 (`PORT` env): JSON API, SSE, serves `dist/` in production. |
@@ -411,6 +411,24 @@ the problem card says "Variant 2 of 5" (and names the point only once the proble
 A practice session is practice without a gap of 2 hours (`sessionStart`, from the stored
 `lastSeen` and `missedAt`). A lesson missed a second time in one session is due no sooner than a
 day later, whatever its box.
+
+**The practice limit** (`recordPracticeMiss`, `countedMisses`, `practiceStatus`, lessons.ts):
+practice stops after `PRACTICE_MISS_LIMIT` (3, src/shared/schedule.ts) problems missed in one session
+(out of attempts, or left after a wrong attempt, also one KataGo was still checking; a problem in a
+review of a game's mistakes doesn't count) and stays closed for `PRACTICE_PAUSE_MS` (an hour). `Profile.practice` keeps it across restarts: the misses
+since practice last closed (`{ at, lesson }`; those before the session started don't count, and
+neither do misses while it is closed), `closedUntil`, and `retry`, the lessons missed before the
+break. The miss that closes it posts a chat line and sets `problem_attempt.practiceClosedUntil`. While
+it is closed `GameView.practiceClosedUntil` is set, `allowedActions` (`practiceClosed`) leaves out
+`next_problem` outside a review (Practice and Next problem wait, with a tooltip saying until when),
+and a picked problem (`next_problem`, or `start_problem` without an id) is refused; a problem by its
+id and reviews still start. If the miss that closes practice comes from leaving a problem with Next
+problem, the learner goes back to playing (and the command fails: no problem started). A timer
+refreshes the view a second after practice opens again (re-armed if it fires early).
+Then `pickNextProblem` puts the `retry` lessons first, in order (one from another game than the
+problem just shown, if any), once they are due; each leaves the
+list when one of its problems is shown (`retryShown`). `GET /api/problems` carries `practice`
+(`PracticeStatus`) and lists the `retry` lessons first among the due ones.
 
 At startup, after `removeLegacyBuiltins`, `migrateLessons` runs once (`Profile.lessons`): it backs up
 `profile.json`, `problems.json` and the game files it changes to `backup-<time>/`, gives finished

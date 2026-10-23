@@ -10,6 +10,7 @@ import { UserError } from "./common.ts";
 import { GameController } from "./game.ts";
 import { removeLegacyBuiltins } from "./generate.ts";
 import { KataGo } from "./katago.ts";
+import { practiceStatus } from "./lessons.ts";
 import { lessonsLogLine, migrateLessons } from "./migrate-lessons.ts";
 import { problemsResponse } from "./problems.ts";
 import { recommendFocus } from "./profile.ts";
@@ -153,7 +154,10 @@ export function createApp({ controller, bridge, store, distDir = join(REPO_ROOT,
     }
     if (path === "/api/problems" && method === "GET") {
       const generation = controller.generationStatus();
-      const body: ProblemsResponse = problemsResponse(store.loadProblems(), Date.now(), recommendFocus(controller.currentProfile), generation);
+      const problems = store.loadProblems();
+      const now = Date.now();
+      const profile = controller.currentProfile;
+      const body: ProblemsResponse = problemsResponse(problems, now, recommendFocus(profile), generation, practiceStatus(profile.practice, problems, now));
       return sendJson(res, 200, body);
     }
     if (path === "/api/generation" && method === "GET") return sendJson(res, 200, controller.generationStatus());

@@ -4,7 +4,7 @@
 import { gameBefore } from "../../src/engine/game.ts";
 import { GTP_COLUMNS, movePoint, samePoint } from "../../src/shared/coords.ts";
 import { ratingToRank } from "../../src/shared/rank.ts";
-import { categoryLabel, colorName, comeBackText, estimateRankText, plural, rankEstimateText } from "../../src/shared/text.ts";
+import { categoryLabel, colorName, comeBackText, estimateRankText, plural, practiceBreakText, rankEstimateText } from "../../src/shared/text.ts";
 import { sizeText, thresholdMultiplier, thresholdNum, thresholdText } from "../../src/shared/threshold.ts";
 import type {
   Board,
@@ -334,13 +334,15 @@ export function attemptsLeftText(p: ProblemView): string {
 /**
  * What the problem card says about the latest attempt, from KataGo's verdict: correct (and what
  * the board shows), wrong with tries left, or the answer once out of attempts. Null before any attempt.
- * Once the problem is over it also says when it comes back (spaced repetition), from `now`.
+ * Once the problem is over it also says when it comes back (spaced repetition), from `now`, and
+ * after a miss, when practice opens again if it is closed (`closedUntil`; not in a review, which goes on).
  */
-export function problemResult(p: ProblemView, now = Date.now()): { text: string; tone: "good" | "bad" } | null {
+export function problemResult(p: ProblemView, now = Date.now(), closedUntil?: number): { text: string; tone: "good" | "bad" } | null {
   const a = p.lastAttempt;
   if (!a) return null;
   const loss = a.pointLoss !== null ? ` loses about ${a.pointLoss.toFixed(1)} points` : " isn't it";
-  const again = p.revealed && p.nextDue !== undefined ? ` You'll see this one again ${comeBackText(p.nextDue, now)}.` : "";
+  const closed = p.revealed && !a.correct && closedUntil !== undefined && !p.review ? ` ${practiceBreakText(closedUntil)}` : "";
+  const again = (p.revealed && p.nextDue !== undefined ? ` You'll see this one again ${comeBackText(p.nextDue, now)}.` : "") + closed;
   if (a.correct) {
     const first = p.attempts === 1 ? " on the first try" : "";
     const also = p.answer && p.answer.move !== a.move ? ` KataGo's favorite is ${p.answer.move}, and yours is about as good.` : "";

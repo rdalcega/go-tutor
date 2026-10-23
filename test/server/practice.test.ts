@@ -3,7 +3,7 @@
 import { beforeEach, describe, expect, it } from "vitest";
 import type { TutorEventInput } from "../../src/server/common.ts";
 import { GameController } from "../../src/server/game.ts";
-import { LATER_SESSION_MS } from "../../src/server/lessons.ts";
+import { LATER_SESSION_MS, PRACTICE_PAUSE_MS, SESSION_GAP_MS } from "../../src/server/lessons.ts";
 import { playoutMove } from "../../src/server/practice.ts";
 import { BOX_INTERVALS, DEEP_VISITS, gameSource, problemGame } from "../../src/server/problems.ts";
 import type { Store } from "../../src/server/store.ts";
@@ -1125,5 +1125,156 @@ describe("playing a problem out", () => {
     expect(playoutMove({ moveInfos: [info("E5"), info("pass"), info("A9")] }, game)).toBe("pass");
     expect(playoutMove({ moveInfos: [info("E5")] }, game)).toBe("pass");
     expect(playoutMove({ moveInfos: [] }, game)).toBe("pass");
+  });
+});
+
+describe("the practice limit", () => {
+  const fromGame = (id: string, gameId: string, moveNumber: number) =>
+    liveProblem({ id, kind: "game", hash: id, source: { gameId, moveNumber, played: "D1" } });
+  beforeEach(() => {
+    setup();
+    seedProblems(store, [fromGame("p1", "g1", 5), fromGame("p2", "g2", 5), fromGame("p3", "g3", 5), fromGame("p4", "g4", 5)]);
+    engine.lossAfter(["D1"], 19);
+    engine.lossAfter(["F1"], 18);
+  });
+
+  /** Miss the problem on the board (both attempts wrong); returns its id. */
+  async function miss(): Promise<string> {
+    const id = ctl.view().problem!.id;
+    for (const gtp of ["D1", "F1"]) {
+      await ctl.handleAction({ type: "play", point: at(gtp) });
+      await flush();
+    }
+    return id;
+  }
+
+  /** Miss `n` practice problems in a row, a minute apart. */
+  async function missInPractice(n: number): Promise<string[]> {
+    const missed: string[] = [];
+    for (let i = 0; i < n; i++) {
+      if (i) clock.advance(60_000);
+      await ctl.handleAction({ type: "next_problem" });
+      missed.push(await miss());
+    }
+    return missed;
+  }
+
+  it("closes practice at the third miss for an hour, and then shows the missed ones first", async () => {
+    const missed = await missInPractice(3);
+    expect(new Set(missed).size).toBe(3);
+    const until = clock.now() + PRACTICE_PAUSE_MS;
+    // Only the third result closes practice, and the tutor hears it with the result.
+    expect(ofType("problem_attempt").filter((e) => e.revealed).map((e) => e.practiceClosedUntil)).toEqual([undefined, undefined, until]);
+    let v = ctl.view();
+    expect(v.practiceClosedUntil).toBe(until);
+    expect(v.allowed).not.toContain("next_problem");
+    expect(v.allowed).toEqual(expect.arrayContaining(["leave_problem", "playout_start"]));
+    expect(v.chat.at(-1)?.text).toMatch(/^That's 3 problems missed\. Practice is taking a break until .*The ones you missed come first/);
+    await expect(ctl.handleAction({ type: "next_problem" })).rejects.toThrow(/taking a break until/);
+    await expect(ctl.handleTutor({ type: "start_problem" })).rejects.toThrow(/taking a break until/);
+    expect(store.loadProfile().practice).toEqual({ misses: [], closedUntil: until, retry: missed });
+
+    // Back on the board Practice waits too; a problem by its id still starts, and a miss then doesn't count.
+    await ctl.handleAction({ type: "leave_problem" });
+    expect(ctl.view().allowed).not.toContain("next_problem");
+    await ctl.handleTutor({ type: "start_problem", problemId: "p4" });
+    await miss();
+    await ctl.handleAction({ type: "leave_problem" });
+    expect(store.loadProfile().practice?.misses).toEqual([]);
+
+    // The break survives a restart.
+    const restarted = new GameController({ engine, store, clock, botDelayMs: 0 });
+    expect(restarted.view().practiceClosedUntil).toBe(until);
+
+    // An hour later practice opens by itself, and the misses come back first, in order.
+    let changes = 0;
+    ctl.onChange(() => changes++);
+    clock.advance(until - clock.now() + 1000); // the timer fires a second after, in case it fires early
+    expect(changes).toBeGreaterThan(0);
+    v = ctl.view();
+    expect(v.practiceClosedUntil).toBeUndefined();
+    expect(v.allowed).toContain("next_problem");
+    for (const [i, id] of missed.entries()) {
+      await ctl.handleAction({ type: "next_problem" });
+      expect(ctl.view().problem?.id).toBe(id);
+      expect(store.loadProfile().practice?.retry ?? []).toEqual(missed.slice(i + 1));
+      await ctl.handleAction({ type: "play", point: at("E1") });
+      await flush();
+    }
+  });
+
+  it("closes practice on a third miss left by pressing Next problem, and goes back to playing", async () => {
+    await missInPractice(2);
+    await ctl.handleAction({ type: "next_problem" });
+    await ctl.handleAction({ type: "play", point: at("D1") });
+    await flush();
+    // No problem started, so the command fails (a tutor's chained say doesn't run).
+    await expect(ctl.handleAction({ type: "next_problem" })).rejects.toThrow(/taking a break until/);
+    const v = ctl.view();
+    expect(v.mode).toBe("idle");
+    expect(v.practiceClosedUntil).toBe(clock.now() + PRACTICE_PAUSE_MS);
+    expect(v.chat.at(-1)?.text).toMatch(/^That's 3 problems missed/);
+  });
+
+  it("counts a wrong first attempt KataGo was still checking when the learner moved on", async () => {
+    await ctl.handleAction({ type: "next_problem" });
+    const first = ctl.view().problem!.id;
+    engine.hold = true;
+    await ctl.handleAction({ type: "play", point: at("D1") });
+    await ctl.handleAction({ type: "next_problem" });
+    engine.releaseAll();
+    await flush();
+    expect(store.loadProfile().practice?.misses).toEqual([{ at: clock.now(), lesson: first }]);
+    expect(stored(first)).toMatchObject({ lastResult: "failed", box: 1 });
+    // A right one left that way keeps its schedule, as leaving before any attempt does.
+    const second = ctl.view().problem!.id;
+    engine.hold = true;
+    await ctl.handleAction({ type: "play", point: at("E1") });
+    await ctl.handleAction({ type: "leave_problem" });
+    engine.releaseAll();
+    await flush();
+    expect(stored(second).lastResult).toBeUndefined();
+    expect(store.loadProfile().practice?.misses).toHaveLength(1);
+  });
+
+  it("opens practice again even when the timer fires a little early", async () => {
+    await missInPractice(3);
+    const until = ctl.view().practiceClosedUntil!;
+    clock.earlyMs = 50;
+    let changes = 0;
+    ctl.onChange(() => changes++);
+    clock.advance(until - clock.now() + 1000); // the timer fires a second after, in case it fires early
+    expect(ctl.view().practiceClosedUntil).toBeUndefined();
+    expect(changes).toBeGreaterThan(0);
+  });
+
+  it("starts the count over after a long enough gap without practice", async () => {
+    await missInPractice(2);
+    await ctl.handleAction({ type: "leave_problem" });
+    clock.advance(SESSION_GAP_MS + 60_000);
+    await missInPractice(2);
+    expect(ctl.view().practiceClosedUntil).toBeUndefined();
+    expect(store.loadProfile().practice?.misses).toHaveLength(2);
+  });
+
+  it("doesn't count misses in a review of a game's mistakes, and lets a review go on while practice is closed", async () => {
+    const problems = store.loadProblems();
+    problems.push(fromGame("r1", "g7", 3), fromGame("r2", "g7", 9), fromGame("r3", "g7", 12));
+    store.saveProblems(problems);
+    await ctl.handleAction({ type: "review_game", gameId: "g7" });
+    for (let i = 0; i < 3; i++) {
+      await miss();
+      if (i < 2) await ctl.handleAction({ type: "next_problem" });
+    }
+    expect(ctl.view().practiceClosedUntil).toBeUndefined();
+    expect(store.loadProfile().practice).toBeUndefined();
+    await ctl.handleAction({ type: "next_problem" }); // the review ends
+
+    clock.advance(60_000);
+    await missInPractice(3);
+    await ctl.handleAction({ type: "review_game", gameId: "g7" });
+    expect(ctl.view().allowed).toContain("next_problem");
+    await ctl.handleAction({ type: "next_problem" });
+    expect(ctl.view().problem?.review).toMatchObject({ index: 2, total: 3 });
   });
 });
