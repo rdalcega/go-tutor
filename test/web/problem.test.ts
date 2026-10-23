@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { ProblemView } from "../../src/shared/types.ts";
-import { categoryLabel } from "../../src/shared/text.ts";
+import { categoryLabel, clockTime, practiceBreakText } from "../../src/shared/text.ts";
 import { attemptsLeftText, forwardTitle, generationFact, lessonLine, nextProblemLabel, playoutText, problemHeading, problemResult, recentMoveLabels } from "../../web/src/geometry.ts";
 
 const base: ProblemView = {
@@ -93,6 +93,18 @@ describe("problem card helpers", () => {
     expect(
       problemResult({ ...base, attempts: 2, solved: true, revealed: true, lastAttempt: { move: "E5", correct: true, pointLoss: null }, answer: { move: "D5", pv: [] } })!.text,
     ).toBe("Correct: E5. KataGo's favorite is D5, and yours is about as good. The numbered stones show how play goes on.");
+  });
+
+  it("says when practice opens again after the miss that closed it, except in a review", () => {
+    const until = Date.UTC(2026, 9, 22, 15, 40);
+    const failed: ProblemView = { ...base, attempts: 2, revealed: true, lastAttempt: { move: "C7", correct: false, pointLoss: 5 }, answer: { move: "D5", pv: ["D5"] } };
+    expect(practiceBreakText(until)).toMatch(new RegExp(`^Practice is taking a break until ${clockTime(until)}: .*The ones you missed come first`));
+    expect(problemResult(failed, until - 1, until)!.text).toContain(` ${practiceBreakText(until)}`);
+    expect(problemResult({ ...failed, review: { gameId: "g1", index: 1, total: 2 } }, until - 1, until)!.text).not.toContain("break");
+    expect(problemResult({ ...failed, revealed: false }, until - 1, until)!.text).not.toContain("break");
+    // A problem solved during the break (started by its id) isn't what closed it.
+    const solved = { ...failed, solved: true, lastAttempt: { move: "D5", correct: true, pointLoss: 0 } };
+    expect(problemResult(solved, until - 1, until)!.text).not.toContain("break");
   });
 
   it("says when a finished problem comes back", () => {

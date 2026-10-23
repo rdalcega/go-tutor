@@ -35,6 +35,14 @@ describe("allowedActions", () => {
     expect(allowedActions(game({ reviewProblems: 2 }))).not.toContain("review_game");
   });
 
+  it("holds back Practice and Next problem while practice is closed, but not a review's Next", () => {
+    const without = ALWAYS.filter((a) => a !== "next_problem");
+    expect(allowedActions(game({ mode: "idle", humanColor: null, practiceClosed: true }))).toEqual(without);
+    const answered = { mode: "problem" as const, problem: { revealed: true, checking: false }, practiceClosed: true };
+    expect(allowedActions(game(answered))).toEqual([...without, "leave_problem", "playout_start"]);
+    expect(allowedActions(game({ ...answered, inReview: true }))).toEqual([...ALWAYS, "leave_problem", "playout_start"]);
+  });
+
   it("lets the learner play on their turn with KataGo ready", () => {
     expect(allowedActions(game())).toEqual([...ALWAYS, "resign", "play", "pass", "ask_tutor"]);
     // The bot's turn: no play, and no hint either.

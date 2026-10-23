@@ -2,12 +2,12 @@
 // new mistake with the same answer. Such a run of a game's mistakes is one oversight, so one lesson:
 // it counts once in the profile, takes one category, and its practice problems are variants that
 // share one schedule. Also the practice picker, which picks lessons (not problems) and keeps a set
-// varied. Pure functions over boards, summaries and StoredProblem; the controller (game.ts) calls them.
+// varied, and the limit that closes practice for a while after too many misses. Pure functions over boards, summaries and StoredProblem; the controller (game.ts) calls them.
 
 import { gameBefore, gameFromLine } from "../engine/index.ts";
 import { movePoint, tryFromGtp } from "../shared/coords.ts";
-import { schedule, type ProblemResult } from "../shared/schedule.ts";
-import type { Board, GameSettings, GameSummary, Gtp, LessonInfo, MistakeCategory, MistakeRef, MistakeRun, MoveRecord, TakenBackMove } from "../shared/types.ts";
+import { PRACTICE_MISS_LIMIT, PRACTICE_PAUSE_MS, schedule, type ProblemResult } from "../shared/schedule.ts";
+import type { Board, GameSettings, GameSummary, Gtp, LessonInfo, MistakeCategory, MistakeRef, MistakeRun, MoveRecord, PracticeLimit, PracticeStatus, TakenBackMove } from "../shared/types.ts";
 import { acceptedAnswers, compareRank, gameSource, problemBoard, rank, recategorize, type StoredProblem } from "./problems.ts";
 
 type SummaryMistake = GameSummary["mistakes"][number];
@@ -323,7 +323,8 @@ function units(problems: readonly StoredProblem[]): Unit[] {
 }
 
 /**
- * The problem next_problem shows. Lessons, not problems, are picked: due ones in selection order
+ * The problem next_problem shows. Lessons, not problems, are picked: first the `retry` lessons (those
+ * missed before practice last closed) that are due, in order; then due ones in selection order
  * (problems.ts `rank`, of the lesson's first variant), keeping the set varied while anything else is due: not the lesson or the game of the
  * problem just shown, and the focus category at most about half of the set. When nothing is due,
  * the lesson due soonest (an early review), so practice never dead-ends. Then the lesson's variant
@@ -331,7 +332,7 @@ function units(problems: readonly StoredProblem[]): Unit[] {
  */
 export function pickNextProblem(
   problems: readonly StoredProblem[],
-  opts: { now: number; focus?: MistakeCategory; set?: readonly SetEntry[] },
+  opts: { now: number; focus?: MistakeCategory; set?: readonly SetEntry[]; retry?: readonly string[] },
 ): { problem: StoredProblem; early: boolean } | null {
   const set = opts.set ?? [];
   const last = set[set.length - 1];
@@ -343,7 +344,10 @@ export function pickNextProblem(
   const focusShown = set.filter((e) => e.category === opts.focus).length;
   // Showing it keeps the focus category at no more than half of the set.
   const focusRoom = (u: Unit) => u.head.category !== opts.focus || focusShown * 2 < set.length + 1;
+  const retried = (opts.retry ?? []).flatMap((key) => due.filter((u) => u.key === key && otherLesson(u)));
   const unit =
+    retried.find(otherGame) ??
+    retried[0] ??
     due.find((u) => otherLesson(u) && otherGame(u) && focusRoom(u)) ??
     due.find((u) => otherLesson(u) && otherGame(u)) ??
     due.find(otherLesson) ??
@@ -353,4 +357,66 @@ export function pickNextProblem(
   if (!unit) return null;
   const problem = pickVariant(unit.variants, last?.id)!;
   return { problem, early: unit.head.due > opts.now };
+}
+
+// ---------------------------------------------------------------------------
+// The practice limit
+// ---------------------------------------------------------------------------
+
+export { PRACTICE_MISS_LIMIT, PRACTICE_PAUSE_MS };
+
+/** Practice is closed at `now`. */
+export function practiceClosed(limit: PracticeLimit | undefined, now: number): boolean {
+  return limit?.closedUntil !== undefined && now < limit.closedUntil;
+}
+
+/**
+ * The misses that count at `now`: those since practice last closed, in the practice session going
+ * on (sessionStart: a long enough gap without problems starts over). None while practice is closed.
+ */
+export function countedMisses(limit: PracticeLimit | undefined, problems: readonly StoredProblem[], now: number): PracticeLimit["misses"] {
+  if (!limit || practiceClosed(limit, now)) return [];
+  const misses = Array.isArray(limit.misses) ? limit.misses : [];
+  // The misses themselves are practice too: they keep the session going.
+  const start = sessionStart([...problems, { missedAt: misses.map((m) => m.at) }], now);
+  const since = Math.max(start, limit.closedUntil ?? -Infinity);
+  return misses.filter((m) => m.at >= since && m.at <= now);
+}
+
+/**
+ * A practice problem of `lesson` was missed at `now` (`problems`: as stored with the miss). It counts
+ * toward the limit, and the PRACTICE_MISS_LIMIT-th miss of the session closes practice for
+ * PRACTICE_PAUSE_MS, with the lessons missed first in line once it opens. A miss while practice is
+ * closed doesn't count. Returns the new limit, and whether this miss closed practice.
+ */
+export function recordPracticeMiss(
+  limit: PracticeLimit | undefined,
+  lesson: string,
+  problems: readonly StoredProblem[],
+  now: number,
+): { limit: PracticeLimit; closed: boolean } {
+  const current: PracticeLimit = limit ?? { misses: [] };
+  if (practiceClosed(current, now)) return { limit: current, closed: false };
+  const misses = [...countedMisses(current, problems, now), { at: now, lesson }];
+  if (misses.length < PRACTICE_MISS_LIMIT) return { limit: { ...current, misses }, closed: false };
+  const retry = [...new Set([...misses.map((m) => m.lesson), ...(current.retry ?? [])])];
+  return { limit: { misses: [], closedUntil: now + PRACTICE_PAUSE_MS, retry }, closed: true };
+}
+
+/** A problem of `lesson` was shown: it leaves the lessons to show first. */
+export function retryShown(limit: PracticeLimit | undefined, lesson: string): PracticeLimit | undefined {
+  if (!limit?.retry?.includes(lesson)) return limit;
+  const retry = limit.retry.filter((k) => k !== lesson);
+  const { retry: _, ...rest } = limit;
+  return retry.length ? { ...rest, retry } : rest;
+}
+
+/** What `summary` shows of the limit at `now`. */
+export function practiceStatus(limit: PracticeLimit | undefined, problems: readonly StoredProblem[], now: number): PracticeStatus {
+  return {
+    misses: countedMisses(limit, problems, now).length,
+    limit: PRACTICE_MISS_LIMIT,
+    ...(practiceClosed(limit, now) && { closedUntil: limit!.closedUntil! }),
+    retry: (limit?.retry ?? []).filter((key) => problems.some((p) => lessonKey(p) === key)),
+  };
 }

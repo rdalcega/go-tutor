@@ -13,12 +13,14 @@ import {
   formatState,
   generationLines,
   num,
+  practiceLines,
   problemLines,
   resultText,
   reviewThreshold,
   statusLine,
   winrateSwings,
 } from "../../src/cli/format.ts";
+import { clockTime } from "../../src/shared/text.ts";
 import { thresholdText } from "../../src/shared/threshold.ts";
 import type {
   Board,
@@ -285,6 +287,11 @@ describe("formatEvent", () => {
     );
     expect(formatEvent({ ...attempt, attempt: 2, revealed: true }, ctx)).toBe(
       "PROBLEM p4 attempt 2 C7 wrong, lost 5.2 (life_and_death; out of attempts, answer shown) — best D5, pv D5 E4 C6 — explain it; show the refutation of C7",
+    );
+    const until = Date.UTC(2026, 9, 22, 15, 40);
+    expect(formatEvent({ ...attempt, attempt: 2, revealed: true, practiceClosedUntil: until }, ctx)).toBe(
+      "PROBLEM p4 attempt 2 C7 wrong, lost 5.2 (life_and_death; out of attempts, answer shown) — best D5, pv D5 E4 C6 — explain it; show the refutation of C7" +
+        ` — that miss closed practice until ${clockTime(until)} (too many misses this session): don't offer another problem; suggest a game`,
     );
     expect(formatEvent({ ...attempt, move: "D5", correct: true, firstTry: true, pointLoss: 0, revealed: true }, ctx)).toBe(
       "PROBLEM p4 attempt 1 D5 correct, first try (life_and_death) — best D5, pv D5 E4 C6 — say why it works",
@@ -604,6 +611,17 @@ describe("summary and review", () => {
     );
     expect(formatProblems(problemsBody([item({ due: NOW + 60_000, isDue: false })]), NOW)).toContain('nothing is due; "problem" still starts the one due soonest');
     expect(formatProblems(problemsBody([]), NOW)).toContain("nothing is due\n".trim());
+  });
+
+  it("adds the practice limit to the summary: the misses so far, or the break and what comes first after it", () => {
+    const until = NOW + 42 * 60_000;
+    expect(practiceLines({ misses: 0, limit: 3, retry: [] }, NOW)).toEqual([]);
+    expect(practiceLines({ misses: 2, limit: 3, retry: [] }, NOW)).toEqual(["practice: 2 of 3 misses this session (practice closes for 60 minutes at 3)"]);
+    expect(practiceLines({ misses: 0, limit: 3, closedUntil: until, retry: ["p3", "p9"] }, NOW)).toEqual([
+      `practice closed until ${clockTime(until)} (in 42m): the learner missed 3 problems; "problem" is refused until then (problem <id> and reviews still work), so suggest a game; first once due: p3, p9 (missed before the break)`,
+    ]);
+    const body = { ...problemsBody([item({})]), practice: { misses: 1, limit: 3, retry: [] } };
+    expect(formatProblems(body, NOW).split("\n")[1]).toBe("practice: 1 of 3 misses this session (practice closes for 60 minutes at 3)");
   });
 
   it("adds problem generation to the summary: the batch in progress, or how close the next one is", () => {

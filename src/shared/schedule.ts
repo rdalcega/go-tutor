@@ -10,6 +10,11 @@ const DAY = 24 * 60 * MINUTE;
  */
 export const BOX_INTERVALS: readonly number[] = [0, 10 * MINUTE, DAY, 3 * DAY, 7 * DAY, 21 * DAY];
 
+/** Practice problems missed in one session before practice closes (the limit: src/server/lessons.ts). */
+export const PRACTICE_MISS_LIMIT = 3;
+/** How long practice stays closed after PRACTICE_MISS_LIMIT misses. */
+export const PRACTICE_PAUSE_MS = 60 * MINUTE;
+
 export type ProblemResult = "first_try" | "solved" | "failed";
 
 export function resultOf(solved: boolean, attempts: number): ProblemResult {

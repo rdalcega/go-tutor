@@ -22,8 +22,8 @@ import type {
 import type { ConnectionState, Transport } from "./api.ts";
 import { allowedActions } from "../../src/shared/allowed.ts";
 import { fromGtp, moveGtp, toGtp, tryFromGtp } from "../../src/shared/coords.ts";
-import { BOX_INTERVALS, nextBox, resultOf } from "../../src/shared/schedule.ts";
-import { colorName, judgeModeChangedText, round1, tutorLevelChangedText } from "../../src/shared/text.ts";
+import { BOX_INTERVALS, PRACTICE_MISS_LIMIT, PRACTICE_PAUSE_MS, nextBox, resultOf } from "../../src/shared/schedule.ts";
+import { colorName, judgeModeChangedText, practiceBreakText, round1, tutorLevelChangedText } from "../../src/shared/text.ts";
 import { atLevelOf, judgedLoss } from "../../src/shared/judge.ts";
 import { thresholdFor } from "../../src/shared/threshold.ts";
 
@@ -182,6 +182,9 @@ class MockServer implements Transport {
   } | null = null;
   /** The answer's line as drawn at the reveal (kept even if the learner hides the drawing): a play-out starts with it ahead. */
   private answerLine: string[] = [];
+  /** Problems missed in practice (not in a review), and when practice opens again after three (as the server's limit, src/server/lessons.ts). */
+  private practiceMisses = 0;
+  private practiceClosedUntil: number | null = null;
 
   constructor() {
     this.view = this.sampleView();
@@ -263,6 +266,9 @@ class MockServer implements Transport {
     } else if (v.problem) {
       delete v.problem.playout;
     }
+    if (this.practiceClosedUntil !== null && Date.now() >= this.practiceClosedUntil) this.practiceClosedUntil = null;
+    if (this.practiceClosedUntil !== null) v.practiceClosedUntil = this.practiceClosedUntil;
+    else delete v.practiceClosedUntil;
     v.allowed = this.allowed();
     return structuredClone(v);
   }
@@ -296,6 +302,7 @@ class MockServer implements Transport {
       overlay: v.overlay !== null,
       reviewProblems: v.reviewProblems ?? 0,
       inReview: this.review !== null,
+      practiceClosed: this.practiceClosedUntil !== null && Date.now() < this.practiceClosedUntil,
     });
   }
 
@@ -420,6 +427,7 @@ class MockServer implements Transport {
           return null;
         }
         if (this.review) this.review.index++;
+        else if (this.practiceClosedUntil !== null && Date.now() < this.practiceClosedUntil) return practiceBreakText(this.practiceClosedUntil);
         this.startProblem();
         return null;
       case "review_game":
@@ -689,6 +697,11 @@ class MockServer implements Transport {
       p.box = nextBox(p.box, resultOf(correct, p.attempts));
       p.nextDue = Date.now() + BOX_INTERVALS[p.box]!;
       v.status = "finished";
+      if (!correct && !this.review && ++this.practiceMisses >= PRACTICE_MISS_LIMIT) {
+        this.practiceMisses = 0;
+        this.practiceClosedUntil = Date.now() + PRACTICE_PAUSE_MS;
+        this.msg("system", `That's ${PRACTICE_MISS_LIMIT} problems missed. ${practiceBreakText(this.practiceClosedUntil)}`);
+      }
       const shown = fromGtp(correct ? gtp : answer, size)!;
       this.answerLine = [toGtp(shown, size)];
       v.overlay = {

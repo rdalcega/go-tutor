@@ -79,8 +79,13 @@ export interface PracticeDeps {
   busyWhile<T>(p: Promise<T>): Promise<T>;
   /** KataGo found a new move as good as the answers: keep it with the problem. */
   addAnswer(problemId: string, move: Gtp): void;
-  /** The problem is over: schedule it and count it in the profile. Returns the problem as stored now. */
-  recordResult(problem: StoredProblem, solved: boolean, attempts: number): StoredProblem | undefined;
+  /**
+   * The problem is over: schedule it and count it in the profile, and a miss outside a review toward
+   * the practice limit. Returns the problem as stored now.
+   */
+  recordResult(problem: StoredProblem, solved: boolean, attempts: number, inReview: boolean): StoredProblem | undefined;
+  /** When practice opens again, while it is closed after too many misses. */
+  practiceClosedUntil(): number | undefined;
 }
 
 /** The practice problem on the board. The problem's stored progress is the controller's to write. */
@@ -196,7 +201,7 @@ export class PracticeSession {
     this.playout = null;
     // Unrevealed means unsolved, so any judged attempt was wrong.
     if (this.revealed || !this.lastAttempt) return undefined;
-    return this.deps.recordResult(this.problem, false, this.attempts);
+    return this.deps.recordResult(this.problem, false, this.attempts, this.review !== undefined);
   }
 
   /** A tag changed what the mistake behind this problem was about: this showing counts for the new category. */
@@ -559,13 +564,17 @@ export class PracticeSession {
     } catch (err) {
       failure = err as Error;
     }
+    const problem = this.problem;
+    const known = problem.answers.includes(move);
     if (this.closed) {
+      // Left while KataGo checked the first attempt: a wrong one counts, as leaving after a wrong
+      // attempt does (close() recorded nothing yet). A later attempt's leaving was already recorded.
+      const wrong = !known && before && after && moveEvalFrom(before, after, move).pointLoss > ANSWER_MARGIN;
+      if (wrong && !this.lastAttempt) this.deps.recordResult(problem, false, this.attempts, this.review !== undefined);
       this.deps.changed();
       return;
     }
     this.checking = false;
-    const problem = this.problem;
-    const known = problem.answers.includes(move);
     if (!known && (!before || !after)) {
       this.attempts--; // KataGo's failure doesn't cost the learner an attempt
       this.deps.system(`KataGo couldn't check ${move} (${failure?.message ?? "no answer"}). Try the move again.`);
@@ -616,6 +625,14 @@ export class PracticeSession {
       };
       this.deps.system(`${move} loses about ${loss} points. The answer is ${bestMove}; the board shows KataGo's line (your move is marked ✕).`);
     }
+    // Recorded first: the tutor hears whether this result closed practice.
+    let closedUntil: number | undefined;
+    if (this.revealed) {
+      const wasClosed = this.deps.practiceClosedUntil() !== undefined;
+      this.nextDue = this.deps.recordResult(problem, this.solved, this.attempts, this.review !== undefined)?.due;
+      if (!wasClosed && !this.review) closedUntil = this.deps.practiceClosedUntil();
+      this.tutorOwed = true; // the tutor answers the result, even once the learner is playing it out
+    }
     this.deps.emit({
       type: "problem_attempt",
       problemId: problem.id,
@@ -628,11 +645,8 @@ export class PracticeSession {
       revealed: this.revealed,
       bestMove,
       bestPv: bestPv.slice(0, 8),
+      ...(closedUntil !== undefined && { practiceClosedUntil: closedUntil }),
     });
-    if (this.revealed) {
-      this.nextDue = this.deps.recordResult(problem, this.solved, this.attempts)?.due;
-      this.tutorOwed = true; // the tutor answers the result, even once the learner is playing it out
-    }
     this.deps.changed();
   }
 

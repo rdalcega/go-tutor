@@ -1,5 +1,6 @@
 // Small wording helpers shared by the server, the tutor CLI and the browser.
 
+import { PRACTICE_MISS_LIMIT } from "./schedule.ts";
 import { ratingToRank } from "./rank.ts";
 import type { AssistCounts, Color, GameResult, JudgeMode, LessonInfo, MistakeCategory, MistakeRun, RankEstimate, TutorLevel } from "./types.ts";
 
@@ -162,4 +163,20 @@ export function comeBackText(due: number, now: number): string {
   if (days <= 1) return "tomorrow";
   if (days < 14) return `in ${days} days`;
   return `in ${Math.round(days / 7)} weeks`;
+}
+
+/**
+ * Why practice waits while it is closed after too many misses (`until`: when it opens), for the
+ * learner's chat, the Practice button and the refusal of a picked problem.
+ */
+export function practiceBreakText(until: number): string {
+  return (
+    `Practice is taking a break until ${clockTime(until)}: ${PRACTICE_MISS_LIMIT} problems missed is enough for one go, ` +
+    `and more of the same wouldn't stick. The ones you missed come first when it opens.`
+  );
+}
+
+/** "15:40": a time of day, in the local time zone. */
+export function clockTime(ms: number): string {
+  return new Date(ms).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
 }

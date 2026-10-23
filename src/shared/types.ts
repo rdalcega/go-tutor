@@ -265,6 +265,11 @@ export interface GameView {
   /** Problem generation: the batch in progress and the newest finished one. */
   generation?: GenerationStatus;
   /**
+   * Practice is closed until then (ms epoch): the learner missed PRACTICE_MISS_LIMIT problems in it.
+   * Absent while practice is open. Reviews of a game's mistakes aren't affected.
+   */
+  practiceClosedUntil?: number;
+  /**
    * Tutor only (GET /api/state?tutor=1, what `tutor state` and `watch` fetch; never in the
    * learner's view): KataGo's analysis of the position the learner is to play in a game.
    */
@@ -577,6 +582,8 @@ export type TutorEvent =
       revealed: boolean;
       bestMove: Gtp;
       bestPv: Gtp[];
+      /** This result left practice closed until then (ms epoch): the learner has missed enough problems for now. */
+      practiceClosedUntil?: number;
     };
 
 export interface GameSummary {
@@ -743,6 +750,33 @@ export interface Profile {
   tutorLevel: TutorLevel;
   /** How the learner's moves are judged (default "optimal"). */
   judgeMode: JudgeMode;
+  /** The limit on practice: misses so far, and the break it takes after too many. Absent until a practice problem is missed. */
+  practice?: PracticeLimit;
+}
+
+/**
+ * Practice stops after PRACTICE_MISS_LIMIT missed problems (src/server/lessons.ts) and stays closed
+ * for PRACTICE_PAUSE_MS; when it opens again the missed lessons come first. Reviews of a game's
+ * mistakes neither count nor close.
+ */
+export interface PracticeLimit {
+  /** Practice problems missed since practice last closed, oldest first: when, and the lesson (its key). */
+  misses: { at: number; lesson: string }[];
+  /** Practice is closed until then (ms epoch). */
+  closedUntil?: number;
+  /** Lessons missed before practice last closed, which practice shows first once they are due; each leaves the list when it is shown. */
+  retry?: string[];
+}
+
+/** What `summary` and GET /api/problems show of the practice limit. */
+export interface PracticeStatus {
+  /** Problems missed in this practice session, of `limit`. */
+  misses: number;
+  limit: number;
+  /** Present while practice is closed. */
+  closedUntil?: number;
+  /** Lessons practice shows first once they are due. */
+  retry: string[];
 }
 
 /** What to teach next (`recommendFocus` in src/server/profile.ts). */
@@ -808,6 +842,8 @@ export interface ProblemsResponse {
   focus: FocusRecommendation;
   /** Problem generation: the batch in progress and the newest finished one. */
   generation?: GenerationStatus;
+  /** The practice limit: misses so far, and whether practice is closed. */
+  practice?: PracticeStatus;
 }
 
 /**

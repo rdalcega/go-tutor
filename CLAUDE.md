@@ -49,6 +49,10 @@ Setup takes few calls when the independent ones go out together (several tool ca
    - Practice picks lessons, not problems, and keeps a set varied by itself: no two problems from the
      same game or lesson in a row while something else is due, the focus category at most about half
      of a set, and a lesson missed twice in one session waits until the next day.
+   - Practice also stops by itself: the third problem missed in a session closes it for an hour (the
+     learner is told, and the Practice button waits). `summary` then says `practice closed until …`,
+     and `problem` (no id) is refused; `problem <id>` and reviews still work, and a review's misses
+     don't count. When practice opens again, the lessons missed before the break come first.
    - Tell the learner the plan in one or two sentences with `say`, connecting it to their recent games
      ("Your last two games lost groups that had only one eye; this game, check your groups' eyes
      before attacking"). Then `npm run -s tutor -- new-game`, or `problem` for the next due problem
@@ -213,7 +217,9 @@ open point as moves 57 to 69"): the idea is the point that stayed biggest, not o
 - **wrong, out of attempts, answer shown**: KataGo's answer is on the board. Explain the idea, then
   show why their move fails: `show <their move> <the refutation>` draws the line from the problem
   position (the learner's color first), with the `say` in the same call. Keep it to the one idea
-  the problem teaches.
+  the problem teaches. When the line ends with `that miss closed practice until …`, the learner's
+  chat already says practice is taking a break: after the explanation, suggest a game (a word of
+  encouragement fits), not another problem.
 - **Playing it out**: once a problem is answered the learner may press Play it out and keep playing
   from it against full-strength KataGo, stepping back and forward. Nothing there is judged or
   recorded and none of it reaches you; stay out of it: `say` only answers a USER line ending

@@ -197,7 +197,9 @@ COMMANDS
       no id, the next due lesson: the recommended focus category first, then problems from the learner's
       own mistakes, then generated ones, keeping a set varied (no two from the same game or lesson in a
       row while something else is due, the focus at most about half of the set); a lesson (a run of
-      mistakes that missed one point) shows its least recently seen variant. The learner gets 2 attempts; KataGo judges each move
+      mistakes that missed one point) shows its least recently seen variant. After 3 problems missed in a
+      session practice closes for an hour (summary shows it) and "problem" without an id is refused;
+      once it opens, the lessons missed before the break come first. The learner gets 2 attempts; KataGo judges each move
       (within 1 point of its best counts as correct) and shows its line when the problem is over.
       In problem mode, show and mark draw on the problem position (show starts with the learner's
       color); the learner presses Next problem or Back to playing, or you run new-game.

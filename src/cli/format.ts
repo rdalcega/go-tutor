@@ -6,8 +6,9 @@ import { gameBefore, gameFromLine } from "../engine/game.ts";
 import { moveGtp, movePoint, toGtp } from "../shared/coords.ts";
 import { atLevelOf } from "../shared/judge.ts";
 import { ratingToRank } from "../shared/rank.ts";
+import { PRACTICE_PAUSE_MS } from "../shared/schedule.ts";
 import { playedThreshold, sizeText, thresholdNum, thresholdText } from "../shared/threshold.ts";
-import { JUDGE_MODE_TEXT, TUTOR_LEVEL_TEXT, assistText, estimateRankText, lessonText, mistakeRunText, plural, rankEstimateText, round1, secondsUntil, takenBackTry, takenBackTryText } from "../shared/text.ts";
+import { JUDGE_MODE_TEXT, TUTOR_LEVEL_TEXT, assistText, clockTime, estimateRankText, lessonText, mistakeRunText, plural, rankEstimateText, round1, secondsUntil, takenBackTry, takenBackTryText } from "../shared/text.ts";
 import type {
   ChatMessage,
   Color,
@@ -27,6 +28,7 @@ import type {
   MoveEval,
   MoveRecord,
   Overlay,
+  PracticeStatus,
   ProblemListItem,
   ProblemReview,
   ProblemsResponse,
@@ -264,7 +266,11 @@ function formatKnownEvent(e: TutorEvent, ctx: EventContext): string {
       const line = `best ${e.bestMove}, pv ${pv(e.bestPv)}`;
       if (e.correct) return `${head} correct${e.firstTry ? ", first try" : ""} (${e.category}) — ${line} — say why it works`;
       if (!e.revealed) return `${head} wrong${loss} (${e.category}; another attempt left) — ask what they see, don't give the answer (${line})`;
-      return `${head} wrong${loss} (${e.category}; out of attempts, answer shown) — ${line} — explain it; show the refutation of ${e.move}`;
+      const closed =
+        e.practiceClosedUntil !== undefined
+          ? ` — that miss closed practice until ${clockTime(e.practiceClosedUntil)} (too many misses this session): don't offer another problem; suggest a game`
+          : "";
+      return `${head} wrong${loss} (${e.category}; out of attempts, answer shown) — ${line} — explain it; show the refutation of ${e.move}${closed}`;
     }
     default:
       return rawEvent(e);
@@ -615,9 +621,27 @@ export function formatProblems(r: ProblemsResponse, now = Date.now(), show = 5):
     `practice problems: ${c.total} (${c.fromGames} from the learner's games, ${c.generated} generated), ` +
     `${c.due} due now${dueCats.length ? ` (${dueCats.join(", ")})` : ""}; boxes ${c.byBox.map((n, i) => `${i + 1}:${n}`).join(" ")}`;
   const generation = r.generation ? generationLines(r.generation) : [];
+  const limit = r.practice ? practiceLines(r.practice, now) : [];
+  const closed = r.practice?.closedUntil !== undefined;
   const due = r.problems.filter((p) => p.isDue).slice(0, show);
-  if (due.length === 0) return [head, ...generation, `nothing is due${c.total ? `; "problem" still starts the one due soonest` : ""}`].join("\n");
-  return [head, ...generation, `next due (the first is what "problem" starts):`, ...due.map((p) => `  ${problemItemText(p, now, false)}`)].join("\n");
+  if (due.length === 0) {
+    const soonest = c.total && !closed ? `; "problem" still starts the one due soonest` : "";
+    return [head, ...generation, ...limit, `nothing is due${soonest}`].join("\n");
+  }
+  const first = closed ? `once practice opens, the first is what "problem" starts` : `the first is what "problem" starts`;
+  return [head, ...generation, ...limit, `next due (${first}):`, ...due.map((p) => `  ${problemItemText(p, now, false)}`)].join("\n");
+}
+
+/** The practice limit in `summary`: closed until when, or the misses so far, and the lessons that go first. */
+export function practiceLines(p: PracticeStatus, now: number): string[] {
+  const retry = p.retry.length ? `; first once due: ${p.retry.join(", ")} (missed before the break)` : "";
+  if (p.closedUntil !== undefined) {
+    return [
+      `practice closed until ${clockTime(p.closedUntil)} (${dueText(p.closedUntil, now)}): the learner missed ${p.limit} problems; "problem" is refused until then (problem <id> and reviews still work), so suggest a game${retry}`,
+    ];
+  }
+  if (p.misses === 0 && !retry) return [];
+  return [`practice: ${p.misses} of ${p.limit} misses this session (practice closes for ${Math.round(PRACTICE_PAUSE_MS / 60_000)} minutes at ${p.limit})${retry}`];
 }
 
 /** "[lesson p23 2/5: A2, moves 57-69]": a problem that is one variant of a lesson (its variants share one schedule). */
