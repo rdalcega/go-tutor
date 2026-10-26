@@ -1,6 +1,7 @@
-// Which side-panel cards the learner folded to their header, kept per card in localStorage.
-// Storage can be missing or throw (private windows, blocked site data): then cards start open
-// and folding still works for the page's lifetime.
+// Which side-panel cards the learner folded to their header, kept per card in localStorage, and
+// whether the whole panel is hidden (id "panels"). Storage can be missing or throw (private
+// windows, blocked site data): then everything starts open and folding still works for the
+// page's lifetime.
 
 const KEY_PREFIX = "go-tutor:collapsed:";
 

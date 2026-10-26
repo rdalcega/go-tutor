@@ -746,7 +746,14 @@ aria-expanded>` that folds the card to its header line (the turn, the last move'
 the tutor level stay visible there), remembered per card in localStorage (`web/src/collapse.ts`; any
 storage failure just means cards start open). The teaching-moment banner and the problem card are not
 collapsible, so a decision is never hidden. The chat card fills the rest of the panel's height (its
-input always visible), so folding cards gives it room. The controls card has a segmented control
+input always visible), so folding cards gives it room. "Hide panels" in the panel's header (or F)
+hides the whole panel: the board takes the width, and a rail keeps "Show panels", the turn line and
+the reconnecting badge, with a count of the tutor's and server's messages since (remembered in the
+same store, id `panels`). The panel comes back by itself while something in it needs the learner
+(`panelAttention` in `web/src/geometry.ts`: an open moment, a problem; its key changes with a new
+moment, the tutor waiting for Continue, an attempt's verdict, a play-out that ended), without
+changing their choice: hiding over one dismisses it until the key changes, and once nothing needs
+the panel it hides again. The controls card has a segmented control
 (radio buttons) for the tutor level, "Silent", "Point out", "Coach", with the selected level's
 description below it (and each one's in its tooltip), and a second one, "Judge my moves", for the
 judge mode, "Optimal" or "At level" (the description names the game's reference rank). Judged at

@@ -13,7 +13,7 @@ import {
 } from "../../src/shared/types.ts";
 import { atLevelOf, judgedLoss } from "../../src/shared/judge.ts";
 import { ratingToRank } from "../../src/shared/rank.ts";
-import { JUDGE_MODE_TEXT, TUTOR_LEVEL_TEXT, categoryLabel, colorName, formatScore, practiceBreakText, rankEstimateText, secondsUntil } from "../../src/shared/text.ts";
+import { JUDGE_MODE_TEXT, TUTOR_LEVEL_TEXT, categoryLabel, colorName, formatScore, plural, practiceBreakText, rankEstimateText, secondsUntil } from "../../src/shared/text.ts";
 import { type ConnectionState, type Transport, httpTransport } from "./api.ts";
 import { BoardView } from "./board.ts";
 import { readCollapsed, writeCollapsed } from "./collapse.ts";
@@ -42,6 +42,8 @@ import {
   sparklinePoints,
   thresholdFact,
   topCategories,
+  panelAttention,
+  unreadCount,
 } from "./geometry.ts";
 import { thresholdFor } from "../../src/shared/threshold.ts";
 
@@ -57,6 +59,14 @@ const $ = <T extends Element = HTMLElement>(id: string): T => {
 };
 
 const el = {
+  app: $("app"),
+  panel: $("panel"),
+  rail: $("rail"),
+  hidePanels: $<HTMLButtonElement>("hide-panels"),
+  showPanels: $<HTMLButtonElement>("show-panels"),
+  unread: $("unread"),
+  railTurn: $("rail-turn"),
+  railConn: $("rail-conn"),
   boardWrap: $("board-wrap"),
   canvas: $<HTMLCanvasElement>("board"),
   passBanner: $("pass-banner"),
@@ -148,6 +158,13 @@ let profileRequested: number | null = null;
 /** The board before a variation's `fromMove`, for the game and move count it was built from. */
 let beforeCache: { key: string; value: ReturnType<typeof positionBefore> } | null = null;
 
+/** The learner's choice to hide the side panel (remembered), and what needed the panel when they hid it (`panelAttention`). */
+let panelsPreferHidden = readCollapsed("panels");
+let dismissedAttention: string | null = null;
+/** Whether the panel is hidden right now, and the newest chat message when it was hidden (undefined: take it from the first view). */
+let panelsHidden = false;
+let seenChatId: string | null | undefined;
+
 let transport: Transport = httpTransport;
 
 const board = new BoardView(el.canvas, el.boardWrap);
@@ -219,6 +236,7 @@ function can(v: GameView | null, action: ClientAction["type"]): v is GameView {
 
 function render(): void {
   const v = view;
+  applyPanels();
   renderBoard(v);
   renderPassBanner(v);
   renderStatus(v);
@@ -363,7 +381,7 @@ function renderLevels(v: GameView | null): void {
 function renderStatus(v: GameView | null): void {
   if (!v) return;
   const s = v.settings;
-  el.turn.textContent = turnText(v);
+  el.turn.textContent = el.railTurn.textContent = turnText(v);
   el.captures.textContent = `● ${v.captures.B}  ○ ${v.captures.W}`;
   el.captures.title = `Black has captured ${v.captures.B}, White has captured ${v.captures.W}`;
   el.botRank.textContent = s && v.mode === "game" ? s.botRank : "–";
@@ -613,6 +631,14 @@ function renderChat(v: GameView | null): void {
   if (nearBottom || chat.at(-1)?.from === "user") log.scrollTop = log.scrollHeight;
 }
 
+/** The count on Show panels of the messages that came in while the panels were hidden. */
+function renderUnread(v: GameView | null): void {
+  const n = panelsHidden && seenChatId !== undefined ? unreadCount(v?.chat ?? [], seenChatId) : 0;
+  el.unread.hidden = n === 0;
+  el.unread.textContent = String(n);
+  el.showPanels.setAttribute("aria-label", n ? `Show the panels: ${plural(n, "new message")}` : "Show the panels");
+}
+
 function chatItem(m: ChatMessage): HTMLLIElement {
   const li = document.createElement("li");
   li.className = m.from;
@@ -760,6 +786,37 @@ for (const card of document.querySelectorAll<HTMLElement>(".card.collapsible")) 
   });
 }
 
+// Hiding the side panel leaves only the board and a rail with the button that brings it back.
+// The panel comes back by itself while something in it needs the learner (a teaching moment,
+// a problem's verdict), without changing their choice: once that's over, it hides again.
+function applyPanels(focusToggle = false): void {
+  const attention = panelAttention(view);
+  const hidden = panelsPreferHidden && (attention === null || attention === dismissedAttention);
+  if (panelsHidden && seenChatId === undefined && view) seenChatId = view.chat.at(-1)?.id ?? null;
+  if (hidden !== panelsHidden) {
+    const hadFocus = (panelsHidden ? el.rail : el.panel).contains(document.activeElement);
+    panelsHidden = hidden;
+    if (hidden) seenChatId = view ? (view.chat.at(-1)?.id ?? null) : undefined;
+    el.app.classList.toggle("focus", hidden);
+    el.panel.hidden = hidden;
+    el.rail.hidden = !hidden;
+    // A hidden log has no size to scroll in, so what came in meanwhile is below the fold.
+    if (!hidden) el.chatLog.scrollTop = el.chatLog.scrollHeight;
+    // The focused control is gone: keep the keyboard focus on the button that replaced it.
+    if (focusToggle || hadFocus) (hidden ? el.showPanels : el.hidePanels).focus();
+  }
+  renderUnread(view);
+}
+function setPanelsHidden(hidden: boolean): void {
+  panelsPreferHidden = hidden;
+  // Hiding over an open moment or problem dismisses it; anything new brings the panel back.
+  if (hidden) dismissedAttention = panelAttention(view);
+  writeCollapsed("panels", hidden);
+  applyPanels(true);
+}
+el.hidePanels.addEventListener("click", () => setPanelsHidden(true));
+el.showPanels.addEventListener("click", () => setPanelsHidden(false));
+
 // Resign needs a second click within a few seconds.
 let resignTimer: ReturnType<typeof setTimeout> | undefined;
 el.resign.addEventListener("click", () => {
@@ -830,6 +887,9 @@ document.addEventListener("keydown", (e) => {
   if (key === "p" && !el.pass.disabled) {
     e.preventDefault();
     void act({ type: "pass" });
+  } else if (key === "f") {
+    e.preventDefault();
+    if (!e.repeat) setPanelsHidden(!panelsHidden);
   } else if (key === "h" && !el.hint.disabled) {
     e.preventDefault();
     void act({ type: "ask_tutor" });
@@ -849,8 +909,8 @@ document.addEventListener("keydown", (e) => {
 });
 
 function onConnection(s: ConnectionState): void {
-  el.conn.hidden = s !== "reconnecting";
-  if (s === "reconnecting" && !view) el.turn.textContent = "Can't reach the server. Retrying…";
+  el.conn.hidden = el.railConn.hidden = s !== "reconnecting";
+  if (s === "reconnecting" && !view) el.turn.textContent = el.railTurn.textContent = "Can't reach the server. Retrying…";
 }
 
 async function start(): Promise<void> {
