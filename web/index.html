@@ -8,7 +8,7 @@
     <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><circle cx='8' cy='8' r='7' fill='%23222'/></svg>" />
   </head>
   <body>
-    <div class="app">
+    <div class="app" id="app">
       <main class="board-area">
         <div class="board-wrap" id="board-wrap">
           <canvas id="board" aria-label="Go board"></canvas>
@@ -20,10 +20,21 @@
         </div>
       </main>
 
-      <aside class="panel">
+      <!-- With the panels hidden, only the board and this rail: the button that brings them back,
+           and the status line, so a locked board still says why. -->
+      <div class="rail" id="rail" hidden>
+        <button type="button" class="panels-toggle" id="show-panels" title="Show the panels (F)" aria-controls="panel" aria-expanded="false">
+          Show panels<span class="unread" id="unread" hidden></span>
+        </button>
+        <span class="conn" id="rail-conn" hidden>reconnecting…</span>
+        <p class="rail-turn" id="rail-turn" aria-live="polite"></p>
+      </div>
+
+      <aside class="panel" id="panel">
         <header class="panel-head">
           <h1>Go Tutor</h1>
           <span class="conn" id="conn" hidden>reconnecting…</span>
+          <button type="button" class="panels-toggle" id="hide-panels" title="Hide the panels and show only the game (F)" aria-controls="panel" aria-expanded="true">Hide panels</button>
         </header>
 
         <section class="card status collapsible" data-card="status" aria-live="polite">

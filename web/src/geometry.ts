@@ -8,8 +8,10 @@ import { categoryLabel, colorName, comeBackText, estimateRankText, plural, pract
 import { sizeText, thresholdMultiplier, thresholdNum, thresholdText } from "../../src/shared/threshold.ts";
 import type {
   Board,
+  ChatMessage,
   Color,
   GameSettings,
+  GameView,
   GenerationBatchStatus,
   GenerationStatus,
   MistakeCategory,
@@ -356,4 +358,26 @@ export function problemResult(p: ProblemView, now = Date.now(), closedUntil?: nu
 /** Exponential reconnect delay: 500ms, 1s, 2s … capped at `max`. */
 export function backoffDelay(attempt: number, base = 500, max = 10_000): number {
   return Math.min(max, base * 2 ** Math.max(0, attempt));
+}
+
+/** Messages from the tutor and the server after `seenId` (the newest message when the panels were hidden, null if there was none): the learner's own don't count. */
+export function unreadCount(chat: readonly ChatMessage[], seenId: string | null): number {
+  // The chat keeps only its newest messages: a seen one it dropped means everything left is newer.
+  const seen = seenId === null ? -1 : chat.findIndex((m) => m.id === seenId);
+  return chat.slice(seen + 1).filter((m) => m.from !== "user").length;
+}
+
+/**
+ * What in the view needs the side panel, or null: an open teaching moment or a problem on the
+ * board. The key changes with what the learner has to act on (a new moment, the tutor done and
+ * waiting for Continue, an attempt's verdict, a play-out that ended), so each change can bring
+ * the panel back even after the learner hid it over the previous one.
+ */
+export function panelAttention(v: Pick<GameView, "moment" | "mode" | "problem" | "status"> | null): string | null {
+  const m = v?.moment;
+  if (v && m && m.state !== "resolved" && v.status !== "finished") return `moment ${m.id} ${m.state} ${!!m.awaitingLearner}`;
+  const p = v?.mode === "problem" ? v.problem : null;
+  if (!p) return null;
+  const playout = p.playout ? (p.playout.over ? "over" : "on") : "";
+  return `problem ${p.id} ${p.attempts} ${p.revealed} ${playout}`;
 }
