@@ -4,6 +4,10 @@ Features to add or change. Newest at the bottom; move an item to "Done" with its
 
 ## To do
 
+- **Toggle the side panels to focus on the game.** Add a button that switches between the usual
+  view, with all the panels on the right, and a view with only the game and the button to bring
+  the panels back.
+
 ## Done
 
 - **Review a game's mistakes as practice.** At the end of a game, add a button option for review
